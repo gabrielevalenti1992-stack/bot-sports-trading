@@ -7,7 +7,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("--> [INIT] Avvio dello script main.py...", flush=True)
 
-# Dizionario per memorizzare l'ultimo stato inviato per ciascuna partita
 match_history = {}
 
 def load_config():
@@ -152,26 +151,13 @@ def run_bot():
                             diff_sot_away = 0
                             diff_corn_home = 0
                             diff_corn_away = 0
+                            is_first_notification = False
                             
                             if fixture_id not in match_history:
                                 send_notification = True
-                                diff_shots_home = home_total_shots
-                                diff_shots_away = away_total_shots
-                                diff_sot_home = home_shots_on_target
-                                diff_sot_away = away_shots_on_target
-                                diff_corn_home = home_corners
-                                diff_corn_away = away_corners
+                                is_first_notification = True
                             else:
                                 last = match_history[fixture_id]
-                                diff_shots_home = home_total_shots - last["home_shots"]
-                                diff_shots_away = away_total_shots - last["away_shots"]
-                                diff_sot_home = home_shots_on_target - last["home_sot"]
-                                diff_sot_away = away_shots_on_target - last["away_sot"]
-                                diff_corn_home = home_corners - last["home_corn"]
-                                diff_corn_away = away_corners - last["home_corn"] if "home_corn" in last else 0 # safety
-                                diff_corn_away = home_corners - last["home_corn"] # wait, let's fix below properly
-                                
-                                # ricalcolo corretto dei delta d'angolo e degli altri
                                 diff_shots_home = home_total_shots - last["home_shots"]
                                 diff_shots_away = away_total_shots - last["away_shots"]
                                 diff_sot_home = home_shots_on_target - last["home_sot"]
@@ -194,9 +180,22 @@ def run_bot():
                                     "away_corn": away_corners
                                 }
                                 
-                                shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots}) `+{diff_shots_home}:+{diff_shots_away}`"
-                                sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target}) `+{diff_sot_home}:+{diff_sot_away}`"
-                                corn_str = f"{corners} ({home_corners}:{away_corners}) `+{diff_corn_home}:+{diff_corn_away}`"
+                                if is_first_notification:
+                                    shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots})"
+                                    sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target})"
+                                    corn_str = f"{corners} ({home_corners}:{away_corners})"
+                                else:
+                                    shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots})"
+                                    if diff_shots_home > 0 or diff_shots_away > 0:
+                                        shots_str += f" `{diff_shots_home}:{diff_shots_away}`"
+                                        
+                                    sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target})"
+                                    if diff_sot_home > 0 or diff_sot_away > 0:
+                                        sot_str += f" `{diff_sot_home}:{diff_sot_away}`"
+                                        
+                                    corn_str = f"{corners} ({home_corners}:{away_corners})"
+                                    if diff_corn_home > 0 or diff_corn_away > 0:
+                                        corn_str += f" `{diff_corn_home}:{diff_corn_away}`"
 
                                 msg = (
                                     f"🎯 *Match Live* (Min: {elapsed}')\n"
