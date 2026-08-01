@@ -1,0 +1,16 @@
+{
+  "telegram": {
+    "bot_token": "INSERISCI_QUI_IL_TUO_TOKEN",
+    "chat_id": "INSERISCI_QUI_IL_TUO_CHAT_ID"
+  },
+  "filters": {
+    "min_minute": 15,
+    "max_minute": 80,
+    "min_shots_on_target": 2,
+    "min_dangerous_attacks": 25,
+    "min_momentum": 50,
+    "min_big_chances": 1,
+    "min_touches_in_box": 10
+  },
+  "check_interval_seconds": 60
+}
