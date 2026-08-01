@@ -53,13 +53,22 @@ def send_telegram_message():
 
 # 3. Esecuzione principale
 if __name__ == "__main__":
-  # Avvia il server HTTP in background
-  server_thread = threading.Thread(target=run_web_server)
-  server_thread.daemon = True
-  server_thread.start()
+    # Avvia il server HTTP in background
+    server_thread = threading.Thread(target=run_web_server)
+    server_thread.daemon = True
+    server_thread.start()
 
-  # Invia la notifica Telegram
-  send_telegram_message()
+    # Invia la notifica Telegram di avvio
+    send_telegram_message()
 
-  # Mantiene lo script in esecuzione
-  server_thread.join()
+    # Ciclo infinito per lo scraping live
+    while True:
+        try:
+            print("--> [DEBUG] Avvio scansione partite live...")
+            # QUI INSERISCI LA CHIAMATA ALLA TUA FUNZIONE DI SCRAPING
+            # es: controlla_partite_live()
+        except Exception as e:
+            print(f"--> [ERRORE SCRAPING]: {e}")
+        
+        # Attesa tra una scansione e l'altra (es. 60 secondi)
+        time.sleep(60)
