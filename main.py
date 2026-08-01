@@ -62,8 +62,19 @@ def run_bot():
         time.sleep(60)
 
 if __name__ == "__main__":
-    print("--> [MAIN] Configurazione dei thread...", flush=True)
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
+    print("--> [MAIN] Avvio applicazione...", flush=True)
     
-    run_bot()
+    # Avvia il bot in un thread separato
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Avvia il server HTTP sul thread principale (richiesto da Render)
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    print(f"--> [SERVER] In ascolto sulla porta {port}", flush=True)
+    
+    try:
+        server.serve_forever()
+    except Exception as e:
+        print(f"--> [SERVER] Errore critico server: {e}", flush=True)
+
