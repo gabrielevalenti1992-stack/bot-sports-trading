@@ -1,6 +1,6 @@
 {
   "telegram": {
-    "bot_token": "8915710413:AAHjxdOzVS-RhFSyouGWLVY8lVob5Pt1QGU",
+    "telegram_bot_token": "8915710413:AAHjxdOzVS-RhFSyouGWLVY8lVob5Pt1QGU",
     "chat_id": "787264232"
   },
   "filters": {
