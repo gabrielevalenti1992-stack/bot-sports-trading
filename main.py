@@ -12,10 +12,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(b"Bot Online!")
 
-    def do_HEAD(self):
+        def do_HEAD(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/html")
         self.end_headers()
+
 
 
 def run_web_server():
