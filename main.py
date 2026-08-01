@@ -7,7 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("--> [INIT] Avvio dello script main.py...", flush=True)
 
-# Dizionario per memorizzare l'ultimo stato inviato per ogni partita: { fixture_id: total_shots }
+# Dizionario per memorizzare l'ultimo totale tiri inviato per ciascuna partita
 match_history = {}
 
 def load_config():
@@ -35,6 +35,18 @@ def send_telegram_message(token, chat_id, text):
             print(f"--> [TELEGRAM] Errore invio: {response.text}", flush=True)
     except Exception as e:
         print(f"--> [TELEGRAM] Eccezione invio: {e}", flush=True)
+
+def parse_int(val):
+    """Converte in sicurezza una stringa (anche con '%' o None) in intero."""
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str):
+        val_clean = val.replace("%", "").strip()
+        if val_clean.isdigit() or (val_clean.startswith('-') and val_clean[1:].isdigit()):
+            return int(val_clean)
+    return 0
 
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -107,22 +119,22 @@ def run_bot():
                                 for stat in statistics:
                                     stype = stat.get("type")
                                     sval = stat.get("value")
-                                    if sval is not None:
-                                        val_int = int(sval)
-                                        if idx == 0:
-                                            if stype == "Total Shots":
-                                                home_total_shots = val_int
-                                            elif stype == "Shots on Goal":
-                                                home_shots_on_target = val_int
-                                            elif stype == "Corner Kicks":
-                                                home_corners = val_int
-                                        elif idx == 1:
-                                            if stype == "Total Shots":
-                                                away_total_shots = val_int
-                                            elif stype == "Shots on Goal":
-                                                away_shots_on_target = val_int
-                                            elif stype == "Corner Kicks":
-                                                away_corners = val_int
+                                    val_int = parse_int(sval)
+                                    
+                                    if idx == 0:
+                                        if stype == "Total Shots":
+                                            home_total_shots = val_int
+                                        elif stype == "Shots on Goal":
+                                            home_shots_on_target = val_int
+                                        elif stype == "Corner Kicks":
+                                            home_corners = val_int
+                                    elif idx == 1:
+                                        if stype == "Total Shots":
+                                            away_total_shots = val_int
+                                        elif stype == "Shots on Goal":
+                                            away_shots_on_target = val_int
+                                        elif stype == "Corner Kicks":
+                                            away_corners = val_int
                         
                         total_shots = home_total_shots + away_total_shots
                         shots_on_target = home_shots_on_target + away_shots_on_target
@@ -135,18 +147,16 @@ def run_bot():
                             send_notification = False
                             
                             if fixture_id not in match_history:
-                                # Prima volta che la partita soddisfa i criteri
                                 send_notification = True
                             else:
                                 last_total_shots = match_history[fixture_id]
                                 shots_diff = total_shots - last_total_shots
                                 
-                                # Invia la notifica solo se c'è un incremento di almeno 2 tiri rispetto all'ultimo invio
+                                # Invia la notifica solo se il totale dei tiri è aumentato di almeno 2 rispetto all'ultimo invio
                                 if shots_diff >= 2:
                                     send_notification = True
                             
                             if send_notification:
-                                # Aggiorna la memoria con il nuovo totale dei tiri registrato
                                 match_history[fixture_id] = total_shots
                                 
                                 msg = (
