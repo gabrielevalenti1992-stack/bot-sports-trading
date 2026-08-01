@@ -1,50 +1,59 @@
-import time
 import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 
-def load_config():
-    with open('config.json', 'r') as f:
-        return json.load(f)
+# 1. Mini Web Server per ingannare Render e tenere aperta la porta
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
-def send_telegram_alert(bot_token, chat_id, message):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Errore invio Telegram: {e}")
+  def do_GET(self):
+    self.send_response(200)
+    self.end_headers()
+    self.wfile.write(b"Bot Online!")
 
-def check_matches():
-    config = load_config()
-    bot_token = config['telegram']['bot_token']
-    chat_id = config['telegram']['chat_id']
-    filters = config['filters']
-    
-    print("Verifica match in corso...")
-    # Qui il sistema interroga le API dei dati in tempo reale
-    # Quando i parametri rispettano i filtri in config.json, viene generato un alert
 
-def main():
-    config = load_config()
-    interval = config.get('check_interval_seconds', 60)
-    
-    # Invia un messaggio di test all'avvio
-    send_telegram_alert(
-        config['telegram']['bot_token'], 
-        config['telegram']['chat_id'], 
-        "🚀 <b>Bot Sports Trading avviato con successo!</b>\nIl sistema è attivo e sta monitorando le partite live."
-    )
-    
-    while True:
-        try:
-            check_matches()
-        except Exception as e:
-            print(f"Errore nel ciclo di monitoraggio: {e}")
-        time.sleep(interval)
+def run_web_server():
+  port = int(os.environ.get("PORT", 8080))
+  server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+  print(f"Web server avviato sulla porta {port}")
+  server.serve_forever()
 
+
+# 2. Funzione per inviare il messaggio Telegram
+def send_telegram_message():
+  with open("config.json", "r") as f:
+    config = json.load(f)
+
+  bot_token = config["telegram_bot_token"]
+  chat_id = config["telegram_chat_id"]
+
+  url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+  payload = {
+      "chat_id": chat_id,
+      "text": (
+          "🚀 *Bot Sports Trading avviato con successo!*\nIl sistema è attivo"
+          " sul piano Free di Render."
+      ),
+      "parse_mode": "Markdown",
+  }
+
+  response = requests.post(url, json=payload)
+  if response.status_code == 200:
+    print("Messaggio Telegram inviato con successo!")
+  else:
+    print(f"Errore invio Telegram: {response.text}")
+
+
+# 3. Esecuzione principale
 if __name__ == "__main__":
-    main()
+  # Avvia il server HTTP in background
+  server_thread = threading.Thread(target=run_web_server)
+  server_thread.daemon = True
+  server_thread.start()
+
+  # Invia la notifica Telegram
+  send_telegram_message()
+
+  # Mantiene lo script in esecuzione
+  server_thread.join()
