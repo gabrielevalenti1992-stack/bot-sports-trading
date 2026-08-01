@@ -2,11 +2,11 @@ import threading
 import time
 import os
 import json
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("--> [INIT] Avvio dello script main.py...", flush=True)
 
-# 1. Server HTTP per Render
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -24,29 +24,40 @@ def run_server():
     print(f"--> [SERVER] HTTP avviato con successo", flush=True)
     server.serve_forever()
 
-# 2. Logica del bot
 def run_bot():
     print("--> [BOT] Entrato nella funzione run_bot", flush=True)
     
-    # Verifica immediata del config.json
-    try:
-        if os.path.exists("config.json"):
-            print("--> [BOT] File config.json trovato.", flush=True)
-            with open("config.json", "r") as f:
-                config = json.load(f)
-            print("--> [BOT] config.json letto correttamente.", flush=True)
-        else:
-            print("--> [BOT] ERRORE: File config.json NON trovato!", flush=True)
-    except Exception as e:
-        print(f"--> [BOT] ERRORE lettura config.json: {e}", flush=True)
-
     while True:
-        print("--> [BOT] Inizio ciclo di scansione...", flush=True)
+        print("--> [BOT] Scansione live SofaScore in corso...", flush=True)
         try:
-            # Inserisci qui la tua chiamata alle API-Football
-            pass
+            # Endpoint JSON pubblico delle partite in corso su SofaScore
+            url = "https://api.sofascore.com/api/v1/sport/football/events/live"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Origin": "https://www.sofascore.com",
+                "Referer": "https://www.sofascore.com/"
+            }
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                events = data.get("events", [])
+                print(f"--> [BOT] Trovate {len(events)} partite live.", flush=True)
+                
+                for event in events:
+                    match_id = event.get("id")
+                    home_team = event.get("homeTeam", {}).get("name")
+                    away_team = event.get("awayTeam", {}).get("name")
+                    print(f"--> [MATCH] {home_team} vs {away_team} (ID: {match_id})", flush=True)
+                    
+                    # Esempio per recuperare le statistiche di dettaglio (es. tiri e angoli) per singolo match ID
+                    # stats_url = f"https://api.sofascore.com/api/v1/event/{match_id}/statistics"
+            else:
+                print(f"--> [BOT] Risposta non valida: {response.status_code}", flush=True)
+                
         except Exception as e:
-            print(f"--> [BOT] Errore critico nel ciclo: {e}", flush=True)
+            print(f"--> [BOT] Errore nel ciclo: {e}", flush=True)
             
         time.sleep(60)
 
