@@ -46,6 +46,31 @@ def parse_int(val):
             return int(val_clean)
     return 0
 
+def is_valid_match(match):
+    """Filtra per escludere femminile, dilettanti e giovanili (U17, U19, U20, ecc.)."""
+    league = match.get("league", {})
+    league_name = league.get("name", "").lower()
+    home_team = match.get("teams", {}).get("home", {}).get("name", "").lower()
+    away_team = match.get("teams", {}).get("away", {}).get("name", "").lower()
+    
+    # Parole chiave da bloccare (femminile, giovanili, dilettanti)
+    forbidden_terms = [
+        "women", "femminile", "womans", "w. ", " (w)", 
+        "u17", "u-17", "under 17", 
+        "u19", "u-19", "under 19", 
+        "u20", "u-20", "under 20", 
+        "u21", "u-21", "under 21", 
+        "youth", "primavera", "reserves", "amateur", "dilettanti"
+    ]
+    
+    combined_text = f"{league_name} | {home_team} | {away_team}"
+    
+    for term in forbidden_terms:
+        if term in combined_text:
+            return False
+            
+    return True
+
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -89,11 +114,14 @@ def run_bot():
             if response.status_code == 200:
                 data = response.json()
                 matches = data.get("response", [])
-                print(f"--> [BOT] Trovate {len(matches)} partite live totali.", flush=True)
+                print(f"--> [BOT] Trovate {len(matches)} partite live totali prima del filtro.", flush=True)
                 
                 current_time = time.time()
                 
                 for match in matches:
+                    if not is_valid_match(match):
+                        continue
+                        
                     fixture_id = match.get("fixture", {}).get("id")
                     elapsed = match.get("fixture", {}).get("status", {}).get("elapsed", 0)
                     home_team = match.get("teams", {}).get("home", {}).get("name")
