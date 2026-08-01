@@ -1,5 +1,5 @@
 {
-  "telegram_token": "8915710413:AAHQlyFEfbtwNpyvDDghNOrpmYV0fNj_nwA",
+  "telegram_bot_token": "8915710413:AAHQlyFEfbtwNpyvDDghNOrpmYV0fNj_nwA",
   "telegram_chat_id": "787264232",
   "min_minute": 1,
   "max_minute": 90,
