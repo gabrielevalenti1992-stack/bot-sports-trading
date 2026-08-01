@@ -7,14 +7,15 @@ import requests
 # 1. Mini Web Server per ingannare Render e tenere aperta la porta
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
-  def do_GET(self):
-    self.send_response(200)
-    self.end_headers()
-    self.wfile.write(b"Bot Online!")
-
-        def do_HEAD(self):
+    def do_GET(self):
         self.send_response(200)
         self.end_headers()
+        self.wfile.write(b"Bot Online!")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
 
 
 
