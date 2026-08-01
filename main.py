@@ -58,3 +58,8 @@ def run_bot():
             print(f"--> [BOT] Errore nel ciclo: {e}", flush=True)
             
         time.sleep(60)
+if __name__ == "__main__":
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    
+    run_bot()
