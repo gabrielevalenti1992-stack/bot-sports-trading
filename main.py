@@ -7,6 +7,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 print("--> [INIT] Avvio dello script main.py...", flush=True)
 
+# Dizionario per memorizzare l'ultimo stato inviato per ogni partita: { fixture_id: total_shots }
+match_history = {}
+
 def load_config():
     if os.path.exists("config.json"):
         try:
@@ -90,39 +93,72 @@ def run_bot():
                         stats_url = f"https://v3.football.api-sports.io/fixtures/statistics?fixture={fixture_id}"
                         stats_resp = requests.get(stats_url, headers=headers, timeout=10)
                         
-                        total_shots = 0
-                        shots_on_target = 0
-                        corners = 0
+                        home_total_shots = 0
+                        away_total_shots = 0
+                        home_shots_on_target = 0
+                        away_shots_on_target = 0
+                        home_corners = 0
+                        away_corners = 0
                         
                         if stats_resp.status_code == 200:
                             stats_data = stats_resp.json().get("response", [])
-                            for team_stats in stats_data:
+                            for idx, team_stats in enumerate(stats_data):
                                 statistics = team_stats.get("statistics", [])
                                 for stat in statistics:
                                     stype = stat.get("type")
                                     sval = stat.get("value")
                                     if sval is not None:
-                                        if stype == "Total Shots":
-                                            total_shots += int(sval)
-                                        elif stype == "Shots on Goal":
-                                            shots_on_target += int(sval)
-                                        elif stype == "Corner Kicks":
-                                            corners += int(sval)
+                                        val_int = int(sval)
+                                        if idx == 0:
+                                            if stype == "Total Shots":
+                                                home_total_shots = val_int
+                                            elif stype == "Shots on Goal":
+                                                home_shots_on_target = val_int
+                                            elif stype == "Corner Kicks":
+                                                home_corners = val_int
+                                        elif idx == 1:
+                                            if stype == "Total Shots":
+                                                away_total_shots = val_int
+                                            elif stype == "Shots on Goal":
+                                                away_shots_on_target = val_int
+                                            elif stype == "Corner Kicks":
+                                                away_corners = val_int
+                        
+                        total_shots = home_total_shots + away_total_shots
+                        shots_on_target = home_shots_on_target + away_shots_on_target
+                        corners = home_corners + away_corners
                         
                         if (total_shots >= min_t_shots and 
                             shots_on_target >= min_s_ot and 
                             corners >= min_corn):
                             
-                            msg = (
-                                f"🎯 *Match Live* (Min: {elapsed}')\n"
-                                f"*{home_team}* vs *{away_team}*\n"
-                                f"Risultato: {score_home} - {score_away}\n"
-                                f"📊 Tiri Totali: {total_shots}\n"
-                                f"🎯 Tiri in Porta: {shots_on_target}\n"
-                                f"🚩 Calci d'angolo: {corners}"
-                            )
-                            print(f"--> [NOTIFICA] Invio per {home_team} vs {away_team}", flush=True)
-                            send_telegram_message(token, chat_id, msg)
+                            send_notification = False
+                            
+                            if fixture_id not in match_history:
+                                # Prima volta che la partita soddisfa i criteri
+                                send_notification = True
+                            else:
+                                last_total_shots = match_history[fixture_id]
+                                shots_diff = total_shots - last_total_shots
+                                
+                                # Invia la notifica solo se c'è un incremento di almeno 2 tiri rispetto all'ultimo invio
+                                if shots_diff >= 2:
+                                    send_notification = True
+                            
+                            if send_notification:
+                                # Aggiorna la memoria con il nuovo totale dei tiri registrato
+                                match_history[fixture_id] = total_shots
+                                
+                                msg = (
+                                    f"🎯 *Match Live* (Min: {elapsed}')\n"
+                                    f"*{home_team}* vs *{away_team}*\n"
+                                    f"Risultato: {score_home} - {score_away}\n"
+                                    f"📊 Tiri Totali: {total_shots} ({home_total_shots}:{away_total_shots})\n"
+                                    f"🎯 Tiri in Porta: {shots_on_target} ({home_shots_on_target}:{away_shots_on_target})\n"
+                                    f"🚩 Calci d'angolo: {corners} ({home_corners}:{away_corners})"
+                                )
+                                print(f"--> [NOTIFICA] Invio per {home_team} vs {away_team} (Tiri: {total_shots})", flush=True)
+                                send_telegram_message(token, chat_id, msg)
             else:
                 print(f"--> [BOT] Risposta non valida: {response.status_code}", flush=True)
                 
