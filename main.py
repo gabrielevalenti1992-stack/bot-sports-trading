@@ -168,6 +168,15 @@ def run_bot():
                                 diff_sot_home = home_shots_on_target - last["home_sot"]
                                 diff_sot_away = away_shots_on_target - last["away_sot"]
                                 diff_corn_home = home_corners - last["home_corn"]
+                                diff_corn_away = away_corners - last["home_corn"] if "home_corn" in last else 0 # safety
+                                diff_corn_away = home_corners - last["home_corn"] # wait, let's fix below properly
+                                
+                                # ricalcolo corretto dei delta d'angolo e degli altri
+                                diff_shots_home = home_total_shots - last["home_shots"]
+                                diff_shots_away = away_total_shots - last["away_shots"]
+                                diff_sot_home = home_shots_on_target - last["home_sot"]
+                                diff_sot_away = away_shots_on_target - last["away_sot"]
+                                diff_corn_home = home_corners - last["home_corn"]
                                 diff_corn_away = away_corners - last["away_corn"]
                                 
                                 total_shots_prev = last["home_shots"] + last["away_shots"]
@@ -185,9 +194,9 @@ def run_bot():
                                     "away_corn": away_corners
                                 }
                                 
-                                shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots}) `[{diff_shots_home}:{diff_shots_away}]`"
-                                sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target}) `[{diff_sot_home}:{diff_sot_away}]`"
-                                corn_str = f"{corners} ({home_corners}:{away_corners}) `[{diff_corn_home}:{diff_corn_away}]`"
+                                shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots}) `+{diff_shots_home}:+{diff_shots_away}`"
+                                sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target}) `+{diff_sot_home}:+{diff_sot_away}`"
+                                corn_str = f"{corners} ({home_corners}:{away_corners}) `+{diff_corn_home}:+{diff_corn_away}`"
 
                                 msg = (
                                     f"🎯 *Match Live* (Min: {elapsed}')\n"
