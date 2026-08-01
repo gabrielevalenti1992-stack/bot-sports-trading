@@ -1,15 +1,9 @@
 {
-
-  "telegram_bot_token": "8915710413:AAHQIyFEfbtwNpyvDDghNOrpmYV0fNj_nwA",
+  "telegram_token": "8915710413:AAHQlyFEfbtwNpyvDDghNOrpmYV0fNj_nwA",
   "telegram_chat_id": "787264232",
-  "filters": {
-    "min_minute": 15,
-    "max_minute": 80,
-    "min_shots_on_target": 2,
-    "min_dangerous_attacks": 25,
-    "min_momentum": 50,
-    "min_big_chances": 1,
-    "min_touches_in_box": 10
-  },
-  "check_interval_seconds": 60
+  "min_minute": 1,
+  "max_minute": 90,
+  "min_shots_on_target": 1,
+  "min_total_shots": 1,
+  "min_corners": 0
 }
