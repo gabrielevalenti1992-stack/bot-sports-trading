@@ -4,14 +4,29 @@ import requests
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Legge le configurazioni dal file config.json
+# --- SERVER HTTP PER RENDER FREE ---
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_server():
+    server = HTTPServer(('0.0.0.0', 10000), SimpleHandler)
+    server.serve_forever()
+
+server_thread = threading.Thread(target=run_server, daemon=True)
+server_thread.start()
+
+# --- LETTURA CONFIGURAZIONE ---
 with open('config.json', 'r') as f:
     config = json.load(f)
 
 TELEGRAM_BOT_TOKEN = config.get("telegram_bot_token")
 TELEGRAM_CHAT_ID = config.get("telegram_chat_id")
-API_FOOTBALL_KEY = config.get("api_football_key")
 FOTMOB_MATCH_ID = config.get("fotmob_match_id")
 
 def invia_notifica_telegram(foto_path, messaggio):
@@ -32,23 +47,19 @@ def genera_grafico_momentum_fotmob(match_id):
     }
     
     response = requests.get(url, headers=headers)
-    print(f"Risposta FotMob API: {response.status_code}")
     if response.status_code != 200:
         return False
     
     data = response.json()
     try:
         momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
-    except Exception as e:
-        print(f"Errore nel parsing del JSON di FotMob: {e}")
+    except Exception:
         momentum_data = []
     
-    # Se FotMob non restituisce dati di momentum (es. partita finita o non iniziata), 
-    # generiamo comunque un grafico di fallback per testare l'invio della foto su Telegram
+    # Se non ci sono dati live, usiamo dati di test visibili per confermare l'invio del grafico
     if not momentum_data:
-        print("Nessun dato di momentum trovato per questo match_id, genero un grafico di fallback.")
         minuti = [0, 15, 30, 45, 60, 75, 90]
-        valori_onda = [0, 2, -1, 3, 0, -2, 1]
+        valori_onda = [0, 3, -2, 4, 1, -3, 2]
     else:
         minuti = [item.get("minute") for item in momentum_data]
         valori_onda = [item.get("value", 0) for item in momentum_data]
@@ -72,14 +83,11 @@ def genera_grafico_momentum_fotmob(match_id):
 
 # --- CICLO PRINCIPALE ---
 if __name__ == "__main__":
-    notifica_inviata = False
-    
     while True:
         if FOTMOB_MATCH_ID:
             successo = genera_grafico_momentum_fotmob(FOTMOB_MATCH_ID)
-            
-            if successo and not notifica_inviata:
+            if successo:
                 invia_notifica_telegram('momentum_reale.png', "📊 Grafico pressione live (FotMob)")
-                notifica_inviata = True
                 
-        time.sleep(60)
+        # Attende 3 minuti prima del prossimo controllo/invio del grafico aggiornato
+        time.sleep(180)
