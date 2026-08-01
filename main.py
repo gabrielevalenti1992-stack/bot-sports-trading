@@ -30,13 +30,14 @@ def run_bot():
     while True:
         print("--> [BOT] Scansione live SofaScore in corso...", flush=True)
         try:
-            # Endpoint JSON pubblico delle partite in corso su SofaScore
             url = "https://api.sofascore.com/api/v1/sport/football/events/live"
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Origin": "https://www.sofascore.com",
-                "Referer": "https://www.sofascore.com/"
+                "Referer": "https://www.sofascore.com/",
+                "Cache-Control": "no-cache",
             }
             
             response = requests.get(url, headers=headers, timeout=10)
@@ -50,9 +51,6 @@ def run_bot():
                     home_team = event.get("homeTeam", {}).get("name")
                     away_team = event.get("awayTeam", {}).get("name")
                     print(f"--> [MATCH] {home_team} vs {away_team} (ID: {match_id})", flush=True)
-                    
-                    # Esempio per recuperare le statistiche di dettaglio (es. tiri e angoli) per singolo match ID
-                    # stats_url = f"https://api.sofascore.com/api/v1/event/{match_id}/statistics"
             else:
                 print(f"--> [BOT] Risposta non valida: {response.status_code}", flush=True)
                 
@@ -60,21 +58,3 @@ def run_bot():
             print(f"--> [BOT] Errore nel ciclo: {e}", flush=True)
             
         time.sleep(60)
-
-if __name__ == "__main__":
-    print("--> [MAIN] Avvio applicazione...", flush=True)
-    
-    # Avvia il bot in un thread separato
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    # Avvia il server HTTP sul thread principale (richiesto da Render)
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    print(f"--> [SERVER] In ascolto sulla porta {port}", flush=True)
-    
-    try:
-        server.serve_forever()
-    except Exception as e:
-        print(f"--> [SERVER] Errore critico server: {e}", flush=True)
-
