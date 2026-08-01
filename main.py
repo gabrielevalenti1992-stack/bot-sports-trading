@@ -100,7 +100,7 @@ def run_bot():
                     home_team = match.get("teams", {}).get("home", {}).get("name")
                     away_team = match.get("teams", {}).get("away", {}).get("name")
                     score_home = match.get("goals", {}).get("home", 0)
-                    score_away = match.get("goals", {}).get("goals", {}).get("away", 0) if "away" in match.get("goals", {}) else match.get("goals", {}).get("away", 0)
+                    score_away = match.get("goals", {}).get("away", 0)
                     
                     if elapsed is not None and min_min <= elapsed <= max_min:
                         stats_url = f"https://v3.football.api-sports.io/fixtures/statistics?fixture={fixture_id}"
@@ -170,11 +170,8 @@ def run_bot():
                                 diff_corn_home = home_corners - last["home_corn"]
                                 diff_corn_away = away_corners - last["away_corn"]
                                 
-                                total_diff = (diff_shots_home + diff_shots_away + 
-                                              diff_sot_home + diff_sot_away + 
-                                              diff_corn_home + diff_corn_away)
-                                
-                                if total_diff > 0:
+                                total_shots_prev = last["home_shots"] + last["away_shots"]
+                                if total_shots > total_shots_prev:
                                     send_notification = True
                             
                             if send_notification:
@@ -188,24 +185,9 @@ def run_bot():
                                     "away_corn": away_corners
                                 }
                                 
-                                # Formattazione visiva dei delta: se sbilanciato usa emoji/evidenza, se pari resta standard
-                                shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots})"
-                                if diff_shots_home != diff_shots_away:
-                                    shots_str += f" 🔴 `[{diff_shots_home}:{diff_shots_away}]`"
-                                else:
-                                    shots_str += f" `[{diff_shots_home}:{diff_shots_away}]`"
-                                    
-                                sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target})"
-                                if diff_sot_home != diff_sot_away:
-                                    sot_str += f" 🔴 `[{diff_sot_home}:{diff_sot_away}]`"
-                                else:
-                                    sot_str += f" `[{diff_sot_home}:{diff_sot_away}]`"
-                                    
-                                corn_str = f"{corners} ({home_corners}:{away_corners})"
-                                if diff_corn_home != diff_corn_away:
-                                    corn_str += f" 🔴 `[{diff_corn_home}:{diff_corn_away}]`"
-                                else:
-                                    corn_str += f" `[{diff_corn_home}:{diff_corn_away}]`"
+                                shots_str = f"{total_shots} ({home_total_shots}:{away_total_shots}) `[{diff_shots_home}:{diff_shots_away}]`"
+                                sot_str = f"{shots_on_target} ({home_shots_on_target}:{away_shots_on_target}) `[{diff_sot_home}:{diff_sot_away}]`"
+                                corn_str = f"{corners} ({home_corners}:{away_corners}) `[{diff_corn_home}:{diff_corn_away}]`"
 
                                 msg = (
                                     f"🎯 *Match Live* (Min: {elapsed}')\n"
