@@ -28,36 +28,32 @@ def run_bot():
     print("--> [BOT] Entrato nella funzione run_bot", flush=True)
     
     while True:
-        print("--> [BOT] Scansione live SofaScore in corso...", flush=True)
+        print("--> [BOT] Scansione live API-Football in corso...", flush=True)
         try:
-            url = "https://api.sofascore.com/api/v1/sport/football/events/live"
+            url = "https://v3.football.api-sports.io/fixtures?live=all"
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Origin": "https://www.sofascore.com",
-                "Referer": "https://www.sofascore.com/",
-                "Cache-Control": "no-cache",
+                "x-apisports-key": "38b8c27078bfa2fc88afdaf5dbcb9079"
             }
             
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                events = data.get("events", [])
-                print(f"--> [BOT] Trovate {len(events)} partite live.", flush=True)
+                matches = data.get("response", [])
+                print(f"--> [BOT] Trovate {len(matches)} partite live.", flush=True)
                 
-                for event in events:
-                    match_id = event.get("id")
-                    home_team = event.get("homeTeam", {}).get("name")
-                    away_team = event.get("awayTeam", {}).get("name")
-                    print(f"--> [MATCH] {home_team} vs {away_team} (ID: {match_id})", flush=True)
+                for match in matches:
+                    fixture_id = match.get("fixture", {}).get("id")
+                    home_team = match.get("teams", {}).get("home", {}).get("name")
+                    away_team = match.get("teams", {}).get("away", {}).get("name")
+                    print(f"--> [MATCH] {home_team} vs {away_team} (ID: {fixture_id})", flush=True)
             else:
-                print(f"--> [BOT] Risposta non valida: {response.status_code}", flush=True)
+                print(f"--> [BOT] Risposta non valida: {response.status_code} - {response.text}", flush=True)
                 
         except Exception as e:
             print(f"--> [BOT] Errore nel ciclo: {e}", flush=True)
             
         time.sleep(60)
+
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
