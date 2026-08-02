@@ -49,40 +49,34 @@ def genera_grafico_momentum_fotmob(match_id):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    home_name = "Squadra Casa"
-    away_name = "Squadra Ospite"
-    status_str = "LIVE"
-    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         print(f"Risposta FotMob API: {response.status_code}")
-        if response.status_code == 200:
-            data = response.json()
+        if response.status_code != 200:
+            return None, None
             
-            # Estrae i nomi delle squadre
-            general = data.get("general", {})
-            home_name = general.get("homeTeam", {}).get("name", "Casa")
-            away_name = general.get("awayTeam", {}).get("name", "Ospite")
-            
-            # Estrae lo stato/minuto
-            status = general.get("status", {})
-            status_str = status.get("reason", {}).get("short", "LIVE")
-            
-            # Estrae i dati del momentum
-            momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
-        else:
-            momentum_data = []
+        data = response.json()
+        
+        general = data.get("general", {})
+        home_name = general.get("homeTeam", {}).get("name", "Casa")
+        away_name = general.get("awayTeam", {}).get("name", "Ospite")
+        
+        status = general.get("status", {})
+        status_str = status.get("reason", {}).get("short", "LIVE")
+        
+        momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
+        
     except Exception as e:
         print(f"Errore di connessione a FotMob: {e}")
-        momentum_data = []
+        return None, None
     
+    # Niente dati reali? Usciamo subito senza generare nulla.
     if not momentum_data:
-        print("Nessun dato di momentum live, genero il grafico di test.")
-        minuti = [0, 15, 30, 45, 60, 75, 90]
-        valori_onda = [0, 3, -2, 4, 1, -3, 2]
-    else:
-        minuti = [item.get("minute") for item in momentum_data]
-        valori_onda = [item.get("value", 0) for item in momentum_data]
+        print("Nessun dato di momentum reale disponibile per questa partita.")
+        return None, None
+
+    minuti = [item.get("minute") for item in momentum_data]
+    valori_onda = [item.get("value", 0) for item in momentum_data]
 
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -116,13 +110,13 @@ def genera_grafico_momentum_fotmob(match_id):
 if __name__ == "__main__":
     while True:
         if fotmob_match_id:
-            print("Tentativo di generazione grafico...")
+            print("Controllo dati partita su FotMob...")
             foto, testo = genera_grafico_momentum_fotmob(fotmob_match_id)
             if foto and testo:
-                print("Grafico generato, invio a Telegram in corso...")
+                print("Dati reali trovati, invio grafico e didascalia a Telegram...")
                 invia_notifica_telegram(foto, testo)
             else:
-                print("Generazione grafico fallita.")
+                print("Nessun grafico inviato (partita non in corso o dati non disponibili).")
         else:
             print("Attenzione: fotmob_match_id non è configurato nel file JSON.")
                 
