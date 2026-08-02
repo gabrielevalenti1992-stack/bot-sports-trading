@@ -72,19 +72,22 @@ stato_partite = {}
 ciclo_numero = 0
 
 # =============================================================================
-# STATO SILENZIATI (persistenza su file)
+# STATO SILENZIATI (dict con score al momento del silenzio)
 # =============================================================================
 SILENCED_FILE = "silenced_matches.json"
 
 def load_silenced():
     if os.path.exists(SILENCED_FILE):
         with open(SILENCED_FILE, 'r') as f:
-            return set(json.load(f))
-    return set()
+            data = json.load(f)
+            if isinstance(data, list):
+                return {str(fid): {"score_home": 0, "score_away": 0} for fid in data}
+            return data
+    return {}
 
 def save_silenced(silenced):
     with open(SILENCED_FILE, 'w') as f:
-        json.dump(list(silenced), f)
+        json.dump(silenced, f)
 
 SILENCED_MATCHES = load_silenced()
 
@@ -104,8 +107,16 @@ def poll_callbacks():
                 if cq:
                     data = cq.get("data", "")
                     if data.startswith("mute:"):
-                        fid = int(data.split(":")[1])
-                        SILENCED_MATCHES.add(fid)
+                        fid = str(int(data.split(":")[1]))
+                        stato = stato_partite.get(int(fid), {})
+                        score_h = stato.get("score_home", 0)
+                        score_a = stato.get("score_away", 0)
+                        minuto = stato.get("last_minute", 0)
+                        SILENCED_MATCHES[fid] = {
+                            "score_home": score_h,
+                            "score_away": score_a,
+                            "muted_at_minute": minuto
+                        }
                         save_silenced(SILENCED_MATCHES)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
@@ -234,7 +245,8 @@ def extract_goals(events):
         if ev.get("type") == "Goal":
             goals.append({
                 "minute": ev["time"]["elapsed"],
-                "player": (ev.get("player") or {}).get("name") or "Sconosciuto"
+                "player": (ev.get("player") or {}).get("name") or "Sconosciuto",
+                "team": ev["team"]["name"]
             })
     goals.sort(key=lambda g: g["minute"])
     return goals
@@ -254,7 +266,7 @@ def estrai_valore_stat(stats_team, nome_stat):
 
 
 # =============================================================================
-# NUOVO GRAFICO: BARRE ORIZZONTALI COMPARATIVE
+# GRAFICO A BARRE ORIZZONTALI
 # =============================================================================
 def genera_grafico_barre(fixture_id, home_name, away_name, stats):
     try:
@@ -320,16 +332,39 @@ def genera_grafico_barre(fixture_id, home_name, away_name, stats):
 
 
 # =============================================================================
-# TASTIERA INLINE: BOTTONE SILENZIA
+# TASTIERA INLINE
 # =============================================================================
 def get_notification_keyboard(fixture_id):
-    if fixture_id in SILENCED_MATCHES:
+    if str(fixture_id) in SILENCED_MATCHES:
         return None
     return {
         "inline_keyboard": [[
             {"text": "🔕 Silenzia questa partita", "callback_data": f"mute:{fixture_id}"}
         ]]
     }
+
+
+# =============================================================================
+# DELTA 15 MINUTI
+# =============================================================================
+def calcola_delta_15min(fixture_id, current_stats):
+    stato = stato_partite.get(fixture_id, {})
+    history = stato.get("history", [])
+    now = time.time()
+
+    history_15m = [h for h in history if now - h["timestamp"] <= 900]
+
+    if not history_15m or len(history_15m) < 2:
+        return current_stats, False
+
+    old = history_15m[0]
+    delta = {}
+    for key in current_stats:
+        curr_h, curr_a = current_stats[key]
+        old_h, old_a = old["stats"].get(key, (0, 0))
+        delta[key] = (max(0, curr_h - old_h), max(0, curr_a - old_a))
+
+    return delta, True
 
 
 # =============================================================================
@@ -380,56 +415,110 @@ def processa_partita(fixture):
 
         log(f"  {home} vs {away} - {minuto}' ({league_name})")
 
+        # Salva sempre score e minuto per il callback silenzia
+        if fixture_id not in stato_partite:
+            stato_partite[fixture_id] = {}
+        stato_partite[fixture_id].update({
+            "score_home": score_home,
+            "score_away": score_away,
+            "last_minute": minuto,
+            "home": home,
+            "away": away,
+            "league": league_name,
+        })
+
+        # Recupera eventi e gol
         events = fetch_fixture_events(fixture_id)
         goals = extract_goals(events)
+
+        # --- RECUPERA STATISTICHE (sempre, per aggiornare history) ---
+        stats = get_statistiche_partita(fixture_id)
+        if stats and len(stats) >= 2:
+            stats_home = stats[0].get("statistics", [])
+            stats_away = stats[1].get("statistics", [])
+            tiri_casa = estrai_valore_stat(stats_home, "Total Shots")
+            tiri_ospite = estrai_valore_stat(stats_away, "Total Shots")
+            tiri_p_casa = estrai_valore_stat(stats_home, "Shots on Goal")
+            tiri_p_ospite = estrai_valore_stat(stats_away, "Shots on Goal")
+            corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
+            corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
+
+            current_stats = {
+                "Tiri totali": (tiri_casa, tiri_ospite),
+                "Tiri in porta": (tiri_p_casa, tiri_p_ospite),
+                "Corner": (corner_casa, corner_ospite),
+            }
+
+            # Aggiorna history per delta 15 min
+            history = stato_partite[fixture_id].get("history", [])
+            history.append({"timestamp": time.time(), "stats": current_stats})
+            history = [h for h in history if time.time() - h["timestamp"] <= 1200]
+            stato_partite[fixture_id]["history"] = history
+        else:
+            current_stats = None
+            tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
 
         # --- NOTIFICA FINALE (sempre, anche se silenziata) ---
         if status_short in ("FT", "AET", "PEN"):
             stato = stato_partite.get(fixture_id, {})
             if not stato.get("notified_final"):
-                stats = get_statistiche_partita(fixture_id)
-                if stats and len(stats) >= 2:
-                    stats_home = stats[0].get("statistics", [])
-                    stats_away = stats[1].get("statistics", [])
-                    tiri_casa = estrai_valore_stat(stats_home, "Total Shots")
-                    tiri_ospite = estrai_valore_stat(stats_away, "Total Shots")
-                    tiri_p_casa = estrai_valore_stat(stats_home, "Shots on Goal")
-                    tiri_p_ospite = estrai_valore_stat(stats_away, "Shots on Goal")
-                    corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
-                    corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
+                muted_data = SILENCED_MATCHES.get(str(fixture_id))
 
-                    stats_dict = {
-                        "Tiri totali": (tiri_casa, tiri_ospite),
-                        "Tiri in porta": (tiri_p_casa, tiri_p_ospite),
-                        "Corner": (corner_casa, corner_ospite),
-                    }
-                    foto_path = genera_grafico_barre(fixture_id, home, away, stats_dict)
-                else:
+                if muted_data:
+                    # === PARTITA SILENZIATA: notifica minimal ===
+                    diff_h = score_home - muted_data.get("score_home", 0)
+                    diff_a = score_away - muted_data.get("score_away", 0)
+                    muted_minute = muted_data.get("muted_at_minute", 0)
+
+                    after_text = ""
+                    if diff_h > 0:
+                        after_text += f" +{diff_h}🏠"
+                    if diff_a > 0:
+                        after_text += f" +{diff_a}✈️"
+
+                    goals_after = [g for g in goals if g["minute"] > muted_minute]
+                    minutes_text = ""
+                    for g in goals_after:
+                        team_emoji = "🏠" if g["team"] == home else "✈️"
+                        minutes_text += f" {g['minute']}'{team_emoji}"
+                    if not minutes_text:
+                        minutes_text = " Nessun gol dopo il silenzio"
+
+                    messaggio = (
+                        f"🏁 *{home}* vs *{away}*\n"
+                        f"🏆 {league_name}\n"
+                        f"🏁 Risultato finale: {score_home} - {score_away}{after_text}\n"
+                        f"🔕 Silenziato al {muted_minute}'\n"
+                        f"⏱️ Gol dopo:{minutes_text}"
+                    )
                     foto_path = None
-                    tiri_casa = tiri_p_casa = corner_casa = 0
-                    tiri_ospite = tiri_p_ospite = corner_ospite = 0
+                else:
+                    # === PARTITA NON SILENZIATA: notifica completa ===
+                    if current_stats:
+                        foto_path = genera_grafico_barre(fixture_id, home, away, current_stats)
+                    else:
+                        foto_path = None
 
-                goals_text = ""
-                if goals:
-                    goals_text += f"\n🥇 Primo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
-                    if len(goals) > 1:
-                        goals_text += f"⚡ Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
+                    goals_text = ""
+                    if goals:
+                        goals_text += f"\n🥇 Primo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
+                        if len(goals) > 1:
+                            goals_text += f"⚡ Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
 
-                messaggio = (
-                    f"🏁 *{home}* vs *{away}*\n"
-                    f"🏆 {league_name}\n"
-                    f"🏁 *RISULTATO FINALE*\n\n"
-                    f"🔢 {score_home} - {score_away}\n"
-                    f"{goals_text}\n"
-                    f"📊 Statistiche finali:\n"
-                    f"• Tiri totali: {tiri_casa if stats else '?'} - {tiri_ospite if stats else '?'}\n"
-                    f"• Tiri in porta: {tiri_p_casa if stats else '?'} - {tiri_p_ospite if stats else '?'}\n"
-                    f"• Corner: {corner_casa if stats else '?'} - {corner_ospite if stats else '?'}"
-                )
+                    messaggio = (
+                        f"🏁 *{home}* vs *{away}*\n"
+                        f"🏆 {league_name}\n"
+                        f"🏁 *RISULTATO FINALE*\n\n"
+                        f"🔢 {score_home} - {score_away}\n"
+                        f"{goals_text}\n"
+                        f"📊 Statistiche finali:\n"
+                        f"• Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\\n"
+                        f"• Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\\n"
+                        f"• Corner: {corner_casa if current_stats else '?'} - {corner_ospite if current_stats else '?'}")
 
                 invia_notifica_telegram(foto_path, messaggio)
 
-                SILENCED_MATCHES.discard(fixture_id)
+                SILENCED_MATCHES.pop(str(fixture_id), None)
                 save_silenced(SILENCED_MATCHES)
                 if foto_path and os.path.exists(foto_path):
                     try:
@@ -449,40 +538,42 @@ def processa_partita(fixture):
             return
 
         # --- SALTA SE SILENZIATA ---
-        if fixture_id in SILENCED_MATCHES:
+        if str(fixture_id) in SILENCED_MATCHES:
+            muted_data = SILENCED_MATCHES[str(fixture_id)]
+            if "muted_at_minute" not in muted_data:
+                muted_data["muted_at_minute"] = minuto
+                save_silenced(SILENCED_MATCHES)
             log(f"  -> Silenziata, skip")
             return
 
-        # --- STATISTICHE LIVE ---
-        stats = get_statistiche_partita(fixture_id)
-        if not stats or len(stats) < 2:
-            log(f"  -> Stats non disponibili")
-            return
-
-        stats_home = stats[0].get("statistics", [])
-        stats_away = stats[1].get("statistics", [])
-
-        tiri_casa = estrai_valore_stat(stats_home, "Total Shots")
-        tiri_ospite = estrai_valore_stat(stats_away, "Total Shots")
-        tiri_p_casa = estrai_valore_stat(stats_home, "Shots on Goal")
-        tiri_p_ospite = estrai_valore_stat(stats_away, "Shots on Goal")
-        corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
-        corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
+        # --- STATISTICHE LIVE: usa delta 15 min ---
+        if current_stats:
+            delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats)
+            stats_dict = delta_stats
+            header_stats = "🔥 Statistiche ultimi 15 min" if is_real_delta else "📊 Statistiche (dall'inizio)"
+        else:
+            stats_dict = {"Tiri totali": (0, 0), "Tiri in porta": (0, 0), "Corner": (0, 0)}
+            header_stats = "📊 Statistiche"
 
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
+        log(f"  Delta 15min: {stats_dict}")
 
+        # Le REGOLE si basano sui TOTALI (non sul delta)
         if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
+            prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
+            stato_partite[fixture_id].update({
+                "tiri_casa": tiri_casa,
+                "tiri_ospite": tiri_ospite,
+                "timestamp_notifica": stato_partite[fixture_id].get("timestamp_notifica", 0),
+                "notified_final": prev_notified,
+            })
             log(f"  -> Skip")
             return
 
-        stats_dict = {
-            "Tiri totali": (tiri_casa, tiri_ospite),
-            "Tiri in porta": (tiri_p_casa, tiri_p_ospite),
-            "Corner": (corner_casa, corner_ospite),
-        }
+        # --- GENERA GRAFICO E INVIA NOTIFICA LIVE ---
         foto_path = genera_grafico_barre(fixture_id, home, away, stats_dict)
 
-        diff = tiri_casa - tiri_ospite
+        diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         freccia = "🏠" if diff > 0 else "✈️" if diff < 0 else "⚖️"
 
         goals_text = ""
@@ -497,10 +588,10 @@ def processa_partita(fixture):
             f"⏱️ Minuto: `{minuto}'` | Stato: `{status_short}`\n\n"
             f"🔢 *Risultato:* {score_home} - {score_away}\n"
             f"{goals_text}\n"
-            f"📊 *Statistiche:*\n"
-            f"• Tiri totali: {tiri_casa} - {tiri_ospite} {freccia}\n"
-            f"• Tiri in porta: {tiri_p_casa} - {tiri_p_ospite}\n"
-            f"• Corner: {corner_casa} - {corner_ospite}\n\n"
+            f"{header_stats}:\n"
+            f"• Tiri totali: {stats_dict['Tiri totali'][0]} - {stats_dict['Tiri totali'][1]} {freccia}\n"
+            f"• Tiri in porta: {stats_dict['Tiri in porta'][0]} - {stats_dict['Tiri in porta'][1]}\n"
+            f"• Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n\n"
             f"🟢 Verde = {home}\n"
             f"🔴 Rosso = {away}"
         )
@@ -509,15 +600,12 @@ def processa_partita(fixture):
         invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard)
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
-        stato_partite[fixture_id] = {
+        stato_partite[fixture_id].update({
             "tiri_casa": tiri_casa,
             "tiri_ospite": tiri_ospite,
             "timestamp_notifica": time.time(),
-            "home": home,
-            "away": away,
-            "league": league_name,
             "notified_final": prev_notified,
-        }
+        })
 
         if foto_path and os.path.exists(foto_path):
             try:
@@ -537,7 +625,7 @@ def pulisci_partite_terminate(fixture_ids_live):
             home = stato.get("home", "Squadra A")
             away = stato.get("away", "Squadra B")
             invia_messaggio_telegram(f"🏁 *{home}* vs *{away}*\nRisultato finale: partita terminata.")
-        SILENCED_MATCHES.discard(fid)
+        SILENCED_MATCHES.pop(str(fid), None)
         del stato_partite[fid]
     if ids_da_rimuovere:
         save_silenced(SILENCED_MATCHES)
