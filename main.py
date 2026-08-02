@@ -39,7 +39,7 @@ def invia_notifica_telegram(foto_path, messaggio):
         return
     with open(foto_path, 'rb') as photo:
         files = {'photo': photo}
-        data = {'chat_id': telegram_chat_id, 'caption': messaggio}
+        data = {'chat_id': telegram_chat_id, 'caption': messaggio, 'parse_mode': 'Markdown'}
         response = requests.post(url, data=data, files=files)
         print(f"Risposta Telegram sendPhoto: {response.status_code} - {response.text}")
 
@@ -49,14 +49,29 @@ def genera_grafico_momentum_fotmob(match_id):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
+    home_name = "Squadra Casa"
+    away_name = "Squadra Ospite"
+    status_str = "LIVE"
+    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         print(f"Risposta FotMob API: {response.status_code}")
-        if response.status_code != 200:
-            momentum_data = []
-        else:
+        if response.status_code == 200:
             data = response.json()
+            
+            # Estrae i nomi delle squadre
+            general = data.get("general", {})
+            home_name = general.get("homeTeam", {}).get("name", "Casa")
+            away_name = general.get("awayTeam", {}).get("name", "Ospite")
+            
+            # Estrae lo stato/minuto
+            status = general.get("status", {})
+            status_str = status.get("reason", {}).get("short", "LIVE")
+            
+            # Estrae i dati del momentum
             momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
+        else:
+            momentum_data = []
     except Exception as e:
         print(f"Errore di connessione a FotMob: {e}")
         momentum_data = []
@@ -86,18 +101,26 @@ def genera_grafico_momentum_fotmob(match_id):
     plt.savefig(foto_path, dpi=300, bbox_inches='tight', transparent=True)
     plt.close(fig)
     plt.close('all')
-    return True
+    
+    messaggio = (
+        f"📊 **Momentum Match Live**\n\n"
+        f"⚽ **{home_name} vs {away_name}**\n"
+        f"⏱️ Stato: `{status_str}`\n\n"
+        f"🟢 **Verde**: Pressione {home_name} (Casa)\n"
+        f"🔴 **Rosso**: Pressione {away_name} (Ospite)"
+    )
+    
+    return foto_path, messaggio
 
 # --- CICLO PRINCIPALE ---
 if __name__ == "__main__":
     while True:
         if fotmob_match_id:
             print("Tentativo di generazione grafico...")
-            successo = genera_grafico_momentum_fotmob(fotmob_match_id)
-            if successo:
+            foto, testo = genera_grafico_momentum_fotmob(fotmob_match_id)
+            if foto and testo:
                 print("Grafico generato, invio a Telegram in corso...")
-                foto_path = os.path.join(os.path.dirname(__file__), 'momentum_reale.png')
-                invia_notifica_telegram(foto_path, "📊 Grafico pressione live (FotMob)")
+                invia_notifica_telegram(foto, testo)
             else:
                 print("Generazione grafico fallita.")
         else:
