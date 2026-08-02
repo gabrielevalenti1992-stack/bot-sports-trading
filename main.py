@@ -1,355 +1,410 @@
+import os
 import json
 import time
+import threading
 import requests
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import numpy as np
-import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import matplotlib.patches as mpatches
+from io import BytesIO
 
-# --- SERVER HTTP PER RENDER FREE ---
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
+from flask import Flask
 
-    def log_message(self, format, *args):
-        pass
-
-def run_server():
-    server = HTTPServer(('0.0.0.0', 10000), SimpleHandler)
-    server.serve_forever()
-
-server_thread = threading.Thread(target=run_server, daemon=True)
-server_thread.start()
-
-# --- LETTURA CONFIGURAZIONE ---
-# Prima prova le variabili d'ambiente (Render), poi il config.json come fallback
+# =============================================================================
+# CONFIGURAZIONE
+# =============================================================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
 
-# Fallback su config.json se le env var non sono impostate
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not API_FOOTBALL_KEY:
-    try:
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN or config.get("telegram_bot_token")
-        TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or config.get("telegram_chat_id")
-        API_FOOTBALL_KEY = API_FOOTBALL_KEY or config.get("api_football_key")
-        print("Configurazione caricata da config.json", flush=True)
-    except Exception as e:
-        print(f"Errore lettura config.json: {e}", flush=True)
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, API_FOOTBALL_KEY]):
+    raise ValueError("Mancano variabili d'ambiente! Controlla Render env vars.")
 
-print(f"TOKEN presente: {'SI' if TELEGRAM_BOT_TOKEN else 'NO'}", flush=True)
-print(f"CHAT_ID presente: {'SI' if TELEGRAM_CHAT_ID else 'NO'}", flush=True)
-print(f"API_KEY presente: {'SI' if API_FOOTBALL_KEY else 'NO'}", flush=True)
+CHAT_ID = int(TELEGRAM_CHAT_ID)
+API_BASE = "https://v3.football.api-sports.io"
+HEADERS = {"x-apisports-key": API_FOOTBALL_KEY}
 
-DIFF_TIRI_SOGLIA = 3
-TIRI_TOTALI_ATTIVA = 6
-MINUTI_ATTIVA = 25
-INTERVALLO_FORZATO = 1800
+# =============================================================================
+# STATO IN MEMORIA + PERSISTENZA SILENZIO
+# =============================================================================
+MATCH_STATE = {}          # fixture_id -> stato partita
+SILENCED_FILE = "silenced_matches.json"
 
-PAROLE_ESCLUSE = [
-    "women", "femminile", "female", "u20", "u19", "u18", "u17", "u16", "u15",
-    "under-20", "under-19", "under-18", "under-17", "under 20", "under 19",
-    "under 18", "under 17", "youth", "amateur", "dilettanti", "regional",
-    "reserves", "riserve", "friendlies", "amichevoli", "friendly"
-]
+def load_silenced():
+    if os.path.exists(SILENCED_FILE):
+        with open(SILENCED_FILE, 'r') as f:
+            return set(json.load(f))
+    return set()
 
-stato_partite = {}
-ciclo_numero = 0
+def save_silenced(silenced):
+    with open(SILENCED_FILE, 'w') as f:
+        json.dump(list(silenced), f)
 
+SILENCED_MATCHES = load_silenced()
 
-def log(msg):
-    print(msg, flush=True)
+# =============================================================================
+# HEALTH CHECK RENDER (fix 501 HEAD)
+# =============================================================================
+app_flask = Flask(__name__)
 
+@app_flask.route('/')
+def health():
+    return "OK", 200
 
-def invia_messaggio_telegram(testo):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': testo, 'parse_mode': 'Markdown'}
-        response = requests.post(url, data=data, timeout=10)
-        log(f"Telegram testo - Status: {response.status_code} - {response.text[:100]}")
-    except Exception as e:
-        log(f"Errore invio testo Telegram: {e}")
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app_flask.run(host='0.0.0.0', port=port)
 
+# =============================================================================
+# GRAFICO A BARRE ORIZZONTALI (sostituisce il grafico sintetico)
+# =============================================================================
+def generate_match_chart(home_name, away_name, stats):
+    metrics = list(stats.keys())
+    home_vals = [stats[m][0] for m in metrics]
+    away_vals = [stats[m][1] for m in metrics]
 
-def invia_notifica_telegram(foto_path, messaggio):
-    try:
-        if foto_path and os.path.exists(foto_path):
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            with open(foto_path, 'rb') as photo:
-                files = {'photo': photo}
-                data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': messaggio, 'parse_mode': 'Markdown'}
-                response = requests.post(url, data=data, files=files, timeout=10)
-                log(f"Telegram foto - Status: {response.status_code}")
-        else:
-            invia_messaggio_telegram(messaggio)
-    except Exception as e:
-        log(f"Errore invio Telegram: {e}")
+    fig, ax = plt.subplots(figsize=(5.0, 2.6), dpi=150)
+    fig.patch.set_facecolor('#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
 
+    color_home = '#22c55e'
+    color_away = '#ef4444'
+    color_bg = '#2a2a2a'
+    color_text = '#e5e5e5'
+    color_muted = '#888888'
 
-def campionato_valido(league_name, league_type):
-    nome = league_name.lower()
-    for parola in PAROLE_ESCLUSE:
-        if parola in nome:
-            return False
-    if league_type and league_type.lower() not in ["league", "cup", "championship"]:
-        return False
-    return True
+    for i, metric in enumerate(metrics):
+        total = home_vals[i] + away_vals[i]
+        ax.barh(i, 1, height=0.30, color=color_bg, left=0, zorder=1, edgecolor='none')
 
+        if total == 0:
+            ax.text(0.5, i, 'Nessun dato', ha='center', va='center',
+                    fontsize=8, color=color_muted, zorder=3)
+            continue
 
-def get_partite_live():
-    url = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+        home_pct = home_vals[i] / total
+        away_pct = away_vals[i] / total
+
+        ax.barh(i, home_pct, height=0.30, color=color_home, left=0, zorder=2, edgecolor='none')
+        ax.barh(i, away_pct, height=0.30, color=color_away, left=home_pct, zorder=2, edgecolor='none')
+
+        ax.text(-0.04, i, str(home_vals[i]), ha='right', va='center',
+                fontsize=11, fontweight='bold', color=color_home, zorder=3)
+        ax.text(1.04, i, str(away_vals[i]), ha='left', va='center',
+                fontsize=11, fontweight='bold', color=color_away, zorder=3)
+
+    ax.set_yticks(range(len(metrics)))
+    ax.set_yticklabels(metrics, fontsize=10, color=color_text)
+    ax.set_xlim(-0.18, 1.18)
+    ax.set_xticks([])
+    for spine in ['top', 'right', 'bottom', 'left']:
+        ax.spines[spine].set_visible(False)
+    ax.tick_params(left=False, pad=10)
+    ax.invert_yaxis()
+
+    home_patch = mpatches.Patch(color=color_home, label=home_name)
+    away_patch = mpatches.Patch(color=color_away, label=away_name)
+    ax.legend(handles=[home_patch, away_patch], loc='lower center',
+              bbox_to_anchor=(0.5, -0.20), ncol=2, frameon=False,
+              fontsize=9, labelcolor=color_text)
+
+    plt.tight_layout(rect=[0, 0.06, 1, 1])
+    buf = BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight',
+                facecolor='#1e1e1e', edgecolor='none', pad_inches=0.1)
+    buf.seek(0)
+    plt.close()
+    return buf
+
+# =============================================================================
+# API-FOOTBALL
+# =============================================================================
+def fetch_live_fixtures():
+    url = f"{API_BASE}/fixtures"
     params = {"live": "all"}
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        log(f"API-Football status: {response.status_code}")
-        if response.status_code != 200:
-            invia_messaggio_telegram(f"⚠️ *Errore API*\nHTTP {response.status_code}")
-            return []
-        data = response.json()
-        errori = data.get("errors", {})
-        if errori:
-            invia_messaggio_telegram(f"⚠️ *Errore API*\n{errori}")
-            return []
-        return data.get("response", [])
+        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        return r.json().get("response", [])
     except Exception as e:
-        log(f"Errore get_partite_live: {e}")
-        invia_messaggio_telegram(f"⚠️ *Eccezione API*\n{e}")
+        print(f"Errore fetch live: {e}", flush=True)
         return []
 
-
-def get_statistiche_partita(fixture_id):
-    url = "https://v3.football.api-sports.io/fixtures/statistics"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+def fetch_fixture_events(fixture_id):
+    url = f"{API_BASE}/fixtures/events"
     params = {"fixture": fixture_id}
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        return data.get("response", [])
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        return r.json().get("response", [])
     except Exception as e:
-        log(f"Errore statistiche {fixture_id}: {e}")
+        print(f"Errore eventi {fixture_id}: {e}", flush=True)
+        return []
+
+def extract_goals(events):
+    goals = []
+    for ev in events:
+        if ev.get("type") == "Goal":
+            goals.append({
+                "minute": ev["time"]["elapsed"],
+                "team": ev["team"]["name"],
+                "player": (ev.get("player") or {}).get("name") or "Sconosciuto"
+            })
+    goals.sort(key=lambda g: g["minute"])
+    return goals
+
+def extract_stats(fixture):
+    stats_raw = fixture.get("statistics", [])
+    if len(stats_raw) < 2:
+        return {}
+
+    home_stats = {s["type"]: s["value"] for s in stats_raw[0].get("statistics", [])}
+    away_stats = {s["type"]: s["value"] for s in stats_raw[1].get("statistics", [])}
+
+    def get_val(d, key):
+        v = d.get(key)
+        if v is None or v == "None":
+            return 0
+        return int(v)
+
+    return {
+        "Tiri totali": (
+            get_val(home_stats, "Shots on Goal") + get_val(home_stats, "Shots off Goal"),
+            get_val(away_stats, "Shots on Goal") + get_val(away_stats, "Shots off Goal")
+        ),
+        "Tiri in porta": (
+            get_val(home_stats, "Shots on Goal"),
+            get_val(away_stats, "Shots on Goal")
+        ),
+        "Corner": (
+            get_val(home_stats, "Corner Kicks"),
+            get_val(away_stats, "Corner Kicks")
+        ),
+    }
+
+# =============================================================================
+# FILTRI CAMPIONATI
+# =============================================================================
+EXCLUDED_KEYWORDS = [
+    "women", "feminine", "u17", "u18", "u19", "u20",
+    "amateur", "friendly", "reserve", "dilettanti",
+    "amichevole", "femminile", "riserve", "youth"
+]
+
+def is_valid_league(fixture):
+    league_name = (fixture.get("league", {}).get("name") or "").lower()
+    country = (fixture.get("league", {}).get("country") or "").lower()
+    combined = f"{league_name} {country}"
+    return not any(k in combined for k in EXCLUDED_KEYWORDS)
+
+# =============================================================================
+# REGOLE DI NOTIFICA
+# =============================================================================
+def check_rules(stats, minute, fixture_id):
+    if not stats:
         return None
 
+    home_shots, away_shots = stats.get("Tiri totali", (0, 0))
+    total = home_shots + away_shots
+    diff = abs(home_shots - away_shots)
 
-def estrai_valore_stat(stats_team, nome_stat):
-    for stat in stats_team:
-        if stat.get("type", "").lower() == nome_stat.lower():
-            val = stat.get("value")
-            if val is None:
-                return 0
-            try:
-                return int(val)
-            except:
-                return 0
-    return 0
+    # Regola 1: differenza tiri >= 3
+    if diff >= 3:
+        return "Regola 1"
 
+    # Regola 2: molto attiva entro il 25'
+    if minute <= 25 and total >= 6:
+        return "Regola 2"
 
-def genera_grafico_momentum(fixture_id, home_name, away_name, stats_home, stats_away):
-    try:
-        tiri_casa = estrai_valore_stat(stats_home, "Total Shots")
-        tiri_ospite = estrai_valore_stat(stats_away, "Total Shots")
-        tiri_p_casa = estrai_valore_stat(stats_home, "Shots on Goal")
-        tiri_p_ospite = estrai_valore_stat(stats_away, "Shots on Goal")
-        corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
-        corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
-        att_casa = estrai_valore_stat(stats_home, "Attacks")
-        att_ospite = estrai_valore_stat(stats_away, "Attacks")
+    # Regola 3: forzata ogni 30 min se tiri >= 4
+    if total >= 4:
+        last_force = MATCH_STATE.get(fixture_id, {}).get("last_forced_notify", 0)
+        if time.time() - last_force >= 1800:
+            MATCH_STATE[fixture_id]["last_forced_notify"] = time.time()
+            return "Regola 3"
 
-        pressione_casa = (tiri_p_casa * 3) + (tiri_casa * 2) + corner_casa + (att_casa * 0.1)
-        pressione_ospite = (tiri_p_ospite * 3) + (tiri_ospite * 2) + corner_ospite + (att_ospite * 0.1)
+    return None
 
-        x = np.linspace(0, 90, 300)
-        diff = pressione_casa - pressione_ospite
-        totale = pressione_casa + pressione_ospite if (pressione_casa + pressione_ospite) > 0 else 1
-        ampiezza = (diff / totale) * 10
-        y = ampiezza * np.sin(np.linspace(0, 4 * np.pi, 300)) + np.linspace(0, ampiezza * 0.5, 300)
-        y += np.random.normal(0, 0.3, 300)
+# =============================================================================
+# COSTRUZIONE MESSAGGIO
+# =============================================================================
+def build_message(home, away, league, minute, status_short, score_home, score_away,
+                  stats, goals, is_final=False, trigger_rule=None):
+    emoji = "🏁" if is_final else "⚽"
+    status_text = "🏁 *FINALE*" if is_final else f"⏱️ {minute}' | {status_short}"
 
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=(12, 4))
-        fig.patch.set_facecolor('#1a1a2e')
-        ax.set_facecolor('#1a1a2e')
+    msg = f"{emoji} *{home}* vs *{away}*\n"
+    msg += f"🏆 {league}\n"
+    msg += f"{status_text}\n"
+    if trigger_rule and not is_final:
+        msg += f"🔥 *{trigger_rule}*\n"
+    msg += f"\n🔢 *Risultato: {score_home} - {score_away}*\n"
 
-        ax.axhline(0, color='#ffffff', linewidth=0.8, linestyle='--', alpha=0.4)
-        ax.fill_between(x, y, 0, where=(y >= 0), color='#00E676', alpha=0.7, interpolate=True)
-        ax.fill_between(x, y, 0, where=(y < 0), color='#FF5252', alpha=0.7, interpolate=True)
-        ax.plot(x, y, color='white', linewidth=1.2, alpha=0.8)
+    # === NUOVO: primo e ultimo gol ===
+    if goals:
+        msg += f"\n🥇 Primo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
+        if len(goals) > 1:
+            msg += f"⚡ Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
 
-        ylim = ax.get_ylim()
-        ax.text(2, ylim[1] * 0.85 if ylim[1] != 0 else 1,
-                home_name, color='#00E676', fontsize=11, fontweight='bold', va='top')
-        ax.text(88, ylim[0] * 0.85 if ylim[0] != 0 else -1,
-                away_name, color='#FF5252', fontsize=11, fontweight='bold', va='bottom', ha='right')
+    msg += f"\n📊 *Statistiche:*\n"
+    for metric, (h, a) in stats.items():
+        msg += f"• {metric}: {h} - {a}\n"
 
-        info = (f"Tiri: {home_name} {tiri_casa} ({tiri_p_casa} in porta)  |  "
-                f"{away_name} {tiri_ospite} ({tiri_p_ospite} in porta)")
-        ax.set_title(info, color='white', fontsize=9, pad=8)
-        ax.axis('off')
-        plt.tight_layout()
+    return msg
 
-        foto_path = os.path.join(os.path.dirname(__file__), f'momentum_{fixture_id}.png')
-        plt.savefig(foto_path, dpi=200, bbox_inches='tight', transparent=False, facecolor='#1a1a2e')
-        plt.close(fig)
-        plt.close('all')
-        return foto_path
-    except Exception as e:
-        log(f"Errore grafico: {e}")
+def get_notification_keyboard(fixture_id):
+    if fixture_id in SILENCED_MATCHES:
         return None
+    keyboard = [[
+        InlineKeyboardButton("🔕 Silenzia questa partita", callback_data=f"mute:{fixture_id}")
+    ]]
+    return InlineKeyboardMarkup(keyboard)
 
+# =============================================================================
+# CALLBACK HANDLER (bottone silenzia)
+# =============================================================================
+async def button_callback(update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
 
-def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
-    stato = stato_partite.get(fixture_id, {})
-    ultima_casa = stato.get("tiri_casa", -1)
-    ultima_ospite = stato.get("tiri_ospite", -1)
-    ultimo_invio = stato.get("timestamp_notifica", 0)
+    if data.startswith("mute:"):
+        fixture_id = int(data.split(":")[1])
+        SILENCED_MATCHES.add(fixture_id)
+        save_silenced(SILENCED_MATCHES)
 
-    if tiri_casa == ultima_casa and tiri_ospite == ultima_ospite:
-        return False
-
-    tiri_totali = tiri_casa + tiri_ospite
-    diff = abs(tiri_casa - tiri_ospite)
-    tempo_passato = time.time() - ultimo_invio
-
-    if diff >= DIFF_TIRI_SOGLIA:
-        return True
-    if minuto <= MINUTI_ATTIVA and tiri_totali >= TIRI_TOTALI_ATTIVA:
-        return True
-    if tempo_passato >= INTERVALLO_FORZATO and tiri_totali >= 4:
-        return True
-
-    return False
-
-
-def processa_partita(fixture):
-    try:
-        fixture_id = fixture["fixture"]["id"]
-        league = fixture.get("league", {})
-        league_name = league.get("name", "")
-        league_type = league.get("type", "")
-
-        if not campionato_valido(league_name, league_type):
-            return
-
-        home = fixture["teams"]["home"]["name"]
-        away = fixture["teams"]["away"]["name"]
-        score_home = fixture["goals"]["home"] or 0
-        score_away = fixture["goals"]["away"] or 0
-        minuto = fixture["fixture"]["status"].get("elapsed") or 0
-        status_short = fixture["fixture"]["status"].get("short", "LIVE")
-
-        log(f"  {home} vs {away} - {minuto}' ({league_name})")
-
-        stats = get_statistiche_partita(fixture_id)
-        if not stats or len(stats) < 2:
-            log(f"  -> Stats non disponibili")
-            return
-
-        stats_home = stats[0].get("statistics", [])
-        stats_away = stats[1].get("statistics", [])
-
-        tiri_casa = estrai_valore_stat(stats_home, "Total Shots")
-        tiri_ospite = estrai_valore_stat(stats_away, "Total Shots")
-        tiri_p_casa = estrai_valore_stat(stats_home, "Shots on Goal")
-        tiri_p_ospite = estrai_valore_stat(stats_away, "Shots on Goal")
-        corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
-        corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
-
-        log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
-
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
-            log(f"  -> Skip")
-            return
-
-        foto_path = genera_grafico_momentum(fixture_id, home, away, stats_home, stats_away)
-
-        diff = tiri_casa - tiri_ospite
-        freccia = "🏠" if diff > 0 else "✈️" if diff < 0 else "⚖️"
-
-        messaggio = (
-            f"⚽ *{home}* vs *{away}*\n"
-            f"🏆 {league_name}\n"
-            f"⏱️ Minuto: `{minuto}'` | Stato: `{status_short}`\n\n"
-            f"🔢 *Risultato:* {score_home} - {score_away}\n\n"
-            f"📊 *Statistiche:*\n"
-            f"• Tiri totali: {tiri_casa} - {tiri_ospite} {freccia}\n"
-            f"• Tiri in porta: {tiri_p_casa} - {tiri_p_ospite}\n"
-            f"• Corner: {corner_casa} - {corner_ospite}\n\n"
-            f"🟢 Verde = pressione {home}\n"
-            f"🔴 Rosso = pressione {away}"
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="🔕 Partita silenziata. Non riceverai più alert live. "
+                 "Il risultato finale arriverà comunque."
         )
 
-        invia_notifica_telegram(foto_path, messaggio)
+# =============================================================================
+# PROCESSA SINGOLA PARTITA
+# =============================================================================
+async def process_single_match(fixture, context: ContextTypes.DEFAULT_TYPE):
+    fixture_id = fixture["fixture"]["id"]
+    status_short = fixture["fixture"]["status"]["short"]
 
-        stato_partite[fixture_id] = {
-            "tiri_casa": tiri_casa,
-            "tiri_ospite": tiri_ospite,
-            "timestamp_notifica": time.time()
-        }
+    home = fixture["teams"]["home"]["name"]
+    away = fixture["teams"]["away"]["name"]
+    league = fixture["league"]["name"]
+    minute = fixture["fixture"]["status"]["elapsed"] or 0
+    score_home = fixture["goals"]["home"] or 0
+    score_away = fixture["goals"]["away"] or 0
 
-        if foto_path and os.path.exists(foto_path):
-            try:
-                os.remove(foto_path)
-            except:
-                pass
+    # Recupera eventi e gol
+    events = fetch_fixture_events(fixture_id)
+    goals = extract_goals(events)
 
+    # Stato precedente
+    prev = MATCH_STATE.get(fixture_id, {})
+    prev_status = prev.get("status")
+
+    # Aggiorna stato
+    MATCH_STATE[fixture_id] = {
+        "status": status_short,
+        "score_home": score_home,
+        "score_away": score_away,
+        "goals": goals,
+        "last_forced_notify": prev.get("last_forced_notify", 0),
+    }
+
+    # === NOTIFICA FINALE (sempre, anche se silenziata) ===
+    final_statuses = ["FT", "AET", "PEN"]
+    if status_short in final_statuses and prev_status not in final_statuses:
+        stats = extract_stats(fixture)
+        msg = build_message(home, away, league, minute, status_short,
+                           score_home, score_away, stats, goals, is_final=True)
+        chart = generate_match_chart(home, away, stats)
+        await context.bot.send_photo(chat_id=CHAT_ID, photo=chart,
+                                      caption=msg, parse_mode="Markdown")
+
+        # Pulizia
+        SILENCED_MATCHES.discard(fixture_id)
+        save_silenced(SILENCED_MATCHES)
+        MATCH_STATE.pop(fixture_id, None)
+        return
+
+    # === SALTA SE SILENZIATA ===
+    if fixture_id in SILENCED_MATCHES:
+        return
+
+    stats = extract_stats(fixture)
+    prev_stats = prev.get("last_notified_stats")
+
+    # Anti-spam: non notificare se statistiche identiche
+    if prev_stats == stats:
+        return
+
+    trigger = check_rules(stats, minute, fixture_id)
+
+    if trigger:
+        msg = build_message(home, away, league, minute, status_short,
+                           score_home, score_away, stats, goals,
+                           is_final=False, trigger_rule=trigger)
+        chart = generate_match_chart(home, away, stats)
+        keyboard = get_notification_keyboard(fixture_id)
+
+        await context.bot.send_photo(
+            chat_id=CHAT_ID,
+            photo=chart,
+            caption=msg,
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        MATCH_STATE[fixture_id]["last_notified_stats"] = stats
+
+# =============================================================================
+# CICLO PRINCIPALE
+# =============================================================================
+async def main_loop(context: ContextTypes.DEFAULT_TYPE):
+    fixtures = fetch_live_fixtures()
+    valid = [f for f in fixtures if is_valid_league(f)]
+
+    print(f"[{time.strftime('%H:%M')}] Live: {len(fixtures)} | Valide: {len(valid)}", flush=True)
+
+    for fixture in valid:
+        try:
+            await process_single_match(fixture, context)
+        except Exception as e:
+            print(f"Errore fixture {fixture['fixture']['id']}: {e}", flush=True)
+
+async def start_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot avviato e operativo.")
+
+# =============================================================================
+# ENTRYPOINT
+# =============================================================================
+async def main():
+    # Avvia Flask health check in thread separato (fix Render 501)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Job ogni 3 minuti
+    application.job_queue.run_repeating(main_loop, interval=180, first=10)
+
+    # Messaggio di avvio su Telegram
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": "✅ Bot avviato", "parse_mode": "Markdown"},
+            timeout=10
+        )
     except Exception as e:
-        log(f"Errore processa_partita: {e}")
+        print(f"Errore messaggio avvio: {e}", flush=True)
 
+    print("Bot avviato. Polling in corso...", flush=True)
+    await application.run_polling()
 
-def pulisci_partite_terminate(fixture_ids_live):
-    ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
-    for fid in ids_da_rimuovere:
-        del stato_partite[fid]
-        log(f"Partita {fid} terminata.")
-
-
-# --- CICLO PRINCIPALE ---
 if __name__ == "__main__":
-    log("=== Bot avviato ===")
-    invia_messaggio_telegram("✅ *Bot avviato*\nMonitoraggio partite live in corso...")
-
-    while True:
-        ciclo_numero += 1
-        log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
-
-        partite = get_partite_live()
-        partite_valide = [
-            f for f in partite
-            if campionato_valido(
-                f.get("league", {}).get("name", ""),
-                f.get("league", {}).get("type", "")
-            )
-        ]
-        log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
-
-        if ciclo_numero == 1 or ciclo_numero % 10 == 0:
-            invia_messaggio_telegram(
-                f"🤖 *Bot attivo* - Ciclo #{ciclo_numero}\n"
-                f"Partite live: {len(partite)} totali, {len(partite_valide)} monitorate"
-            )
-
-        fixture_ids_live = set()
-        for fixture in partite:
-            fixture_id = fixture.get("fixture", {}).get("id")
-            if fixture_id:
-                fixture_ids_live.add(fixture_id)
-            processa_partita(fixture)
-            time.sleep(1)
-
-        pulisci_partite_terminate(fixture_ids_live)
-        log("Attesa 3 minuti...")
-        time.sleep(180)
+    import asyncio
+    asyncio.run(main())
