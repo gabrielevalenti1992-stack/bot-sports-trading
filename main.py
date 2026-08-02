@@ -33,18 +33,17 @@ telegram_chat_id = config.get("telegram_chat_id")
 fotmob_match_id = config.get("fotmob_match_id")
 
 def invia_notifica_telegram(foto_path, messaggio):
-    url = f"https://api.telegram.org/bot{telegram_bot_token}/sendPhoto"
     if foto_path and os.path.exists(foto_path):
+        url = f"https://api.telegram.org/bot{telegram_bot_token}/sendPhoto"
         with open(foto_path, 'rb') as photo:
             files = {'photo': photo}
             data = {'chat_id': telegram_chat_id, 'caption': messaggio, 'parse_mode': 'Markdown'}
             response = requests.post(url, data=data, files=files)
             print(f"Risposta Telegram con foto: {response.status_code} - {response.text}")
     else:
-        # Se non c'è la foto, manda solo il messaggio di testo aggiornato
-        url_text = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
+        url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
         data = {'chat_id': telegram_chat_id, 'text': messaggio, 'parse_mode': 'Markdown'}
-        response = requests.post(url_text, data=data)
+        response = requests.post(url, data=data)
         print(f"Risposta Telegram solo testo: {response.status_code} - {response.text}")
 
 def controlla_partita_fotmob(match_id):
@@ -55,8 +54,8 @@ def controlla_partita_fotmob(match_id):
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
+        print(f"Risposta FotMob API: {response.status_code}")
         if response.status_code != 200:
-            print(f"Errore API FotMob: {response.status_code}")
             return None, None
             
         data = response.json()
@@ -68,18 +67,18 @@ def controlla_partita_fotmob(match_id):
         status = general.get("status", {})
         status_str = status.get("reason", {}).get("short", "LIVE")
         
-        # Testo base sempre disponibile per gli aggiornamenti
+        # Messaggio base con lo stato e i nomi delle squadre (sempre inviato)
         messaggio = (
             f"📊 **Aggiornamento Match Live**\n\n"
             f"⚽ **{home_name} vs {away_name}**\n"
             f"⏱️ Stato: `{status_str}`"
         )
         
-        # Tentativo di estrarre il momentum per il grafico
+        # Tentativo di recuperare il momentum per il grafico
         momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
         
         if not momentum_data:
-            print("Momentum non disponibile, invio solo lo stato della partita.")
+            print("Momentum non disponibile per questa partita, invio solo il testo di aggiornamento.")
             return None, messaggio
 
         minuti = [item.get("minute") for item in momentum_data]
@@ -121,11 +120,11 @@ if __name__ == "__main__":
             print("Controllo dati partita su FotMob...")
             foto, testo = controlla_partita_fotmob(fotmob_match_id)
             if testo:
-                print(" Invio aggiornamento a Telegram...")
+                print("Invio aggiornamento a Telegram...")
                 invia_notifica_telegram(foto, testo)
             else:
-                print("Nessun dato ricevuto dalla partita.")
+                print("Impossibile recuperare i dati della partita.")
         else:
-            print("Attenzione: fotmob_match_id non configurato.")
+            print("Attenzione: fotmob_match_id non configurato nel file JSON.")
                 
         time.sleep(180)
