@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# File di stato generati dal bot
+silenced_matches.json
+
