@@ -266,7 +266,7 @@ def estrai_valore_stat(stats_team, nome_stat):
 
 
 # =============================================================================
-# GRAFICO A BARRE ORIZZONTALI
+# GRAFICO A BARRE ORIZZONTALI (totali cumulativi)
 # =============================================================================
 def genera_grafico_barre(fixture_id, home_name, away_name, stats):
     try:
@@ -355,7 +355,7 @@ def calcola_delta_15min(fixture_id, current_stats):
     history_15m = [h for h in history if now - h["timestamp"] <= 900]
 
     if not history_15m or len(history_15m) < 2:
-        return current_stats, False
+        return {k: (0, 0) for k in current_stats}, False
 
     old = history_15m[0]
     delta = {}
@@ -550,7 +550,7 @@ def processa_partita(fixture):
         if current_stats:
             delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats)
             stats_dict = delta_stats
-            header_stats = "🔥 Statistiche ultimi 15 min" if is_real_delta else "📊 Statistiche (dall'inizio)"
+            header_stats = "🔥 Statistiche ultimi 15 min" if is_real_delta else "📊 Primo rilevamento"
         else:
             stats_dict = {"Tiri totali": (0, 0), "Tiri in porta": (0, 0), "Corner": (0, 0)}
             header_stats = "📊 Statistiche"
@@ -570,8 +570,8 @@ def processa_partita(fixture):
             log(f"  -> Skip")
             return
 
-        # --- GENERA GRAFICO E INVIA NOTIFICA LIVE ---
-        foto_path = genera_grafico_barre(fixture_id, home, away, stats_dict)
+        # --- GENERA GRAFICO (totali) E TESTO (delta) ---
+        foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         freccia = "🏠" if diff > 0 else "✈️" if diff < 0 else "⚖️"
