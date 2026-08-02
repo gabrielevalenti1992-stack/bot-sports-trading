@@ -1,6 +1,8 @@
 import json
 import time
 import requests
+import matplotlib
+matplotlib.use('Agg')  # Necessario per ambienti server senza interfaccia grafica
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -22,12 +24,13 @@ server_thread = threading.Thread(target=run_server, daemon=True)
 server_thread.start()
 
 # --- LETTURA CONFIGURAZIONE ---
-with open('config.json', 'r') as f:
+config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+with open(config_path, 'r') as f:
     config = json.load(f)
 
-TELEGRAM_BOT_TOKEN = config.get("telegram_bot_token")
-TELEGRAM_CHAT_ID = config.get("telegram_chat_id")
-FOTMOB_MATCH_ID = config.get("fotmob_match_id")
+TELEGRAM_BOT_TOKEN = config.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = config.get("TELEGRAM_CHAT_ID")
+FOTMOB_MATCH_ID = config.get("FOTMOB_MATCH_ID")
 
 def invia_notifica_telegram(foto_path, messaggio):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -46,18 +49,21 @@ def genera_grafico_momentum_fotmob(match_id):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        return False
-    
-    data = response.json()
     try:
-        momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
-    except Exception:
+        response = requests.get(url, headers=headers, timeout=10)
+        print(f"Risposta FotMob API: {response.status_code}")
+        if response.status_code != 200:
+            momentum_data = []
+        else:
+            data = response.json()
+            momentum_data = data.get("content", {}).get("matchFacts", {}).get("momentum", {}).get("data", [])
+    except Exception as e:
+        print(f"Errore di connessione a FotMob: {e}")
         momentum_data = []
     
-    # Se non ci sono dati live, usiamo dati di test visibili per confermare l'invio del grafico
+    # Fallback se non ci sono dati live al momento
     if not momentum_data:
+        print("Nessun dato di momentum live, genero il grafico di test.")
         minuti = [0, 15, 30, 45, 60, 75, 90]
         valori_onda = [0, 3, -2, 4, 1, -3, 2]
     else:
@@ -77,17 +83,25 @@ def genera_grafico_momentum_fotmob(match_id):
     ax.axis('off')
     
     plt.tight_layout()
-    plt.savefig('momentum_reale.png', dpi=300, bbox_inches='tight', transparent=True)
-    plt.close()
+    foto_path = os.path.join(os.path.dirname(__file__), 'momentum_reale.png')
+    plt.savefig(foto_path, dpi=300, bbox_inches='tight', transparent=True)
+    plt.close(fig)
+    plt.close('all')
     return True
 
 # --- CICLO PRINCIPALE ---
 if __name__ == "__main__":
     while True:
         if FOTMOB_MATCH_ID:
+            print("Tentativo di generazione grafico...")
             successo = genera_grafico_momentum_fotmob(FOTMOB_MATCH_ID)
             if successo:
-                invia_notifica_telegram('momentum_reale.png', "📊 Grafico pressione live (FotMob)")
+                print("Grafico generato, invio a Telegram in corso...")
+                foto_path = os.path.join(os.path.dirname(__file__), 'momentum_reale.png')
+                invia_notifica_telegram(foto_path, "📊 Grafico pressione live (FotMob)")
+            else:
+                print("Generazione grafico fallita.")
+        else:
+            print("Attenzione: FOTMOB_MATCH_ID non è configurato nel file JSON.")
                 
-        # Attende 3 minuti prima del prossimo controllo/invio del grafico aggiornato
         time.sleep(180)
