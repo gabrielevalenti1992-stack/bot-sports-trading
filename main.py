@@ -2,7 +2,7 @@ import json
 import time
 import requests
 import matplotlib
-matplotlib.use('Agg')  # Necessario per ambienti server senza interfaccia grafica
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -28,18 +28,18 @@ config_path = os.path.join(os.path.dirname(__file__), 'config.json')
 with open(config_path, 'r') as f:
     config = json.load(f)
 
-TELEGRAM_BOT_TOKEN = config.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = config.get("TELEGRAM_CHAT_ID")
-FOTMOB_MATCH_ID = config.get("FOTMOB_MATCH_ID")
+telegram_bot_token = config.get("telegram_bot_token")
+telegram_chat_id = config.get("telegram_chat_id")
+fotmob_match_id = config.get("fotmob_match_id")
 
 def invia_notifica_telegram(foto_path, messaggio):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    url = f"https://api.telegram.org/bot{telegram_bot_token}/sendPhoto"
     if not os.path.exists(foto_path):
         print(f"Errore: Il file immagine {foto_path} non esiste.")
         return
     with open(foto_path, 'rb') as photo:
         files = {'photo': photo}
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': messaggio}
+        data = {'chat_id': telegram_chat_id, 'caption': messaggio}
         response = requests.post(url, data=data, files=files)
         print(f"Risposta Telegram sendPhoto: {response.status_code} - {response.text}")
 
@@ -61,7 +61,6 @@ def genera_grafico_momentum_fotmob(match_id):
         print(f"Errore di connessione a FotMob: {e}")
         momentum_data = []
     
-    # Fallback se non ci sono dati live al momento
     if not momentum_data:
         print("Nessun dato di momentum live, genero il grafico di test.")
         minuti = [0, 15, 30, 45, 60, 75, 90]
@@ -92,9 +91,9 @@ def genera_grafico_momentum_fotmob(match_id):
 # --- CICLO PRINCIPALE ---
 if __name__ == "__main__":
     while True:
-        if FOTMOB_MATCH_ID:
+        if fotmob_match_id:
             print("Tentativo di generazione grafico...")
-            successo = genera_grafico_momentum_fotmob(FOTMOB_MATCH_ID)
+            successo = genera_grafico_momentum_fotmob(fotmob_match_id)
             if successo:
                 print("Grafico generato, invio a Telegram in corso...")
                 foto_path = os.path.join(os.path.dirname(__file__), 'momentum_reale.png')
@@ -102,6 +101,6 @@ if __name__ == "__main__":
             else:
                 print("Generazione grafico fallita.")
         else:
-            print("Attenzione: FOTMOB_MATCH_ID non è configurato nel file JSON.")
+            print("Attenzione: fotmob_match_id non è configurato nel file JSON.")
                 
         time.sleep(180)
