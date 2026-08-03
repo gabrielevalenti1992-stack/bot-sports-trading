@@ -144,14 +144,44 @@ def get_fire_suffix_corner(delta):
 # THREAD: ASCOLTA CLICK SUI BOTTONI + COMANDI MANUALI
 # =============================================================================
 def poll_callbacks():
-    offset = 0
+    # Pulisci update vecchi all'avvio
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        r = requests.get(url, params={"offset": -1, "limit": 1}, timeout=30)
+        data = r.json()
+        if data.get("result"):
+            offset = data["result"][-1]["update_id"] + 1
+            log(f"Callback thread: puliti update vecchi, offset={offset}")
+        else:
+            offset = 0
+    except Exception as e:
+        log(f"Callback thread: errore pulizia update: {e}")
+        offset = 0
+
+    last_heartbeat = time.time()
     while True:
         try:
+            # Heartbeat log ogni 60 secondi
+            if time.time() - last_heartbeat > 60:
+                log("Callback thread: alive")
+                last_heartbeat = time.time()
+
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-            r = requests.get(url, params={"offset": offset, "limit": 10}, timeout=10)
+            r = requests.get(url, params={"offset": offset, "limit": 10}, timeout=30)
             updates = r.json().get("result", [])
+            if updates:
+                log(f"Callback thread: ricevuti {len(updates)} update")
             for upd in updates:
                 offset = upd["update_id"] + 1
+
+                # Log tipo update
+                if upd.get("callback_query"):
+                    log(f"Callback: update_id={upd['update_id']} tipo=callback_query")
+                elif upd.get("message"):
+                    txt = upd.get("message", {}).get("text", "")
+                    log(f"Callback: update_id={upd['update_id']} tipo=message text='{txt}'")
+                else:
+                    log(f"Callback: update_id={upd['update_id']} tipo=altro")
 
                 # --- CALLBACK QUERY (bottoni inline) ---
                 cq = upd.get("callback_query")
@@ -174,21 +204,21 @@ def poll_callbacks():
                         save_silenced(SILENCED_MATCHES)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
-                            json={"callback_query_id": cq["id"]}, timeout=5)
+                            json={"callback_query_id": cq["id"]}, timeout=15)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
                             json={
                                 "chat_id": chat_id,
                                 "message_id": msg_id,
                                 "reply_markup": json.dumps({"inline_keyboard": []})
-                            }, timeout=5)
+                            }, timeout=15)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={
                                 "chat_id": chat_id,
                                 "text": "🔕 Partita silenziata. Non riceverai più alert live. Il risultato finale arriverà comunque.",
                                 "parse_mode": "Markdown"
-                            }, timeout=5)
+                            }, timeout=15)
 
                     elif data.startswith("fav:"):
                         fid = str(int(data.split(":")[1]))
@@ -201,7 +231,7 @@ def poll_callbacks():
                         save_favorites(FAVORITE_MATCHES)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
-                            json={"callback_query_id": cq["id"], "text": text}, timeout=5)
+                            json={"callback_query_id": cq["id"], "text": text}, timeout=15)
                         # Aggiorna tastiera
                         is_fav = fid in FAVORITE_MATCHES
                         is_sil = fid in SILENCED_MATCHES
@@ -213,7 +243,7 @@ def poll_callbacks():
                                     "chat_id": chat_id,
                                     "message_id": msg_id,
                                     "reply_markup": json.dumps(keyboard)
-                                }, timeout=5)
+                                }, timeout=15)
 
                 # --- MESSAGGI TESTUALI (comandi manuali) ---
                 msg = upd.get("message")
@@ -236,13 +266,13 @@ def poll_callbacks():
                         )
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                            json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"}, timeout=5)
+                            json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"}, timeout=15)
 
                     elif cmd == "/status":
                         if not args:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "⚠️ Usa: /status \u003cnome squadra\u003e", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "⚠️ Usa: /status \u003cnome squadra\u003e", "parse_mode": "Markdown"}, timeout=15)
                             continue
                         query = " ".join(args).lower()
                         partite = get_partite_live()
@@ -255,7 +285,7 @@ def poll_callbacks():
                         if not trovate:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": f"❌ Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": f"❌ Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=15)
                         else:
                             for f in trovate:
                                 fid = f["fixture"]["id"]
@@ -282,15 +312,16 @@ def poll_callbacks():
                                 if goals:
                                     last_text = f"\n⚡ Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
                                 msg_text = f"⚽ *{home} vs {away}*\n⏱️ {minuto}' | {score_h}-{score_a}{last_text}{stats_text}"
-                                requests.post(
+                                r = requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=15)
+                                log(f"Risposta /status: status={r.status_code}")
 
                     elif cmd == "/favorites":
                         if not FAVORITE_MATCHES:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "⭐ Nessuna partita preferita.", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "⭐ Nessuna partita preferita.", "parse_mode": "Markdown"}, timeout=15)
                         else:
                             lines = ["⭐ *Partite preferite:*"]
                             partite = get_partite_live()
@@ -304,36 +335,39 @@ def poll_callbacks():
                                     lines.append(f"• {home} vs {away} ({minute}')")
                                 else:
                                     lines.append(f"• ID {fid} (non live)")
-                            requests.post(
+                            r = requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=15)
+                            log(f"Risposta /favorites: status={r.status_code}")
 
                     elif cmd == "/clearfavorites":
                         FAVORITE_MATCHES.clear()
                         save_favorites(FAVORITE_MATCHES)
-                        requests.post(
+                        r = requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                            json={"chat_id": chat_id, "text": "🗑️ Lista preferiti svuotata.", "parse_mode": "Markdown"}, timeout=5)
+                            json={"chat_id": chat_id, "text": "🗑️ Lista preferiti svuotata.", "parse_mode": "Markdown"}, timeout=15)
+                        log(f"Risposta /clearfavorites: status={r.status_code}")
 
                     elif cmd == "/silenced":
                         if not SILENCED_MATCHES:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "🔕 Nessuna partita silenziata.", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "🔕 Nessuna partita silenziata.", "parse_mode": "Markdown"}, timeout=15)
                         else:
                             lines = ["🔕 *Partite silenziate:*"]
                             for fid, info in SILENCED_MATCHES.items():
                                 lines.append(f"• ID {fid} al {info.get('muted_at_minute','?')}'")
-                            requests.post(
+                            r = requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=15)
+                            log(f"Risposta /favorites: status={r.status_code}")
 
                     elif cmd == "/live":
                         partite = get_partite_live()
                         if not partite:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "❌ Nessuna partita live trovata al momento.", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "❌ Nessuna partita live trovata al momento.", "parse_mode": "Markdown"}, timeout=15)
                         else:
                             lines = [f"⚽ *Partite live trovate: {len(partite)}*"]
                             for f in partite:
@@ -344,9 +378,37 @@ def poll_callbacks():
                                 score_h = f["goals"]["home"] or 0
                                 score_a = f["goals"]["away"] or 0
                                 lines.append(f"• {home} {score_h}-{score_a} {away} ({league}, {minute}')")
-                            requests.post(
+                            r = requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "\n".join(lines[:20]), "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "\n".join(lines[:20]), "parse_mode": "Markdown"}, timeout=15)
+                            log(f"Risposta /live: status={r.status_code}")
+
+                    elif cmd == "/debug":
+                        partite = get_partite_live()
+                        lines = [f"🔍 *Debug - {len(partite)} partite totali dall'API*"]
+                        for f in partite:
+                            fid = f["fixture"]["id"]
+                            home = f["teams"]["home"]["name"]
+                            away = f["teams"]["away"]["name"]
+                            league = f.get("league", {}).get("name", "N/D")
+                            ltype = f.get("league", {}).get("type", "N/D")
+                            minuto = f["fixture"]["status"].get("elapsed", "?")
+                            status = f["fixture"]["status"].get("short", "?")
+                            valid = campionato_valido(league, ltype)
+                            sil = "🔕" if str(fid) in SILENCED_MATCHES else ""
+                            fav = "⭐" if str(fid) in FAVORITE_MATCHES else ""
+                            stats = get_statistiche_partita(fid)
+                            has_stats = "✅" if stats and len(stats) >= 2 else "❌"
+                            lines.append(f"• {home} vs {away} ({league}, {minuto}', {status}) valid={valid} stats={has_stats} {sil}{fav}")
+                        lines.append(f"\n📊 Preferiti attivi: {len(FAVORITE_MATCHES)} | Silenziati: {len(SILENCED_MATCHES)}")
+                        if FAVORITE_MATCHES:
+                            lines.append("⚠️ *ATTENZIONE:* Hai preferiti attivi! Il bot mostra SOLO quelle partite.")
+                        r = requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "\n".join(lines[:30]), "parse_mode": "Markdown"}, timeout=15)
+                        log(f"Risposta /debug: status={r.status_code}")
+        except requests.exceptions.ReadTimeout:
+            pass  # Timeout normale, ignora
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -585,6 +647,7 @@ def calcola_delta_15min(fixture_id, current_stats):
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
     # Se preferiti attivi e questa partita non è tra i preferiti, skip
     if FAVORITE_MATCHES and str(fixture_id) not in FAVORITE_MATCHES:
+        log(f"    -> SKIP: non nei preferiti (attivi: {len(FAVORITE_MATCHES)})")
         return False
 
     stato = stato_partite.get(fixture_id, {})
@@ -630,6 +693,12 @@ def processa_partita(fixture):
         status_short = fixture["fixture"]["status"].get("short", "LIVE")
 
         log(f"  {home} vs {away} - {minuto}' ({league_name})")
+
+        # LOG DIAGNOSTICO
+        is_sil = str(fixture_id) in SILENCED_MATCHES
+        is_fav = str(fixture_id) in FAVORITE_MATCHES
+        has_favs = len(FAVORITE_MATCHES) > 0
+        log(f"    -> silenziata={is_sil}, preferita={is_fav}, preferiti_attivi={has_favs}, fav_count={len(FAVORITE_MATCHES)}")
 
         # Salva sempre score e minuto per il callback silenzia
         if fixture_id not in stato_partite:
@@ -927,9 +996,11 @@ if __name__ == "__main__":
         log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
 
         if ciclo_numero == 1 or ciclo_numero % 10 == 0:
+            fav_warn = "\n⚠️ *Filtro preferiti attivo*" if FAVORITE_MATCHES else ""
             invia_messaggio_telegram(
                 f"🤖 *Bot attivo* - Ciclo #{ciclo_numero}\n"
                 f"Partite live: {len(partite)} totali, {len(partite_valide)} monitorate"
+                f"{fav_warn}"
             )
 
         fixture_ids_live = set()
