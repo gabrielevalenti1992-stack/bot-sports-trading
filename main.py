@@ -34,23 +34,13 @@ server_thread = threading.Thread(target=run_server, daemon=True)
 server_thread.start()
 
 # =============================================================================
+# =============================================================================
 # CONFIGURAZIONE
 # =============================================================================
+# --- TOKEN: solo da Environment Variables (mai su GitHub) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
-
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not API_FOOTBALL_KEY:
-    try:
-        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN or config.get("telegram_bot_token")
-        TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or config.get("telegram_chat_id")
-        API_FOOTBALL_KEY = API_FOOTBALL_KEY or config.get("api_football_key")
-        print("Configurazione caricata da config.json", flush=True)
-    except Exception as e:
-        print(f"Errore lettura config.json: {e}", flush=True)
 
 CONFIG_VALIDA = all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, API_FOOTBALL_KEY])
 print(f"TOKEN presente: {'SI' if TELEGRAM_BOT_TOKEN else 'NO'}", flush=True)
@@ -60,10 +50,31 @@ print(f"API_KEY presente: {'SI' if API_FOOTBALL_KEY else 'NO'}", flush=True)
 if not CONFIG_VALIDA:
     print("CONFIGURAZIONE INCOMPLETA - Impossibile avviare il bot", flush=True)
 
+# --- SOGLIE NOTIFICHE: da config.json (opzionale, fallback a valori default) ---
 DIFF_TIRI_SOGLIA = 3
 TIRI_TOTALI_ATTIVA = 6
 MINUTI_ATTIVA = 25
 INTERVALLO_FORZATO = 1800
+
+# Soglie Regola MOMENTUM (ultimi 15 min)
+MOMENTUM_TIRI_IN_PORTA = 3
+MOMENTUM_TIRI_TOTALI = 5
+MOMENTUM_CORNER = 4
+
+try:
+    config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    DIFF_TIRI_SOGLIA = config.get("diff_tiri_soglia", DIFF_TIRI_SOGLIA)
+    TIRI_TOTALI_ATTIVA = config.get("tiri_totali_attiva", TIRI_TOTALI_ATTIVA)
+    MINUTI_ATTIVA = config.get("minuti_attiva", MINUTI_ATTIVA)
+    INTERVALLO_FORZATO = config.get("intervallo_forzato", INTERVALLO_FORZATO)
+    MOMENTUM_TIRI_IN_PORTA = config.get("momentum_tiri_in_porta", MOMENTUM_TIRI_IN_PORTA)
+    MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
+    MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
+    print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
+except Exception as e:
+    print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
 PAROLE_ESCLUSE = [
     "women", "femminile", "female", "u20", "u19", "u18", "u17", "u16", "u15",
@@ -598,7 +609,7 @@ def calcola_delta_15min(fixture_id, current_stats):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
-def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
+def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None):
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
     ultima_ospite = stato.get("tiri_ospite", -1)
@@ -615,12 +626,30 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
     diff = abs(tiri_casa - tiri_ospite)
     tempo_passato = time.time() - ultimo_invio
 
+    # Regola 1: Differenza tiri significativa
     if diff >= DIFF_TIRI_SOGLIA:
         return True
+
+    # Regola 2: Partita molto attiva nei primi 25 min
     if minuto <= MINUTI_ATTIVA and tiri_totali >= TIRI_TOTALI_ATTIVA:
         return True
+
+    # Regola 3: Forzata ogni 30 min se abbastanza tiri
     if tempo_passato >= INTERVALLO_FORZATO and tiri_totali >= 4:
         return True
+
+    # Regola 4: MOMENTUM - ritmo recente negli ultimi 15 min
+    # Cattura partite che si svegliano nel secondo tempo anche se totali bassi
+    if delta_stats:
+        d_tiri = delta_stats.get("Tiri totali", (0, 0))
+        d_porta = delta_stats.get("Tiri in porta", (0, 0))
+        d_corner = delta_stats.get("Corner", (0, 0))
+        if (d_porta[0] + d_porta[1]) >= MOMENTUM_TIRI_IN_PORTA:
+            return True
+        if (d_tiri[0] + d_tiri[1]) >= MOMENTUM_TIRI_TOTALI:
+            return True
+        if (d_corner[0] + d_corner[1]) >= MOMENTUM_CORNER:
+            return True
 
     return False
 
@@ -782,7 +811,7 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
+        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
