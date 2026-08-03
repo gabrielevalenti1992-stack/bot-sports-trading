@@ -9,6 +9,12 @@ import numpy as np
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+# ============================================================
+# ANTI-SPAM: tracker partite già notificate
+# Chiave = "matchID_golHome_golAway" 
+# Se il punteggio cambia, la chiave cambia e ri-notifica
+# ============================================================
+notified_matches = set()
 
 # =============================================================================
 # SERVER HTTP PER RENDER FREE (fix 501 HEAD)
