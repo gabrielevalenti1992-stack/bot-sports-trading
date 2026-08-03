@@ -92,7 +92,56 @@ def save_silenced(silenced):
 SILENCED_MATCHES = load_silenced()
 
 # =============================================================================
-# THREAD: ASCOLTA CLICK SUL BOTTONE SILENZIA
+# STATO PREFERITI
+# =============================================================================
+FAVORITES_FILE = "favorite_matches.json"
+
+def load_favorites():
+    if os.path.exists(FAVORITES_FILE):
+        with open(FAVORITES_FILE, 'r') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return set(str(x) for x in data)
+            return set()
+    return set()
+
+def save_favorites(favs):
+    with open(FAVORITES_FILE, 'w') as f:
+        json.dump(list(favs), f)
+
+FAVORITE_MATCHES = load_favorites()
+
+# =============================================================================
+# FIAMME - SOGLIE
+# =============================================================================
+FIRE_THRESHOLDS = {
+    "Tiri totali":    (2, 4),
+    "Tiri in porta":  (2, 3),
+    "Corner":         (999, 999),
+}
+
+def get_fire_suffix(delta):
+    """Restituisce 🔥 o 🔥🔥 in base all'incremento."""
+    low, high = FIRE_THRESHOLDS.get("Tiri totali", (999, 999))
+    if delta >= high:
+        return "🔥🔥"
+    elif delta >= low:
+        return "🔥"
+    return ""
+
+def get_fire_suffix_shots(delta):
+    low, high = FIRE_THRESHOLDS.get("Tiri in porta", (999, 999))
+    if delta >= high:
+        return "🔥🔥"
+    elif delta >= low:
+        return "🔥"
+    return ""
+
+def get_fire_suffix_corner(delta):
+    return ""
+
+# =============================================================================
+# THREAD: ASCOLTA CLICK SUI BOTTONI + COMANDI MANUALI
 # =============================================================================
 def poll_callbacks():
     offset = 0
@@ -103,9 +152,14 @@ def poll_callbacks():
             updates = r.json().get("result", [])
             for upd in updates:
                 offset = upd["update_id"] + 1
+
+                # --- CALLBACK QUERY (bottoni inline) ---
                 cq = upd.get("callback_query")
                 if cq:
                     data = cq.get("data", "")
+                    chat_id = cq["message"]["chat"]["id"]
+                    msg_id = cq["message"]["message_id"]
+
                     if data.startswith("mute:"):
                         fid = str(int(data.split(":")[1]))
                         stato = stato_partite.get(int(fid), {})
@@ -124,17 +178,175 @@ def poll_callbacks():
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
                             json={
-                                "chat_id": cq["message"]["chat"]["id"],
-                                "message_id": cq["message"]["message_id"],
+                                "chat_id": chat_id,
+                                "message_id": msg_id,
                                 "reply_markup": json.dumps({"inline_keyboard": []})
                             }, timeout=5)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={
-                                "chat_id": cq["message"]["chat"]["id"],
+                                "chat_id": chat_id,
                                 "text": "🔕 Partita silenziata. Non riceverai più alert live. Il risultato finale arriverà comunque.",
                                 "parse_mode": "Markdown"
                             }, timeout=5)
+
+                    elif data.startswith("fav:"):
+                        fid = str(int(data.split(":")[1]))
+                        if fid in FAVORITE_MATCHES:
+                            FAVORITE_MATCHES.discard(fid)
+                            text = "❌ Rimossa dai preferiti"
+                        else:
+                            FAVORITE_MATCHES.add(fid)
+                            text = "⭐ Aggiunta ai preferiti"
+                        save_favorites(FAVORITE_MATCHES)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"], "text": text}, timeout=5)
+                        # Aggiorna tastiera
+                        is_fav = fid in FAVORITE_MATCHES
+                        is_sil = fid in SILENCED_MATCHES
+                        keyboard = get_notification_keyboard(int(fid), is_fav, is_sil)
+                        if keyboard:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
+                                json={
+                                    "chat_id": chat_id,
+                                    "message_id": msg_id,
+                                    "reply_markup": json.dumps(keyboard)
+                                }, timeout=5)
+
+                # --- MESSAGGI TESTUALI (comandi manuali) ---
+                msg = upd.get("message")
+                if msg and msg.get("text"):
+                    text = msg["text"].strip()
+                    chat_id = msg["chat"]["id"]
+                    parts = text.split()
+                    cmd = parts[0].lower()
+                    args = parts[1:] if len(parts) > 1 else []
+
+                    if cmd == "/help":
+                        help_text = (
+                            "📋 *Comandi disponibili:*\n"
+                            "/help - Mostra questo messaggio\n"
+                            "/status \u003csquadra\u003e - Info live su una partita\n"
+                            "/favorites - Lista partite preferite\n"
+                            "/clearfavorites - Svuota lista preferiti\n"
+                            "/silenced - Lista partite silenziate\n"
+                            "/live - Mostra tutte le partite live"
+                        )
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"}, timeout=5)
+
+                    elif cmd == "/status":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "⚠️ Usa: /status \u003cnome squadra\u003e", "parse_mode": "Markdown"}, timeout=5)
+                            continue
+                        query = " ".join(args).lower()
+                        partite = get_partite_live()
+                        trovate = []
+                        for f in partite:
+                            home = f.get("teams", {}).get("home", {}).get("name", "").lower()
+                            away = f.get("teams", {}).get("away", {}).get("name", "").lower()
+                            if query in home or query in away:
+                                trovate.append(f)
+                        if not trovate:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": f"❌ Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+                        else:
+                            for f in trovate:
+                                fid = f["fixture"]["id"]
+                                home = f["teams"]["home"]["name"]
+                                away = f["teams"]["away"]["name"]
+                                minuto = f["fixture"]["status"].get("elapsed") or 0
+                                score_h = f["goals"]["home"] or 0
+                                score_a = f["goals"]["away"] or 0
+                                stats = get_statistiche_partita(fid)
+                                stats_text = ""
+                                if stats and len(stats) >= 2:
+                                    sh = stats[0].get("statistics", [])
+                                    sa = stats[1].get("statistics", [])
+                                    tc = estrai_valore_stat(sh, "Total Shots")
+                                    to = estrai_valore_stat(sa, "Total Shots")
+                                    tp = estrai_valore_stat(sh, "Shots on Goal")
+                                    tpo = estrai_valore_stat(sa, "Shots on Goal")
+                                    cc = estrai_valore_stat(sh, "Corner Kicks")
+                                    co = estrai_valore_stat(sa, "Corner Kicks")
+                                    stats_text = f"\n📊 Stats: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co}"
+                                events = fetch_fixture_events(fid)
+                                goals = extract_goals(events)
+                                last_text = ""
+                                if goals:
+                                    last_text = f"\n⚡ Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
+                                msg_text = f"⚽ *{home} vs {away}*\n⏱️ {minuto}' | {score_h}-{score_a}{last_text}{stats_text}"
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+
+                    elif cmd == "/favorites":
+                        if not FAVORITE_MATCHES:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "⭐ Nessuna partita preferita.", "parse_mode": "Markdown"}, timeout=5)
+                        else:
+                            lines = ["⭐ *Partite preferite:*"]
+                            partite = get_partite_live()
+                            live_map = {str(f["fixture"]["id"]): f for f in partite}
+                            for fid in FAVORITE_MATCHES:
+                                f = live_map.get(fid)
+                                if f:
+                                    home = f["teams"]["home"]["name"]
+                                    away = f["teams"]["away"]["name"]
+                                    minute = f["fixture"]["status"].get("elapsed", "?")
+                                    lines.append(f"• {home} vs {away} ({minute}')")
+                                else:
+                                    lines.append(f"• ID {fid} (non live)")
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+
+                    elif cmd == "/clearfavorites":
+                        FAVORITE_MATCHES.clear()
+                        save_favorites(FAVORITE_MATCHES)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "🗑️ Lista preferiti svuotata.", "parse_mode": "Markdown"}, timeout=5)
+
+                    elif cmd == "/silenced":
+                        if not SILENCED_MATCHES:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "🔕 Nessuna partita silenziata.", "parse_mode": "Markdown"}, timeout=5)
+                        else:
+                            lines = ["🔕 *Partite silenziate:*"]
+                            for fid, info in SILENCED_MATCHES.items():
+                                lines.append(f"• ID {fid} al {info.get('muted_at_minute','?')}'")
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+
+                    elif cmd == "/live":
+                        partite = get_partite_live()
+                        if not partite:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "❌ Nessuna partita live trovata al momento.", "parse_mode": "Markdown"}, timeout=5)
+                        else:
+                            lines = [f"⚽ *Partite live trovate: {len(partite)}*"]
+                            for f in partite:
+                                home = f["teams"]["home"]["name"]
+                                away = f["teams"]["away"]["name"]
+                                league = f["league"]["name"]
+                                minute = f["fixture"]["status"].get("elapsed", "?")
+                                score_h = f["goals"]["home"] or 0
+                                score_a = f["goals"]["away"] or 0
+                                lines.append(f"• {home} {score_h}-{score_a} {away} ({league}, {minute}')")
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "\n".join(lines[:20]), "parse_mode": "Markdown"}, timeout=5)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -334,14 +546,14 @@ def genera_grafico_barre(fixture_id, home_name, away_name, stats):
 # =============================================================================
 # TASTIERA INLINE
 # =============================================================================
-def get_notification_keyboard(fixture_id):
-    if str(fixture_id) in SILENCED_MATCHES:
+def get_notification_keyboard(fixture_id, is_favorite=False, is_silenced=False):
+    if is_silenced:
         return None
-    return {
-        "inline_keyboard": [[
-            {"text": "🔕 Silenzia questa partita", "callback_data": f"mute:{fixture_id}"}
-        ]]
-    }
+    buttons = []
+    fav_text = "❌ Rimuovi dai preferiti" if is_favorite else "⭐ Aggiungi ai preferiti"
+    buttons.append([{"text": fav_text, "callback_data": f"fav:{fixture_id}"}])
+    buttons.append([{"text": "🔕 Silenzia questa partita", "callback_data": f"mute:{fixture_id}"}])
+    return {"inline_keyboard": buttons}
 
 
 # =============================================================================
@@ -371,6 +583,10 @@ def calcola_delta_15min(fixture_id, current_stats):
 # REGOLE DI NOTIFICA
 # =============================================================================
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto):
+    # Se preferiti attivi e questa partita non è tra i preferiti, skip
+    if FAVORITE_MATCHES and str(fixture_id) not in FAVORITE_MATCHES:
+        return False
+
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
     ultima_ospite = stato.get("tiri_ospite", -1)
@@ -512,8 +728,8 @@ def processa_partita(fixture):
                         f"🔢 {score_home} - {score_away}\n"
                         f"{goals_text}\n"
                         f"📊 Statistiche finali:\n"
-                        f"• Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\\n"
-                        f"• Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\\n"
+                        f"• Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\n"
+                        f"• Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\n"
                         f"• Corner: {corner_casa if current_stats else '?'} - {corner_ospite if current_stats else '?'}")
 
                 invia_notifica_telegram(foto_path, messaggio)
@@ -576,6 +792,19 @@ def processa_partita(fixture):
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         freccia = "🏠" if diff > 0 else "✈️" if diff < 0 else "⚖️"
 
+        # Calcola fiamme sui delta
+        d_tiri_c = stats_dict["Tiri totali"][0]
+        d_tiri_o = stats_dict["Tiri totali"][1]
+        d_porta_c = stats_dict["Tiri in porta"][0]
+        d_porta_o = stats_dict["Tiri in porta"][1]
+        d_corner_c = stats_dict["Corner"][0]
+        d_corner_o = stats_dict["Corner"][1]
+
+        fire_t_c = get_fire_suffix(d_tiri_c)
+        fire_t_o = get_fire_suffix(d_tiri_o)
+        fire_p_c = get_fire_suffix_shots(d_porta_c)
+        fire_p_o = get_fire_suffix_shots(d_porta_o)
+
         goals_text = ""
         if goals:
             goals_text += f"\n🥇 Primo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
@@ -589,14 +818,16 @@ def processa_partita(fixture):
             f"🔢 *Risultato:* {score_home} - {score_away}\n"
             f"{goals_text}\n"
             f"{header_stats}:\n"
-            f"• Tiri totali: {stats_dict['Tiri totali'][0]} - {stats_dict['Tiri totali'][1]} {freccia}\n"
-            f"• Tiri in porta: {stats_dict['Tiri in porta'][0]} - {stats_dict['Tiri in porta'][1]}\n"
-            f"• Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n\n"
+            f"• Tiri totali: {stats_dict['Tiri totali'][0]}{fire_t_c} ({d_tiri_c:+d}) - {stats_dict['Tiri totali'][1]}{fire_t_o} ({d_tiri_o:+d}) {freccia}\n"
+            f"• Tiri in porta: {stats_dict['Tiri in porta'][0]}{fire_p_c} ({d_porta_c:+d}) - {stats_dict['Tiri in porta'][1]}{fire_p_o} ({d_porta_o:+d})\n"
+            f"• Corner: {stats_dict['Corner'][0]} ({d_corner_c:+d}) - {stats_dict['Corner'][1]} ({d_corner_o:+d})\n\n"
             f"🟢 Verde = {home}\n"
             f"🔴 Rosso = {away}"
         )
 
-        keyboard = get_notification_keyboard(fixture_id)
+        is_fav = str(fixture_id) in FAVORITE_MATCHES
+        is_sil = str(fixture_id) in SILENCED_MATCHES
+        keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil)
         invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard)
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
