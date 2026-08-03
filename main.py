@@ -811,19 +811,35 @@ def processa_partita(fixture):
             if len(goals) > 1:
                 goals_text += f"⚡ Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
 
-        messaggio = (
-            f"⚽ *{home}* vs *{away}*\n"
-            f"🏆 {league_name}\n"
-            f"⏱️ Minuto: `{minuto}'` | Stato: `{status_short}`\n\n"
-            f"🔢 *Risultato:* {score_home} - {score_away}\n"
-            f"{goals_text}\n"
-            f"{header_stats}:\n"
-            f"• Tiri totali: {stats_dict['Tiri totali'][0]}{fire_t_c} ({d_tiri_c:+d}) - {stats_dict['Tiri totali'][1]}{fire_t_o} ({d_tiri_o:+d}) {freccia}\n"
-            f"• Tiri in porta: {stats_dict['Tiri in porta'][0]}{fire_p_c} ({d_porta_c:+d}) - {stats_dict['Tiri in porta'][1]}{fire_p_o} ({d_porta_o:+d})\n"
-            f"• Corner: {stats_dict['Corner'][0]} ({d_corner_c:+d}) - {stats_dict['Corner'][1]} ({d_corner_o:+d})\n\n"
-            f"🟢 Verde = {home}\n"
-            f"🔴 Rosso = {away}"
-        )
+        # Se prima notifica, mostra totali; altrimenti solo delta
+        if is_first or not current_stats:
+            messaggio = (
+                f"⚽ *{home}* vs *{away}*\n"
+                f"🏆 {league_name}\n"
+                f"⏱️ Minuto: `{minuto}'` | Stato: `{status_short}`\n\n"
+                f"🔢 *Risultato:* {score_home} - {score_away}\n"
+                f"{goals_text}\n"
+                f"{header_stats}:\n"
+                f"• Tiri totali: {tiri_casa} - {tiri_ospite} {freccia}\n"
+                f"• Tiri in porta: {tiri_p_casa} - {tiri_p_ospite}\n"
+                f"• Corner: {corner_casa} - {corner_ospite}\n\n"
+                f"🟢 Verde = {home}\n"
+                f"🔴 Rosso = {away}"
+            )
+        else:
+            messaggio = (
+                f"⚽ *{home}* vs *{away}*\n"
+                f"🏆 {league_name}\n"
+                f"⏱️ Minuto: `{minuto}'` | Stato: `{status_short}`\n\n"
+                f"🔢 *Risultato:* {score_home} - {score_away}\n"
+                f"{goals_text}\n"
+                f"{header_stats}:\n"
+                f"• Tiri totali: {d_tiri_c}{fire_t_c} - {d_tiri_o}{fire_t_o} {freccia}\n"
+                f"• Tiri in porta: {d_porta_c}{fire_p_c} - {d_porta_o}{fire_p_o}\n"
+                f"• Corner: {d_corner_c} - {d_corner_o}\n\n"
+                f"🟢 Verde = {home}\n"
+                f"🔴 Rosso = {away}"
+            )
 
         is_fav = str(fixture_id) in FAVORITE_MATCHES
         is_sil = str(fixture_id) in SILENCED_MATCHES
@@ -855,11 +871,37 @@ def pulisci_partite_terminate(fixture_ids_live):
         if not stato.get("notified_final"):
             home = stato.get("home", "Squadra A")
             away = stato.get("away", "Squadra B")
-            invia_messaggio_telegram(f"🏁 *{home}* vs *{away}*\nRisultato finale: partita terminata.")
+            league = stato.get("league", "")
+            score_h = stato.get("score_home", 0)
+            score_a = stato.get("score_away", 0)
+
+            # Se era silenziata, invia notifica minimal con risultato
+            muted_data = SILENCED_MATCHES.get(str(fid))
+            if muted_data:
+                diff_h = score_h - muted_data.get("score_home", 0)
+                diff_a = score_a - muted_data.get("score_away", 0)
+                muted_minute = muted_data.get("muted_at_minute", 0)
+
+                after_text = ""
+                if diff_h > 0:
+                    after_text += f" +{diff_h}🏠"
+                if diff_a > 0:
+                    after_text += f" +{diff_a}✈️"
+
+                messaggio = (
+                    f"🏁 *{home}* vs *{away}*\n"
+                    f"🏆 {league}\n"
+                    f"🏁 Risultato finale: {score_h} - {score_a}{after_text}\n"
+                    f"🔕 Silenziato al {muted_minute}'"
+                )
+                invia_messaggio_telegram(messaggio)
+            else:
+                invia_messaggio_telegram(f"🏁 *{home}* vs *{away}*\n🏆 {league}\n🔢 Risultato finale: {score_h} - {score_a}")
+
         SILENCED_MATCHES.pop(str(fid), None)
+        save_silenced(SILENCED_MATCHES)
         del stato_partite[fid]
     if ids_da_rimuovere:
-        save_silenced(SILENCED_MATCHES)
         log(f"Partite terminate rimosse: {len(ids_da_rimuovere)}")
 
 
