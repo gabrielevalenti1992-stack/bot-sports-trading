@@ -887,12 +887,7 @@ def processa_partita(fixture):
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         freccia = "CASA" if diff > 0 else "OSP" if diff < 0 else "EQ"
 
-        d_tiri_c = stats_dict["Tiri totali"][0]
-        d_tiri_o = stats_dict["Tiri totali"][1]
-        d_porta_c = stats_dict["Tiri in porta"][0]
-        d_porta_o = stats_dict["Tiri in porta"][1]
-        d_corner_c = stats_dict["Corner"][0]
-        d_corner_o = stats_dict["Corner"][1]
+        
 
         fire_t_c = get_fire_suffix(d_tiri_c)
         fire_t_o = get_fire_suffix(d_tiri_o)
