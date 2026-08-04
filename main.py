@@ -9,15 +9,7 @@ import numpy as np
 import os
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-# ============================================================
-# ANTI-SPAM: tracker partite già notificate
-# Chiave = "matchID_golHome_golAway" 
-# Se il punteggio cambia, la chiave cambia e ri-notifica
-# ============================================================
-notified_matches = set()
 
-# =============================================================================
-# SERVER HTTP PER RENDER FREE (fix 501 HEAD)
 # =============================================================================
 # ============================================================
 # ANTI-SPAM: tracker partite già notificate
@@ -26,6 +18,8 @@ notified_matches = set()
 # ============================================================
 notified_matches = set()
 
+# SERVER HTTP PER RENDER FREE (fix 501 HEAD)
+# =============================================================================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -90,9 +84,7 @@ try:
     MIN_GOALS_DIFF = config.get("min_goals_diff", 2)
     MIN_TOTAL_SHOTS_LOW_GOALS = config.get("min_total_shots_low_goals", 8)
     MAX_GOALS_FOR_SHOTS_TRIGGER = config.get("max_goals_for_shots_trigger", 1)
-
-        print(f"Soglie caricate: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}, gol_min={MIN_GOALS_TOTAL}, gol_diff={MIN_GOALS_DIFF}", flush=True)
-
+    print(f"Soglie caricate: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}, gol_min={MIN_GOALS_TOTAL}, gol_diff={MIN_GOALS_DIFF}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -831,7 +823,7 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
-                # ============================================================
+        # ============================================================
         # 4 TRIGGER DI NOTIFICA + ANTI-SPAM
         # ============================================================
         total_goals = score_home + score_away
@@ -874,15 +866,12 @@ def processa_partita(fixture):
 
         # Decisione finale
         if alert_reason and notify_key not in notified_matches:
-            # ✅ NOTIFICA — lascia che il codice continui sotto (grafico + messaggio)
             log(f"  -> TRIGGER ATTIVO: {alert_reason}")
-            pass
+            pass  # continua sotto per inviare il messaggio
         elif alert_reason and notify_key in notified_matches:
-            # Già notificata questo punteggio, salta
             log(f"  -> Già notificata questo punteggio: {home} vs {away}")
             return
         else:
-            # Nessun trigger attivo
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
@@ -892,7 +881,6 @@ def processa_partita(fixture):
             })
             log(f"  -> Skip")
             return
-
 
         foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
@@ -935,7 +923,6 @@ def processa_partita(fixture):
         is_sil = str(fixture_id) in SILENCED_MATCHES
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil)
         invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard)
-
         # Anti-spam: marca questa partita+score come notificata
         notified_matches.add(notify_key)
 
