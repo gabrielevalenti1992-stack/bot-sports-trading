@@ -85,6 +85,12 @@ try:
     MOMENTUM_TIRI_IN_PORTA = config.get("momentum_tiri_in_porta", MOMENTUM_TIRI_IN_PORTA)
     MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
+    # Nuove soglie per trigger gol/punteggio
+    MIN_GOALS_TOTAL = config.get("min_goals_total", 2)
+    MIN_GOALS_DIFF = config.get("min_goals_diff", 2)
+    MIN_TOTAL_SHOTS_LOW_GOALS = config.get("min_total_shots_low_goals", 8)
+    MAX_GOALS_FOR_SHOTS_TRIGGER = config.get("max_goals_for_shots_trigger", 1)
+
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
