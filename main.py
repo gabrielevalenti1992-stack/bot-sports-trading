@@ -91,7 +91,8 @@ try:
     MIN_TOTAL_SHOTS_LOW_GOALS = config.get("min_total_shots_low_goals", 8)
     MAX_GOALS_FOR_SHOTS_TRIGGER = config.get("max_goals_for_shots_trigger", 1)
 
-    print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
+        print(f"Soglie caricate: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}, gol_min={MIN_GOALS_TOTAL}, gol_diff={MIN_GOALS_DIFF}", flush=True)
+
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
