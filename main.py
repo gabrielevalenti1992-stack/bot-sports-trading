@@ -19,6 +19,13 @@ notified_matches = set()
 # =============================================================================
 # SERVER HTTP PER RENDER FREE (fix 501 HEAD)
 # =============================================================================
+# ============================================================
+# ANTI-SPAM: tracker partite già notificate
+# Chiave = "matchID_golHome_golAway"
+# Se il punteggio cambia, la chiave cambia e ri-notifica
+# ============================================================
+notified_matches = set()
+
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
