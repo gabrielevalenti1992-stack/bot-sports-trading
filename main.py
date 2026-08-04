@@ -889,10 +889,11 @@ def processa_partita(fixture):
 
         
 
-        fire_t_c = get_fire_suffix(d_tiri_c)
-        fire_t_o = get_fire_suffix(d_tiri_o)
-        fire_p_c = get_fire_suffix_shots(d_porta_c)
-        fire_p_o = get_fire_suffix_shots(d_porta_o)
+                fire_t_c = get_fire_suffix(stats_dict["Tiri totali"][0])
+        fire_t_o = get_fire_suffix(stats_dict["Tiri totali"][1])
+        fire_p_c = get_fire_suffix_shots(stats_dict["Tiri in porta"][0])
+        fire_p_o = get_fire_suffix_shots(stats_dict["Tiri in porta"][1])
+
 
         goals_text = ""
         if goals:
