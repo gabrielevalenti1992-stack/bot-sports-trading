@@ -882,7 +882,7 @@ def processa_partita(fixture):
             log(f"  -> Skip")
             return
 
-                if current_stats and any(v[0] + v[1] > 0 for v in current_stats.values()):
+        if current_stats and any(v[0] + v[1] > 0 for v in current_stats.values()):
             foto_path = genera_grafico_barre(fixture_id, home, away, current_stats)
         else:
             foto_path = None
