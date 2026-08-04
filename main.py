@@ -936,6 +936,9 @@ def processa_partita(fixture):
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil)
         invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard)
 
+        # Anti-spam: marca questa partita+score come notificata
+        notified_matches.add(notify_key)
+
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
         stato_partite[fixture_id].update({
             "tiri_casa": tiri_casa,
