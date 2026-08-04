@@ -882,7 +882,11 @@ def processa_partita(fixture):
             log(f"  -> Skip")
             return
 
-        foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
+                if current_stats and any(v[0] + v[1] > 0 for v in current_stats.values()):
+            foto_path = genera_grafico_barre(fixture_id, home, away, current_stats)
+        else:
+            foto_path = None
+
 
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         freccia = "CASA" if diff > 0 else "OSP" if diff < 0 else "EQ"
@@ -893,6 +897,17 @@ def processa_partita(fixture):
         fire_t_o = get_fire_suffix(stats_dict["Tiri totali"][1])
         fire_p_c = get_fire_suffix_shots(stats_dict["Tiri in porta"][0])
         fire_p_o = get_fire_suffix_shots(stats_dict["Tiri in porta"][1])
+        if current_stats and any(v[0] + v[1] > 0 for v in current_stats.values()):
+            stats_text = (
+                f"{header_stats}:\n"
+                f"- Tiri totali: {stats_dict['Tiri totali'][0]}{fire_t_c} - {stats_dict['Tiri totali'][1]}{fire_t_o} {freccia}\n"
+                f"- Tiri in porta: {stats_dict['Tiri in porta'][0]}{fire_p_c} - {stats_dict['Tiri in porta'][1]}{fire_p_o}\n"
+                f"- Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n\n"
+                f"Verde = {home}\n"
+                f"Rosso = {away}"
+            )
+        else:
+            stats_text = "📊 Statistiche non disponibili per questa competizione"
 
 
         goals_text = ""
