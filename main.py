@@ -470,7 +470,10 @@ def get_statistiche_partita(fixture_id):
         if response.status_code != 200:
             return None
         data = response.json()
-        return data.get("response", [])
+       resp = data.get("response", [])
+        log(f"API stats {fixture_id}: {resp}")
+        return resp
+
     except Exception as e:
         log(f"Errore statistiche {fixture_id}: {e}")
         return None
