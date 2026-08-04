@@ -831,7 +831,58 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict):
+                # ============================================================
+        # 4 TRIGGER DI NOTIFICA + ANTI-SPAM
+        # ============================================================
+        total_goals = score_home + score_away
+        goal_diff = abs(score_home - score_away)
+        total_shots_all = tiri_casa + tiri_ospite
+        notify_key = f"{fixture_id}_{score_home}_{score_away}"
+
+        # Trigger A: Delta 15min (momentum)
+        d_tiri = stats_dict.get("Tiri totali", (0, 0))
+        d_porta = stats_dict.get("Tiri in porta", (0, 0))
+        d_corner = stats_dict.get("Corner", (0, 0))
+        trigger_stats = (
+            (d_tiri[0] + d_tiri[1]) >= MOMENTUM_TIRI_TOTALI or
+            (d_porta[0] + d_porta[1]) >= MOMENTUM_TIRI_IN_PORTA or
+            (d_corner[0] + d_corner[1]) >= MOMENTUM_CORNER
+        )
+
+        # Trigger B: Almeno N gol totali
+        trigger_goals = total_goals >= MIN_GOALS_TOTAL
+
+        # Trigger C: Tiri totali alti ma pochi gol
+        trigger_shots_low_goals = (
+            total_shots_all >= MIN_TOTAL_SHOTS_LOW_GOALS and
+            total_goals <= MAX_GOALS_FOR_SHOTS_TRIGGER
+        )
+
+        # Trigger D: Differenza gol >= N
+        trigger_diff = goal_diff >= MIN_GOALS_DIFF
+
+        # Determina motivo
+        alert_reason = None
+        if trigger_stats:
+            alert_reason = f"Stats 15min: Tiri {d_tiri[0]+d_tiri[1]}, Porta {d_porta[0]+d_porta[1]}, Corner {d_corner[0]+d_corner[1]}"
+        elif trigger_goals:
+            alert_reason = f"Partita golosa: {score_home}-{score_away} al {minuto}'"
+        elif trigger_shots_low_goals:
+            alert_reason = f"Tiri alti ({total_shots_all}) ma pochi gol ({total_goals}) — possibile Over"
+        elif trigger_diff:
+            alert_reason = f"Differenza gol {goal_diff}: {score_home}-{score_away} al {minuto}'"
+
+        # Decisione finale
+        if alert_reason and notify_key not in notified_matches:
+            # ✅ NOTIFICA — lascia che il codice continui sotto (grafico + messaggio)
+            log(f"  -> TRIGGER ATTIVO: {alert_reason}")
+            pass
+        elif alert_reason and notify_key in notified_matches:
+            # Già notificata questo punteggio, salta
+            log(f"  -> Già notificata questo punteggio: {home} vs {away}")
+            return
+        else:
+            # Nessun trigger attivo
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
@@ -841,6 +892,7 @@ def processa_partita(fixture):
             })
             log(f"  -> Skip")
             return
+
 
         foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
