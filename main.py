@@ -397,7 +397,7 @@ def poll_callbacks():
                                 score_h = f["goals"]["home"] or 0
                                 score_a = f["goals"]["away"] or 0
 
-                                stats_live = get_statistiche_partita(fid)
+                                stats_live = get_statistiche_partita(fid, debug=True)
                                 dati_ok = ha_statistiche_disponibili(stats_live)
                                 segnale = " ✅✅" if dati_ok else ""
                                 if dati_ok:
@@ -501,7 +501,7 @@ def get_partite_live():
         return []
 
 
-def get_statistiche_partita(fixture_id):
+def get_statistiche_partita(fixture_id, debug=False):
     if not API_FOOTBALL_KEY:
         return None
     url = "https://v3.football.api-sports.io/fixtures/statistics"
@@ -509,6 +509,8 @@ def get_statistiche_partita(fixture_id):
     params = {"fixture": fixture_id}
     try:
         response = requests.get(url, headers=headers, params=params, timeout=15)
+        if debug:
+            log(f"    [DEBUG stats {fixture_id}] HTTP {response.status_code} - body: {response.text[:1500]}")
         if response.status_code != 200:
             return None
         data = response.json()
