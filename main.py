@@ -242,6 +242,24 @@ def poll_callbacks():
                                 "parse_mode": "Markdown"
                             }, timeout=5)
 
+                    elif data.startswith("unmute:"):
+                        fid = str(int(data.split(":")[1]))
+                        SILENCED_MATCHES.pop(fid, None)
+                        save_silenced(SILENCED_MATCHES)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"], "text": "Partita riattivata"}, timeout=5)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
+                            json={
+                                "chat_id": chat_id,
+                                "message_id": msg_id,
+                                "reply_markup": json.dumps({"inline_keyboard": []})
+                            }, timeout=5)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "\U0001F514 Partita riattivata. Torneranno gli alert live."}, timeout=5)
+
                     elif data.startswith("fav:"):
                         fid = str(int(data.split(":")[1]))
                         if fid in FAVORITE_MATCHES:
@@ -706,11 +724,17 @@ def cmd_silenced(chat_id):
             json={"chat_id": chat_id, "text": "Nessuna partita silenziata.", "parse_mode": "Markdown"}, timeout=5)
         return
     lines = ["Partite silenziate:"]
+    keyboard = {"inline_keyboard": []}
     for fid, info in SILENCED_MATCHES.items():
-        lines.append(f"- ID {fid} al {info.get('muted_at_minute','?')}'")
+        stato = stato_partite.get(int(fid), {})
+        home = stato.get("home", f"ID {fid}")
+        away = stato.get("away", "")
+        etichetta = f"{home} vs {away}" if away else home
+        lines.append(f"- {etichetta} (silenziata al {info.get('muted_at_minute', '?')}')")
+        keyboard["inline_keyboard"].append([{"text": f"Riattiva: {etichetta}", "callback_data": f"unmute:{fid}"}])
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "\n".join(lines), "reply_markup": json.dumps(keyboard)}, timeout=5)
 
 
 def cmd_live(chat_id):
@@ -892,16 +916,24 @@ def cmd_statscoverage(chat_id):
     di statistica, su quante partite (con almeno dati disponibili) il valore è realmente popolato
     (non null). Serve a trovare una statistica "universale" utilizzabile su qualsiasi campionato
     coperto dall'API, invece di indovinare da pochi esempi."""
-    partite_cmd = get_partite_live()
+    partite_raw = get_partite_live()
+    partite_cmd = [
+        f for f in partite_raw
+        if campionato_valido(
+            f.get("league", {}).get("name", ""),
+            f.get("league", {}).get("type", ""),
+            f.get("league", {}).get("country", "")
+        )
+    ]
     if not partite_cmd:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento."}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
         return
 
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Scansione statistiche su {len(partite_cmd)} partite live in corso, attendi..."}, timeout=5)
+        json={"chat_id": chat_id, "text": f"Scansione statistiche su {len(partite_cmd)} partite live nei campionati con statistiche note (su {len(partite_raw)} live totali), attendi..."}, timeout=5)
 
     conteggio_presente = {}
     totale_con_stats = 0
@@ -966,16 +998,24 @@ def cmd_cercastat(chat_id, testo_richiesta):
 
     tipo_api = risolvi_nome_statistica(query_stat)
 
-    partite_cmd = get_partite_live()
+    partite_raw = get_partite_live()
+    partite_cmd = [
+        f for f in partite_raw
+        if campionato_valido(
+            f.get("league", {}).get("name", ""),
+            f.get("league", {}).get("type", ""),
+            f.get("league", {}).get("country", "")
+        )
+    ]
     if not partite_cmd:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento."}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
         return
 
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Ricerca '{tipo_api}'" + (f" >= {soglia}" if soglia is not None else "") + f" su {len(partite_cmd)} partite live..."}, timeout=5)
+        json={"chat_id": chat_id, "text": f"Ricerca '{tipo_api}'" + (f" >= {soglia}" if soglia is not None else "") + f" su {len(partite_cmd)} partite live nei campionati con statistiche note (su {len(partite_raw)} live totali)..."}, timeout=5)
 
     risultati = []
     for f in partite_cmd:
