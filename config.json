@@ -5,9 +5,5 @@
   "intervallo_forzato": 1800,
   "momentum_tiri_in_porta": 3,
   "momentum_tiri_totali": 5,
-  "momentum_corner": 4,
-  "min_goals_total": 2,
-  "min_goals_diff": 2,
-  "min_total_shots_low_goals": 8,
-  "max_goals_for_shots_trigger": 1
+  "momentum_corner": 4
 }
