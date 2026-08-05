@@ -289,7 +289,7 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
                             continue
-                        cmd_status(chat_id, " ".join(args).lower())
+                        cmd_status(chat_id, " ".join(args).lower().strip("<>").strip())
 
                     elif cmd == "/statstypes":
                         if not args:
@@ -297,7 +297,7 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "Usa: /statstypes <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
                             continue
-                        cmd_statstypes(chat_id, " ".join(args).lower())
+                        cmd_statstypes(chat_id, " ".join(args).lower().strip("<>").strip())
 
                     elif cmd == "/favorites":
                         cmd_favorites(chat_id)
@@ -706,7 +706,7 @@ def cmd_status(chat_id, query):
     for f in partite_cmd:
         home = f.get("teams", {}).get("home", {}).get("name", "").lower()
         away = f.get("teams", {}).get("away", {}).get("name", "").lower()
-        if query in home or query in away:
+        if query in home or query in away or home in query or away in query:
             trovate.append(f)
     if not trovate:
         requests.post(
@@ -751,7 +751,7 @@ def cmd_statstypes(chat_id, query):
     for f in partite_cmd:
         home = f.get("teams", {}).get("home", {}).get("name", "").lower()
         away = f.get("teams", {}).get("away", {}).get("name", "").lower()
-        if query in home or query in away:
+        if query in home or query in away or home in query or away in query:
             trovate.append(f)
     if not trovate:
         requests.post(
