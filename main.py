@@ -70,6 +70,13 @@ LEGHE_CON_STATISTICHE = [
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
 ]
 
+# Cache dinamica delle leghe con statistiche coperte, ricavata dall'API /leagues.
+# Usata al posto di LEGHE_CON_STATISTICHE quando disponibile; quest'ultima resta come fallback
+# se l'API non risponde (es. all'avvio o in caso di errore).
+LEGHE_ATTIVE_CACHE = set()
+LEGHE_ATTIVE_TIMESTAMP = 0
+LEGHE_ATTIVE_TTL = 43200  # 12 ore
+
 try:
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
@@ -375,7 +382,7 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None):
         log(f"Errore invio Telegram: {e}")
 
 
-def campionato_valido(league_name, league_type):
+def campionato_valido(league_name, league_type, league_country=""):
     nome = league_name.lower()
     for parola in PAROLE_ESCLUSE:
         if parola in nome:
@@ -383,7 +390,11 @@ def campionato_valido(league_name, league_type):
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
-        if not any(lega.lower() in nome for lega in LEGHE_CON_STATISTICHE):
+        aggiorna_leghe_attive()
+        if LEGHE_ATTIVE_CACHE:
+            if (league_country.lower(), nome) not in LEGHE_ATTIVE_CACHE:
+                return False
+        elif not any(lega.lower() in nome for lega in LEGHE_CON_STATISTICHE):
             return False
     return True
 
@@ -413,8 +424,8 @@ def get_partite_live():
         return []
 
 
-def get_leghe_con_copertura_statistiche():
-    """Interroga /leagues e restituisce 'Paese - Nome lega' per i campionati con copertura statistiche nella stagione corrente."""
+def get_leghe_con_copertura_statistiche_raw():
+    """Interroga /leagues e restituisce coppie (paese, nome lega) con copertura statistiche nella stagione corrente."""
     if not API_FOOTBALL_KEY:
         return []
     url = "https://v3.football.api-sports.io/leagues"
@@ -439,11 +450,33 @@ def get_leghe_con_copertura_statistiche():
                 if stats_ok:
                     nome = league.get("name", "?")
                     paese = country.get("name", "?")
-                    risultati.append(f"{paese} - {nome}")
+                    risultati.append((paese, nome))
         return sorted(set(risultati))
     except Exception as e:
-        log(f"Errore get_leghe_con_copertura_statistiche: {e}")
+        log(f"Errore get_leghe_con_copertura_statistiche_raw: {e}")
         return []
+
+
+def get_leghe_con_copertura_statistiche():
+    """Versione per /leghestats: righe 'Paese - Nome lega' pronte da mostrare."""
+    return [f"{paese} - {nome}" for paese, nome in get_leghe_con_copertura_statistiche_raw()]
+
+
+def aggiorna_leghe_attive(force=False):
+    """Aggiorna la cache dinamica delle leghe con statistiche coperte (usata da campionato_valido).
+    Se l'API non risponde o non restituisce nulla, la cache precedente resta valida (fallback)."""
+    global LEGHE_ATTIVE_CACHE, LEGHE_ATTIVE_TIMESTAMP
+    now = time.time()
+    if not force and LEGHE_ATTIVE_CACHE and (now - LEGHE_ATTIVE_TIMESTAMP) < LEGHE_ATTIVE_TTL:
+        return
+    raw = get_leghe_con_copertura_statistiche_raw()
+    if raw:
+        LEGHE_ATTIVE_CACHE = set((paese.lower(), nome.lower()) for paese, nome in raw)
+        LEGHE_ATTIVE_TIMESTAMP = now
+        log(f"Whitelist leghe aggiornata dinamicamente: {len(LEGHE_ATTIVE_CACHE)} campionati con statistiche coperte")
+    else:
+        log("Whitelist leghe non aggiornata (API vuota o errore) - mantengo cache/fallback precedente")
+    return raw
 
 
 def get_statistiche_partita(fixture_id, debug=False):
@@ -587,7 +620,8 @@ def cmd_live(chat_id):
         f for f in partite_cmd_raw
         if campionato_valido(
             f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", "")
+            f.get("league", {}).get("type", ""),
+            f.get("league", {}).get("country", "")
         )
     ]
     if not partite_cmd:
@@ -632,13 +666,17 @@ def cmd_leghestats(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "Recupero elenco campionati con statistiche coperte da API-Football...", "parse_mode": "Markdown"}, timeout=5)
-    leghe = get_leghe_con_copertura_statistiche()
+    raw = aggiorna_leghe_attive(force=True) or []
+    leghe = [f"{paese} - {nome}" for paese, nome in raw]
     if not leghe:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": "Nessun campionato trovato o errore chiamando /leagues.", "parse_mode": "Markdown"}, timeout=5)
         return
-    testo = f"Campionati con statistiche coperte (stagione corrente): {len(leghe)}\n\n"
+    testo = (
+        f"Campionati con statistiche coperte (stagione corrente): {len(leghe)}\n"
+        f"Questa lista è ora usata direttamente come filtro per /live e le notifiche.\n\n"
+    )
     for riga in leghe:
         linea = f"- {riga}\n"
         if len(testo) + len(linea) > 3800:
@@ -879,16 +917,20 @@ def processa_partita(fixture):
         league = fixture.get("league", {})
         league_name = league.get("name", "")
         league_type = league.get("type", "")
+        league_country = league.get("country", "")
 
-        if not campionato_valido(league_name, league_type):
+        if not campionato_valido(league_name, league_type, league_country):
             motivo = "Type non riconosciuto"
             for escluso in PAROLE_ESCLUSE:
                 if escluso in league_name.lower():
                     motivo = f"Parola esclusa: '{escluso}'"
                     break
             else:
-                if SOLO_LEGHE_CON_STATISTICHE and not any(lega.lower() in league_name.lower() for lega in LEGHE_CON_STATISTICHE):
-                    motivo = "Non in whitelist leghe con statistiche"
+                if SOLO_LEGHE_CON_STATISTICHE:
+                    if LEGHE_ATTIVE_CACHE:
+                        motivo = "Non in whitelist dinamica leghe con statistiche"
+                    elif not any(lega.lower() in league_name.lower() for lega in LEGHE_CON_STATISTICHE):
+                        motivo = "Non in whitelist leghe con statistiche"
             log(f"  ❌ {league_name} - SCARTATA ({motivo})")
             return
 
@@ -1176,7 +1218,8 @@ if __name__ == "__main__":
             f for f in partite
             if campionato_valido(
                 f.get("league", {}).get("name", ""),
-                f.get("league", {}).get("type", "")
+                f.get("league", {}).get("type", ""),
+                f.get("league", {}).get("country", "")
             )
         ]
         log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
