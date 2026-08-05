@@ -175,6 +175,21 @@ def get_fire_suffix_shots(delta):
 def get_fire_suffix_corner(delta):
     return ""
 
+
+def esegui_comando_sicuro(chat_id, funzione, *args):
+    """Esegue una funzione cmd_* intercettando qualsiasi eccezione, così un errore
+    non passa mai inosservato: viene loggato e l'utente riceve un avviso invece del silenzio."""
+    try:
+        funzione(chat_id, *args)
+    except Exception as e:
+        log(f"Errore comando {funzione.__name__}: {e}")
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}", "parse_mode": "Markdown"}, timeout=5)
+        except Exception:
+            pass
+
 # =============================================================================
 # THREAD: ASCOLTA CLICK SUI BOTTONI + COMANDI MANUALI
 # =============================================================================
@@ -257,17 +272,17 @@ def poll_callbacks():
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                             json={"callback_query_id": cq["id"]}, timeout=5)
                         if azione == "live":
-                            cmd_live(chat_id)
+                            esegui_comando_sicuro(chat_id, cmd_live)
                         elif azione == "favorites":
-                            cmd_favorites(chat_id)
+                            esegui_comando_sicuro(chat_id, cmd_favorites)
                         elif azione == "clearfavorites":
-                            cmd_clearfavorites(chat_id)
+                            esegui_comando_sicuro(chat_id, cmd_clearfavorites)
                         elif azione == "silenced":
-                            cmd_silenced(chat_id)
+                            esegui_comando_sicuro(chat_id, cmd_silenced)
                         elif azione == "leghestats":
-                            cmd_leghestats(chat_id)
+                            esegui_comando_sicuro(chat_id, cmd_leghestats)
                         elif azione == "help":
-                            cmd_help(chat_id)
+                            esegui_comando_sicuro(chat_id, cmd_help)
 
                 msg = upd.get("message")
                 if msg and msg.get("text"):
@@ -278,10 +293,10 @@ def poll_callbacks():
                     args = parts[1:] if len(parts) > 1 else []
 
                     if cmd == "/help":
-                        cmd_help(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_help)
 
                     elif cmd == "/setup":
-                        cmd_setup(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_setup)
 
                     elif cmd == "/status":
                         if not args:
@@ -289,7 +304,7 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
                             continue
-                        cmd_status(chat_id, " ".join(args).lower().strip("<>").strip())
+                        esegui_comando_sicuro(chat_id, cmd_status, " ".join(args).lower().strip("<>").strip())
 
                     elif cmd == "/statstypes":
                         if not args:
@@ -297,16 +312,16 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "Usa: /statstypes <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
                             continue
-                        cmd_statstypes(chat_id, " ".join(args).lower().strip("<>").strip())
+                        esegui_comando_sicuro(chat_id, cmd_statstypes, " ".join(args).lower().strip("<>").strip())
 
                     elif cmd == "/favorites":
-                        cmd_favorites(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_favorites)
 
                     elif cmd == "/clearfavorites":
-                        cmd_clearfavorites(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_clearfavorites)
 
                     elif cmd == "/silenced":
-                        cmd_silenced(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_silenced)
 
                     elif cmd == "/test":
                         try:
@@ -335,10 +350,10 @@ def poll_callbacks():
                                 json={"chat_id": chat_id, "text": f"Errore test: {e}"}, timeout=5)
 
                     elif cmd == "/live":
-                        cmd_live(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_live)
 
                     elif cmd == "/leghestats":
-                        cmd_leghestats(chat_id)
+                        esegui_comando_sicuro(chat_id, cmd_leghestats)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -766,8 +781,8 @@ def cmd_statstypes(chat_id, query):
         if not stats or len(stats) < 2:
             testo = f"{home} vs {away}\nNessuna statistica disponibile da API per questa partita."
         else:
-            tipi_home = [s.get("type") for s in stats[0].get("statistics", [])]
-            tipi_away = [s.get("type") for s in stats[1].get("statistics", [])]
+            tipi_home = [s.get("type") for s in stats[0].get("statistics", []) if s.get("type")]
+            tipi_away = [s.get("type") for s in stats[1].get("statistics", []) if s.get("type")]
             tipi = sorted(set(tipi_home) | set(tipi_away))
             ha_insidebox = any("insidebox" in (t or "").lower() for t in tipi)
             ha_xg = any("expected" in (t or "").lower() or t == "xG" for t in tipi)
