@@ -6,6 +6,9 @@
   "momentum_tiri_in_porta": 3,
   "momentum_tiri_totali": 5,
   "momentum_corner": 4,
+  "peso_intensita_tiri": 1,
+  "peso_intensita_porta": 2,
+  "peso_intensita_corner": 1,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",

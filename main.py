@@ -61,6 +61,11 @@ MOMENTUM_TIRI_IN_PORTA = 3
 MOMENTUM_TIRI_TOTALI = 5
 MOMENTUM_CORNER = 4
 
+# Pesi per l'indice di intensità (usato solo dal comando /intensita, su richiesta)
+PESO_INTENSITA_TIRI = 1
+PESO_INTENSITA_PORTA = 2
+PESO_INTENSITA_CORNER = 1
+
 # Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
 SOLO_LEGHE_CON_STATISTICHE = True
 LEGHE_CON_STATISTICHE = [
@@ -90,6 +95,9 @@ try:
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
+    PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
+    PESO_INTENSITA_PORTA = config.get("peso_intensita_porta", PESO_INTENSITA_PORTA)
+    PESO_INTENSITA_CORNER = config.get("peso_intensita_corner", PESO_INTENSITA_CORNER)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
@@ -299,6 +307,8 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_silenced)
                         elif azione == "leghestats":
                             esegui_comando_sicuro(chat_id, cmd_leghestats)
+                        elif azione == "intensita":
+                            esegui_comando_sicuro(chat_id, cmd_intensita)
                         elif azione == "help":
                             esegui_comando_sicuro(chat_id, cmd_help)
 
@@ -342,6 +352,9 @@ def poll_callbacks():
                                 json={"chat_id": chat_id, "text": "Usa: /cercastat <statistica> [soglia]\nEs: /cercastat tiri in porta 3"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_cercastat, " ".join(args))
+
+                    elif cmd == "/intensita":
+                        esegui_comando_sicuro(chat_id, cmd_intensita)
 
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
@@ -674,6 +687,7 @@ def cmd_help(chat_id):
         "/statstypes <squadra> - Tipi di statistiche disponibili da API (diagnostica)\n"
         "/statscoverage - Copertura statistiche su tutte le partite live (diagnostica)\n"
         "/cercastat <statistica> [soglia] - Cerca tra le partite live per statistica (es: tiri in porta 3, xg, possesso 60)\n"
+        "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -1061,6 +1075,86 @@ def cmd_cercastat(chat_id, testo_richiesta):
             log(f"Errore invio /cercastat: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
+def calcola_indice_intensita(delta_stats):
+    """Punteggio pesato basato sul ritmo (delta ultimi 15 min) di tiri totali, tiri in porta e corner.
+    Più alto = probabilità maggiore che la partita sia "calda" in questo momento."""
+    d_tiri = delta_stats.get("Tiri totali", (0, 0))
+    d_porta = delta_stats.get("Tiri in porta", (0, 0))
+    d_corner = delta_stats.get("Corner", (0, 0))
+    return (
+        (d_tiri[0] + d_tiri[1]) * PESO_INTENSITA_TIRI
+        + (d_porta[0] + d_porta[1]) * PESO_INTENSITA_PORTA
+        + (d_corner[0] + d_corner[1]) * PESO_INTENSITA_CORNER
+    )
+
+
+def cmd_intensita(chat_id):
+    """Classifica le partite live (nei campionati con statistiche note) per indice di intensità,
+    calcolato sul ritmo recente (ultimi 15 min) invece che sui totali cumulativi di partita."""
+    partite_raw = get_partite_live()
+    partite_cmd = [
+        f for f in partite_raw
+        if campionato_valido(
+            f.get("league", {}).get("name", ""),
+            f.get("league", {}).get("type", ""),
+            f.get("league", {}).get("country", "")
+        )
+    ]
+    if not partite_cmd:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
+        return
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": f"Calcolo indice di intensità su {len(partite_cmd)} partite, attendi..."}, timeout=5)
+
+    risultati = []
+    for f in partite_cmd:
+        fid = f["fixture"]["id"]
+        home = f["teams"]["home"]["name"]
+        away = f["teams"]["away"]["name"]
+        league = f["league"]["name"]
+        minute = f["fixture"]["status"].get("elapsed", "?")
+        stats = get_statistiche_partita(fid)
+        if stats and len(stats) >= 2:
+            sh = stats[0].get("statistics", [])
+            sa = stats[1].get("statistics", [])
+            current_stats = {
+                "Tiri totali": (estrai_valore_stat(sh, "Total Shots"), estrai_valore_stat(sa, "Total Shots")),
+                "Tiri in porta": (estrai_valore_stat(sh, "Shots on Goal"), estrai_valore_stat(sa, "Shots on Goal")),
+                "Corner": (estrai_valore_stat(sh, "Corner Kicks"), estrai_valore_stat(sa, "Corner Kicks")),
+            }
+            delta_stats, is_real = calcola_delta_15min(fid, current_stats)
+            punteggio = calcola_indice_intensita(delta_stats)
+            risultati.append((punteggio, home, away, league, minute, is_real))
+        time.sleep(0.3)
+
+    if not risultati:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna delle partite monitorate ha statistiche disponibili in questo momento."}, timeout=5)
+        return
+
+    risultati.sort(key=lambda r: -r[0])
+    righe = [f"Indice di intensità (ritmo ultimi 15 min) su {len(risultati)} partite:\n"]
+    for punteggio, home, away, league, minute, is_real in risultati[:20]:
+        nota = "" if is_real else " (primo rilevamento, dato non ancora affidabile)"
+        righe.append(f"- {punteggio:.1f} pt | {home} vs {away} ({league}, {minute}'){nota}")
+    if len(risultati) > 20:
+        righe.append(f"\n... e altre {len(risultati) - 20} partite non mostrate")
+
+    testo = "\n".join(righe)
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+        if risposta.status_code != 200:
+            log(f"Errore invio /intensita: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
 def cmd_setup(chat_id):
     keyboard = {
         "inline_keyboard": [
@@ -1069,6 +1163,7 @@ def cmd_setup(chat_id):
              {"text": "🗑 Svuota preferiti", "callback_data": "cmd:clearfavorites"}],
             [{"text": "🔇 Silenziate", "callback_data": "cmd:silenced"}],
             [{"text": "📊 Leghe con statistiche", "callback_data": "cmd:leghestats"}],
+            [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
     }
@@ -1516,6 +1611,7 @@ def imposta_comandi_telegram():
         {"command": "clearfavorites", "description": "Svuota lista preferiti"},
         {"command": "silenced", "description": "Lista partite silenziate"},
         {"command": "leghestats", "description": "Leghe con statistiche coperte"},
+        {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
     ]
     try:
