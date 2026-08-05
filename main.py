@@ -397,7 +397,7 @@ def poll_callbacks():
                                 score_h = f["goals"]["home"] or 0
                                 score_a = f["goals"]["away"] or 0
 
-                                stats_live = get_statistiche_partita(fid, debug=True)
+                                stats_live = get_statistiche_partita(fid)
                                 dati_ok = ha_statistiche_disponibili(stats_live)
                                 segnale = " ✅✅" if dati_ok else ""
                                 if dati_ok:
