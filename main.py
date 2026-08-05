@@ -344,6 +344,32 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
 
+                    elif cmd == "/test":
+                        try:
+                            stats_test = {
+                                "Tiri totali": (5, 3),
+                                "Tiri in porta": (2, 1),
+                                "Corner": (3, 2),
+                            }
+                            foto_test = genera_grafico_barre("test", "Squadra Test A", "Squadra Test B", stats_test)
+                            messaggio_test = (
+                                "🧪 NOTIFICA DI TEST\n\n"
+                                "Squadra Test A vs Squadra Test B\n"
+                                "Se ricevi questo messaggio con il grafico, "
+                                "la consegna Telegram funziona correttamente.\n\n"
+                                "Il problema (se persiste) è nella logica dei trigger, non nella consegna."
+                            )
+                            invia_notifica_telegram(foto_test, messaggio_test)
+                            if foto_test and os.path.exists(foto_test):
+                                try:
+                                    os.remove(foto_test)
+                                except:
+                                    pass
+                        except Exception as e:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": f"Errore test: {e}"}, timeout=5)
+
                     elif cmd == "/live":
                         partite_cmd_raw = get_partite_live()
                         partite_cmd = [
