@@ -260,7 +260,8 @@ def poll_callbacks():
                             "/favorites - Lista partite preferite\n"
                             "/clearfavorites - Svuota lista preferiti\n"
                             "/silenced - Lista partite silenziate\n"
-                            "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)"
+                            "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)\n"
+                            "/leghestats - Elenco campionati con statistiche coperte da API-Football"
                         )
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -427,6 +428,30 @@ def poll_callbacks():
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+
+                    elif cmd == "/leghestats":
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id, "text": "Recupero elenco campionati con statistiche coperte da API-Football...", "parse_mode": "Markdown"}, timeout=5)
+                        leghe = get_leghe_con_copertura_statistiche()
+                        if not leghe:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Nessun campionato trovato o errore chiamando /leagues.", "parse_mode": "Markdown"}, timeout=5)
+                        else:
+                            testo = f"Campionati con statistiche coperte (stagione corrente): {len(leghe)}\n\n"
+                            for riga in leghe:
+                                linea = f"- {riga}\n"
+                                if len(testo) + len(linea) > 3800:
+                                    requests.post(
+                                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                        json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=10)
+                                    testo = ""
+                                testo += linea
+                            if testo:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                    json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=10)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -513,6 +538,39 @@ def get_partite_live():
     except Exception as e:
         log(f"Errore get_partite_live: {e}")
         invia_messaggio_telegram(f"Eccezione API\n{e}")
+        return []
+
+
+def get_leghe_con_copertura_statistiche():
+    """Interroga /leagues e restituisce 'Paese - Nome lega' per i campionati con copertura statistiche nella stagione corrente."""
+    if not API_FOOTBALL_KEY:
+        return []
+    url = "https://v3.football.api-sports.io/leagues"
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    params = {"current": "true"}
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        if response.status_code != 200:
+            log(f"Errore /leagues: HTTP {response.status_code}")
+            return []
+        data = response.json()
+        risultati = []
+        for item in data.get("response", []):
+            league = item.get("league", {})
+            country = item.get("country", {})
+            for season in item.get("seasons", []):
+                if not season.get("current"):
+                    continue
+                coverage = season.get("coverage", {}) or {}
+                fixtures_cov = coverage.get("fixtures", {}) or {}
+                stats_ok = bool(fixtures_cov.get("statistics_fixtures", fixtures_cov.get("statistics", False)))
+                if stats_ok:
+                    nome = league.get("name", "?")
+                    paese = country.get("name", "?")
+                    risultati.append(f"{paese} - {nome}")
+        return sorted(set(risultati))
+    except Exception as e:
+        log(f"Errore get_leghe_con_copertura_statistiche: {e}")
         return []
 
 
