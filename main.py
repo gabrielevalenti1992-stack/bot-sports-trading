@@ -314,6 +314,9 @@ def poll_callbacks():
                             continue
                         esegui_comando_sicuro(chat_id, cmd_statstypes, " ".join(args).lower().strip("<>").strip())
 
+                    elif cmd == "/statscoverage":
+                        esegui_comando_sicuro(chat_id, cmd_statscoverage)
+
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
 
@@ -581,6 +584,7 @@ def cmd_help(chat_id):
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
         "/statstypes <squadra> - Tipi di statistiche disponibili da API (diagnostica)\n"
+        "/statscoverage - Copertura statistiche su tutte le partite live (diagnostica)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -810,6 +814,65 @@ def cmd_statstypes(chat_id, query):
             json={"chat_id": chat_id, "text": testo}, timeout=5)
         if risposta.status_code != 200:
             log(f"Errore invio /statstypes: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
+def cmd_statscoverage(chat_id):
+    """Diagnostica: scansiona TUTTE le partite live in questo momento e calcola, per ogni tipo
+    di statistica, su quante partite (con almeno dati disponibili) il valore è realmente popolato
+    (non null). Serve a trovare una statistica "universale" utilizzabile su qualsiasi campionato
+    coperto dall'API, invece di indovinare da pochi esempi."""
+    partite_cmd = get_partite_live()
+    if not partite_cmd:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento."}, timeout=5)
+        return
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": f"Scansione statistiche su {len(partite_cmd)} partite live in corso, attendi..."}, timeout=5)
+
+    conteggio_presente = {}
+    totale_con_stats = 0
+    for f in partite_cmd:
+        fid = f["fixture"]["id"]
+        stats = get_statistiche_partita(fid)
+        if stats and len(stats) >= 2:
+            stats_home = stats[0].get("statistics", [])
+            stats_away = stats[1].get("statistics", [])
+            if stats_home or stats_away:
+                totale_con_stats += 1
+                tipi_con_valore = set()
+                for s in stats_home + stats_away:
+                    t = s.get("type")
+                    if t and s.get("value") is not None:
+                        tipi_con_valore.add(t)
+                for t in tipi_con_valore:
+                    conteggio_presente[t] = conteggio_presente.get(t, 0) + 1
+        time.sleep(0.3)
+
+    if totale_con_stats == 0:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna partita ha statistiche disponibili in questo momento."}, timeout=5)
+        return
+
+    righe = sorted(conteggio_presente.items(), key=lambda kv: -kv[1])
+    testo = (
+        f"Copertura statistiche reali (non null) su {totale_con_stats} partite con dati "
+        f"(su {len(partite_cmd)} live totali):\n\n"
+    )
+    for tipo, cnt in righe:
+        pct = round(100 * cnt / totale_con_stats)
+        testo += f"- {tipo}: {cnt}/{totale_con_stats} ({pct}%)\n"
+
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+        if risposta.status_code != 200:
+            log(f"Errore invio /statscoverage: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
 def cmd_setup(chat_id):
