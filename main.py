@@ -910,9 +910,9 @@ def processa_partita(fixture):
             f"Risultato: {score_home} - {score_away}\n"
             f"{goals_text}\n"
             f"{header_stats}:\n"
-            f"- Tiri totali: {stats_dict['Tiri totali'][0]}{fire_t_c} ({d_tiri_c:+d}) - {stats_dict['Tiri totali'][1]}{fire_t_o} ({d_tiri_o:+d}) {freccia}\n"
-            f"- Tiri in porta: {stats_dict['Tiri in porta'][0]}{fire_p_c} ({d_porta_c:+d}) - {stats_dict['Tiri in porta'][1]}{fire_p_o} ({d_porta_o:+d})\n"
-            f"- Corner: {stats_dict['Corner'][0]} ({d_corner_c:+d}) - {stats_dict['Corner'][1]} ({d_corner_o:+d})\n\n"
+            f"- Tiri totali: {stats_dict['Tiri totali'][0]}{fire_t_c} - {stats_dict['Tiri totali'][1]}{fire_t_o} {freccia}\n"
+            f"- Tiri in porta: {stats_dict['Tiri in porta'][0]}{fire_p_c} - {stats_dict['Tiri in porta'][1]}{fire_p_o}\n"
+            f"- Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n\n"
             f"Verde = {home}\n"
             f"Rosso = {away}"
         )
