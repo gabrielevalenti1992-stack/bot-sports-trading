@@ -644,12 +644,7 @@ def pulisci_partite_terminate(fixture_ids_live):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
     for fid in ids_da_rimuovere:
         stato = stato_partite.get(fid, {})
-        # Notifica finale solo se la partita era stata notificata in precedenza
-        if not stato.get("notified_final") and stato.get("timestamp_notifica", 0) > 0:
-            home = stato.get("home", "Squadra A")
-            away = stato.get("away", "Squadra B")
-            invia_messaggio_telegram(f"{home} vs {away}\nRisultato finale: partita terminata.")
-
+        # Nessun messaggio di fine partita
         SILENCED_MATCHES.pop(str(fid), None)
         del stato_partite[fid]
 
