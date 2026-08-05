@@ -248,7 +248,7 @@ def poll_callbacks():
                             "/favorites - Lista partite preferite\n"
                             "/clearfavorites - Svuota lista preferiti\n"
                             "/silenced - Lista partite silenziate\n"
-                            "/live - Mostra tutte le partite live"
+                            "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)"
                         )
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -384,18 +384,37 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                 json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento.", "parse_mode": "Markdown"}, timeout=5)
                         else:
-                            lines = [f"Partite live monitorate: {len(partite_cmd)} (su {len(partite_cmd_raw)} totali)"]
-                            for f in partite_cmd:
+                            MAX_PARTITE_MOSTRATE = 20
+                            header = f"Partite live monitorate: {len(partite_cmd)} (su {len(partite_cmd_raw)} totali)"
+                            match_lines = []
+                            n_con_dati = 0
+                            for f in partite_cmd[:MAX_PARTITE_MOSTRATE]:
+                                fid = f["fixture"]["id"]
                                 home = f["teams"]["home"]["name"]
                                 away = f["teams"]["away"]["name"]
                                 league = f["league"]["name"]
                                 minute = f["fixture"]["status"].get("elapsed", "?")
                                 score_h = f["goals"]["home"] or 0
                                 score_a = f["goals"]["away"] or 0
-                                lines.append(f"- {home} {score_h}-{score_a} {away} ({league}, {minute}')")
+
+                                stats_live = get_statistiche_partita(fid)
+                                dati_ok = ha_statistiche_disponibili(stats_live)
+                                segnale = " ✅✅" if dati_ok else ""
+                                if dati_ok:
+                                    n_con_dati += 1
+                                log(f"  /live check: {home} vs {away} (id {fid}) - statistiche {'DISPONIBILI' if dati_ok else 'assenti'}")
+
+                                match_lines.append(f"- {home} {score_h}-{score_a} {away} ({league}, {minute}'){segnale}")
+                                time.sleep(0.3)
+
+                            n_mostrate = len(match_lines)
+                            lines = [header] + match_lines
+                            if len(partite_cmd) > n_mostrate:
+                                lines.append(f"\n... e altre {len(partite_cmd) - n_mostrate} partite non mostrate")
+                            lines.append(f"\n✅✅ = statistiche disponibili ({n_con_dati}/{n_mostrate} mostrate)")
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "\n".join(lines[:20]), "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -537,6 +556,17 @@ def estrai_valore_stat(stats_team, nome_stat):
             except:
                 return 0
     return 0
+
+
+def ha_statistiche_disponibili(stats):
+    """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre."""
+    if not stats or len(stats) < 2:
+        return False
+    stats_home = stats[0].get("statistics", []) or []
+    stats_away = stats[1].get("statistics", []) or []
+    if not stats_home or not stats_away:
+        return False
+    return any(s.get("value") is not None for s in stats_home + stats_away)
 
 
 # =============================================================================
