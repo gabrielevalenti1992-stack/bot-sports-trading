@@ -618,7 +618,11 @@ def calcola_delta_15min(fixture_id, current_stats):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
-def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None):
+def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False):
+    # PRIORITÀ MASSIMA: gol appena segnato -> notifica sempre, nessun cooldown
+    if gol_appena_segnato:
+        return True
+
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
     ultima_ospite = stato.get("tiri_ospite", -1)
@@ -690,6 +694,13 @@ def processa_partita(fixture):
         status_short = fixture["fixture"]["status"].get("short", "LIVE")
 
         log(f"  ✅ {home} vs {away} - {minuto}' ({league_name})")
+
+        stato_precedente = stato_partite.get(fixture_id, {})
+        prev_score_home = stato_precedente.get("score_home", score_home)
+        prev_score_away = stato_precedente.get("score_away", score_away)
+        gol_appena_segnato = (score_home != prev_score_home) or (score_away != prev_score_away)
+        if gol_appena_segnato and stato_precedente:
+            log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
 
         if fixture_id not in stato_partite:
             stato_partite[fixture_id] = {}
@@ -832,7 +843,7 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict):
+        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=gol_appena_segnato):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
