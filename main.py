@@ -781,17 +781,29 @@ def cmd_statstypes(chat_id, query):
         if not stats or len(stats) < 2:
             testo = f"{home} vs {away}\nNessuna statistica disponibile da API per questa partita."
         else:
-            tipi_home = [s.get("type") for s in stats[0].get("statistics", []) if s.get("type")]
-            tipi_away = [s.get("type") for s in stats[1].get("statistics", []) if s.get("type")]
+            stats_home = stats[0].get("statistics", [])
+            stats_away = stats[1].get("statistics", [])
+            tipi_home = [s.get("type") for s in stats_home if s.get("type")]
+            tipi_away = [s.get("type") for s in stats_away if s.get("type")]
             tipi = sorted(set(tipi_home) | set(tipi_away))
-            ha_insidebox = any("insidebox" in (t or "").lower() for t in tipi)
-            ha_xg = any("expected" in (t or "").lower() or t == "xG" for t in tipi)
+
+            def stato_campo(nome_parziale):
+                """Presente e popolato / presente ma vuoto (null) / assente, cercando per sottostringa nel type."""
+                trovato = False
+                for s in stats_home + stats_away:
+                    t = (s.get("type") or "").lower()
+                    if nome_parziale in t:
+                        trovato = True
+                        if s.get("value") is not None:
+                            return "SI (con dati)"
+                return "PRESENTE MA VUOTO (null)" if trovato else "NO (campo assente)"
+
             testo = (
                 f"{home} vs {away}\n"
                 f"Tipi di statistiche restituiti dall'API:\n"
                 + "\n".join(f"- {t}" for t in tipi)
-                + f"\n\nShots insidebox: {'SI' if ha_insidebox else 'NO'}"
-                + f"\nexpected_goals (xG): {'SI' if ha_xg else 'NO'}"
+                + f"\n\nShots insidebox: {stato_campo('insidebox')}"
+                + f"\nexpected_goals (xG): {stato_campo('expected')}"
             )
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
