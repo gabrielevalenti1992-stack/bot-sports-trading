@@ -61,6 +61,15 @@ MOMENTUM_TIRI_IN_PORTA = 3
 MOMENTUM_TIRI_TOTALI = 5
 MOMENTUM_CORNER = 4
 
+# Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
+SOLO_LEGHE_CON_STATISTICHE = True
+LEGHE_CON_STATISTICHE = [
+    "Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1",
+    "Eredivisie", "Primeira Liga", "Championship",
+    "Champions League", "Europa League", "Conference League",
+    "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
+]
+
 try:
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
@@ -72,7 +81,10 @@ try:
     MOMENTUM_TIRI_IN_PORTA = config.get("momentum_tiri_in_porta", MOMENTUM_TIRI_IN_PORTA)
     MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
+    SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
+    LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
+    print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -473,6 +485,9 @@ def campionato_valido(league_name, league_type):
             return False
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
         return False
+    if SOLO_LEGHE_CON_STATISTICHE:
+        if not any(lega.lower() in nome for lega in LEGHE_CON_STATISTICHE):
+            return False
     return True
 
 
@@ -741,6 +756,9 @@ def processa_partita(fixture):
                 if escluso in league_name.lower():
                     motivo = f"Parola esclusa: '{escluso}'"
                     break
+            else:
+                if SOLO_LEGHE_CON_STATISTICHE and not any(lega.lower() in league_name.lower() for lega in LEGHE_CON_STATISTICHE):
+                    motivo = "Non in whitelist leghe con statistiche"
             log(f"  ❌ {league_name} - SCARTATA ({motivo})")
             return
 

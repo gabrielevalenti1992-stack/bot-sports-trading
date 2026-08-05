@@ -5,5 +5,23 @@
   "intervallo_forzato": 1800,
   "momentum_tiri_in_porta": 3,
   "momentum_tiri_totali": 5,
-  "momentum_corner": 4
+  "momentum_corner": 4,
+  "solo_leghe_con_statistiche": true,
+  "leghe_con_statistiche": [
+    "Premier League",
+    "La Liga",
+    "Serie A",
+    "Bundesliga",
+    "Ligue 1",
+    "Eredivisie",
+    "Primeira Liga",
+    "Championship",
+    "Champions League",
+    "Europa League",
+    "Conference League",
+    "World Cup",
+    "Euro Championship",
+    "Copa America",
+    "Copa Libertadores"
+  ]
 }
