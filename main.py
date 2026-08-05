@@ -291,6 +291,14 @@ def poll_callbacks():
                             continue
                         cmd_status(chat_id, " ".join(args).lower())
 
+                    elif cmd == "/statstypes":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /statstypes <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
+                            continue
+                        cmd_statstypes(chat_id, " ".join(args).lower())
+
                     elif cmd == "/favorites":
                         cmd_favorites(chat_id)
 
@@ -557,6 +565,7 @@ def cmd_help(chat_id):
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
+        "/statstypes <squadra> - Tipi di statistiche disponibili da API (diagnostica)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -732,6 +741,46 @@ def cmd_status(chat_id, query):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+
+
+def cmd_statstypes(chat_id, query):
+    """Diagnostica: mostra tutti i 'type' di statistiche che l'API restituisce per una partita live,
+    per verificare se sono coperti Shots insidebox / expected_goals (xG) sul piano attuale."""
+    partite_cmd = get_partite_live()
+    trovate = []
+    for f in partite_cmd:
+        home = f.get("teams", {}).get("home", {}).get("name", "").lower()
+        away = f.get("teams", {}).get("away", {}).get("name", "").lower()
+        if query in home or query in away:
+            trovate.append(f)
+    if not trovate:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+        return
+    for f in trovate:
+        fid = f["fixture"]["id"]
+        home = f["teams"]["home"]["name"]
+        away = f["teams"]["away"]["name"]
+        stats = get_statistiche_partita(fid, debug=True)
+        if not stats or len(stats) < 2:
+            testo = f"{home} vs {away}\nNessuna statistica disponibile da API per questa partita."
+        else:
+            tipi_home = [s.get("type") for s in stats[0].get("statistics", [])]
+            tipi_away = [s.get("type") for s in stats[1].get("statistics", [])]
+            tipi = sorted(set(tipi_home) | set(tipi_away))
+            ha_insidebox = any("insidebox" in (t or "").lower() for t in tipi)
+            ha_xg = any("expected" in (t or "").lower() or t == "xG" for t in tipi)
+            testo = (
+                f"{home} vs {away}\n"
+                f"Tipi di statistiche restituiti dall'API:\n"
+                + "\n".join(f"- {t}" for t in tipi)
+                + f"\n\nShots insidebox: {'SI' if ha_insidebox else 'NO'}"
+                + f"\nexpected_goals (xG): {'SI' if ha_xg else 'NO'}"
+            )
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=5)
 
 
 def cmd_setup(chat_id):
