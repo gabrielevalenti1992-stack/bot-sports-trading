@@ -416,11 +416,27 @@ def processa_partita(fixture):
         home = fixture.get("teams", {}).get("home", {}).get("name", "Home")
         away = fixture.get("teams", {}).get("away", {}).get("name", "Away")
         league_name = fixture.get("league", {}).get("name", "")
+        league_type = fixture.get("league", {}).get("type", "")
         score_home = fixture.get("goals", {}).get("home", 0)
         score_away = fixture.get("goals", {}).get("away", 0)
         
         if status in ["NS", "PST"]:
             return
+
+        # DEBUG: Partita rilevata
+        log(f"[PARTITA RILEVATA] {home} vs {away} | Lega: '{league_name}' | Tipo: '{league_type}' | Minuto: {minuto}'")
+        
+        # DEBUG: Validazione lega
+        is_valid = campionato_valido(league_name, league_type)
+        if not is_valid:
+            motivo = "Type non League/Cup"
+            for escluso in PAROLE_ESCLUSE:
+                if escluso in league_name.lower():
+                    motivo = f"Parola esclusa: '{escluso}'"
+                    break
+            log(f"  ❌ Lega SCARTATA - Motivo: {motivo}")
+            return
+        log(f"  ✅ Lega VALIDA - Monitorata")
 
         # Registra in stato_partite
         if fixture_id not in stato_partite:
@@ -443,13 +459,19 @@ def processa_partita(fixture):
             tiri_casa, tiri_ospite = stats_dict["Tiri totali"]
             tiri_p_casa, tiri_p_ospite = stats_dict["Tiri in porta"]
             corner_casa, corner_ospite = stats_dict["Corner"]
+            log(f"  📊 Statistiche ricevute: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite}")
         else:
             stats_dict = {"Tiri totali": (0, 0), "Tiri in porta": (0, 0), "Corner": (0, 0)}
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
+            log(f"  ⚠️ Statistiche NON disponibili da API (potrebbe essere lega non supportata o piano API non include stats)")
 
         # Conta gol via events
         events = get_fixture_events(fixture_id)
         goals = [e for e in events if e.get("type") == "Goal"]
+        if goals:
+            log(f"  ⚽ Gol trovati: {len(goals)}")
+        else:
+            log(f"  ⚽ Nessun gol registrato")
 
         status_short = "1H" if minuto < 45 else "2H" if minuto < 90 else "ET" if minuto < 120 else "P"
 
@@ -508,6 +530,13 @@ def processa_partita(fixture):
         # Trigger D: Differenza gol >= N
         trigger_diff = goal_diff >= MIN_GOALS_DIFF
 
+        # DEBUG: Verifica trigger
+        log(f"  🎯 Analisi trigger:")
+        log(f"     - Gol totali: {total_goals} (soglia: {MIN_GOALS_TOTAL}) → trigger_goals={trigger_goals}")
+        log(f"     - Differenza gol: {goal_diff} (soglia: {MIN_GOALS_DIFF}) → trigger_diff={trigger_diff}")
+        log(f"     - Tiri totali: {total_shots_all} (soglia: {MIN_TOTAL_SHOTS_LOW_GOALS}) + gol ≤{MAX_GOALS_FOR_SHOTS_TRIGGER} → trigger_shots_low_goals={trigger_shots_low_goals}")
+        log(f"     - Stats 15min: Tiri={d_tiri[0]+d_tiri[1]} (soglia {MOMENTUM_TIRI_TOTALI}), Porta={d_porta[0]+d_porta[1]} (soglia {MOMENTUM_TIRI_IN_PORTA}), Corner={d_corner[0]+d_corner[1]} (soglia {MOMENTUM_CORNER}) → trigger_stats={trigger_stats}")
+
         # Determina motivo
         alert_reason = None
         if trigger_stats:
@@ -521,10 +550,10 @@ def processa_partita(fixture):
 
         # Decisione finale
         if alert_reason and notify_key not in notified_matches:
-            log(f"  -> TRIGGER ATTIVO: {alert_reason}")
+            log(f"  ✅ NOTIFICA INVIATA - Motivo: {alert_reason}")
             pass  # continua sotto per inviare il messaggio
         elif alert_reason and notify_key in notified_matches:
-            log(f"  -> Già notificata questo punteggio: {home} vs {away}")
+            log(f"  ⏭️ Già notificata questo punteggio: {home} vs {away}")
             return
         else:
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
@@ -534,7 +563,7 @@ def processa_partita(fixture):
                 "timestamp_notifica": stato_partite[fixture_id].get("timestamp_notifica", 0),
                 "notified_final": prev_notified,
             })
-            log(f"  -> Skip")
+            log(f"  ⏭️ Nessun trigger attivo - Skip")
             return
 
         foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
@@ -556,9 +585,17 @@ def processa_partita(fixture):
 
         goals_text = ""
         if goals:
-            goals_text += f"\nPrimo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
-            if len(goals) > 1:
-                goals_text += f"Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
+            try:
+                primo_minuto = goals[0].get('time', {}).get('elapsed') or goals[0].get('minute', '?')
+                primo_player = goals[0].get('player', {}).get('name') or goals[0].get('player', '?')
+                goals_text += f"\nPrimo gol: {primo_minuto}' ({primo_player})\n"
+                if len(goals) > 1:
+                    ultimo_minuto = goals[-1].get('time', {}).get('elapsed') or goals[-1].get('minute', '?')
+                    ultimo_player = goals[-1].get('player', {}).get('name') or goals[-1].get('player', '?')
+                    goals_text += f"Ultimo gol: {ultimo_minuto}' ({ultimo_player})\n"
+            except Exception as e:
+                log(f"  ⚠️ Errore parsing gol: {e}")
+                goals_text = "\n⚽ Gol registrati ma dettagli non disponibili\n"
 
         messaggio = (
             f"{home} vs {away}\n"
@@ -596,7 +633,9 @@ def processa_partita(fixture):
                 pass
 
     except Exception as e:
-        log(f"Errore processa_partita: {e}")
+        import traceback
+        log(f"❌ ERRORE processa_partita: {e}")
+        log(f"   Traceback: {traceback.format_exc()}")
 
 
 def pulisci_partite_terminate(fixture_ids_live):
@@ -641,7 +680,15 @@ if __name__ == "__main__":
                 f.get("league", {}).get("type", "")
             )
         ]
-        log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
+        scartate = len(partite) - len(partite_valide)
+        log(f"📊 CICLO PARTITE: {len(partite)} totali | {len(partite_valide)} valide | {scartate} scartate")
+        if scartate > 0 and len(partite) <= 10:
+            for f in partite:
+                if not campionato_valido(f.get("league", {}).get("name", ""), f.get("league", {}).get("type", "")):
+                    h = f.get("teams", {}).get("home", {}).get("name", "?")
+                    a = f.get("teams", {}).get("away", {}).get("name", "?")
+                    l = f.get("league", {}).get("name", "?")
+                    log(f"   ❌ Scartata: {h} vs {a} ({l})")
 
         if ciclo_numero == 1 or ciclo_numero % 10 == 0:
             invia_messaggio_telegram(
