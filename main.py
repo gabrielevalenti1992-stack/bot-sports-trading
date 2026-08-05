@@ -80,7 +80,9 @@ PAROLE_ESCLUSE = [
     "women", "femminile", "female", "u20", "u19", "u18", "u17", "u16", "u15",
     "under-20", "under-19", "under-18", "under-17", "under 20", "under 19",
     "under 18", "under 17", "youth", "amateur", "dilettanti", "regional",
-    "reserves", "riserve", "friendlies", "amichevoli", "friendly"
+    "reserves", "riserve"
+    # TEST TEMPORANEO: "friendlies", "amichevoli", "friendly" rimossi per verificare grafici/notifiche
+    # Ripristinare dopo il test!
 ]
 
 stato_partite = {}
@@ -343,13 +345,20 @@ def poll_callbacks():
                                 json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
 
                     elif cmd == "/live":
-                        partite_cmd = get_partite_live()
+                        partite_cmd_raw = get_partite_live()
+                        partite_cmd = [
+                            f for f in partite_cmd_raw
+                            if campionato_valido(
+                                f.get("league", {}).get("name", ""),
+                                f.get("league", {}).get("type", "")
+                            )
+                        ]
                         if not partite_cmd:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Nessuna partita live trovata al momento.", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento.", "parse_mode": "Markdown"}, timeout=5)
                         else:
-                            lines = [f"Partite live trovate: {len(partite_cmd)}"]
+                            lines = [f"Partite live monitorate: {len(partite_cmd)} (su {len(partite_cmd_raw)} totali)"]
                             for f in partite_cmd:
                                 home = f["teams"]["home"]["name"]
                                 away = f["teams"]["away"]["name"]
