@@ -805,9 +805,11 @@ def cmd_statstypes(chat_id, query):
                 + f"\n\nShots insidebox: {stato_campo('insidebox')}"
                 + f"\nexpected_goals (xG): {stato_campo('expected')}"
             )
-        requests.post(
+        risposta = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": testo}, timeout=5)
+        if risposta.status_code != 200:
+            log(f"Errore invio /statstypes: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
 def cmd_setup(chat_id):
