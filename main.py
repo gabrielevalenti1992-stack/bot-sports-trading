@@ -287,10 +287,12 @@ def campionato_valido(league_name, league_type):
     if not league_name:
         return False
     league_lower = league_name.lower()
+    # Scarta se contiene parole escluse (women, friendly, youth, etc)
     for escluso in PAROLE_ESCLUSE:
         if escluso in league_lower:
             return False
-    return league_type in ["League", "Cup"]
+    # Se non contiene parole escluse, accetta (tipo League/Cup/altro non importa)
+    return True
 
 def estrai_statistiche(stats_home, stats_away):
     def get_stat(stats, stat_name):
