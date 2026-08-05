@@ -317,6 +317,14 @@ def poll_callbacks():
                     elif cmd == "/statscoverage":
                         esegui_comando_sicuro(chat_id, cmd_statscoverage)
 
+                    elif cmd == "/cercastat":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /cercastat <statistica> [soglia]\nEs: /cercastat tiri in porta 3"}, timeout=5)
+                            continue
+                        esegui_comando_sicuro(chat_id, cmd_cercastat, " ".join(args))
+
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
 
@@ -564,6 +572,68 @@ def estrai_valore_stat(stats_team, nome_stat):
     return 0
 
 
+def estrai_valore_stat_raw(stats_team, nome_stat):
+    """Come estrai_valore_stat ma distingue 'campo assente/valore null' (None) da un valore reale, anche 0."""
+    nome_stat = nome_stat.lower()
+    for stat in stats_team:
+        if (stat.get("type") or "").lower() == nome_stat:
+            val = stat.get("value")
+            if val is None:
+                return None
+            try:
+                return float(str(val).replace("%", "").strip())
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+# Alias in italiano -> nome esatto del campo "type" usato da API-Football
+ALIAS_STATISTICHE = {
+    "tiri": "Total Shots",
+    "tiri totali": "Total Shots",
+    "tiri in porta": "Shots on Goal",
+    "tiri porta": "Shots on Goal",
+    "tiri fuori": "Shots off Goal",
+    "tiri fuori porta": "Shots off Goal",
+    "tiri bloccati": "Blocked Shots",
+    "tiri dentro area": "Shots insidebox",
+    "tiri in area": "Shots insidebox",
+    "tiri interni area": "Shots insidebox",
+    "tiri fuori area": "Shots outsidebox",
+    "corner": "Corner Kicks",
+    "calci d'angolo": "Corner Kicks",
+    "angoli": "Corner Kicks",
+    "falli": "Fouls",
+    "fuorigioco": "Offsides",
+    "possesso": "Ball Possession",
+    "possesso palla": "Ball Possession",
+    "gialli": "Yellow Cards",
+    "cartellini gialli": "Yellow Cards",
+    "rossi": "Red Cards",
+    "cartellini rossi": "Red Cards",
+    "parate": "Goalkeeper Saves",
+    "passaggi": "Total passes",
+    "passaggi totali": "Total passes",
+    "passaggi accurati": "Passes accurate",
+    "precisione passaggi": "Passes %",
+    "xg": "expected_goals",
+    "gol attesi": "expected_goals",
+    "expected goals": "expected_goals",
+    "gol evitati": "goals_prevented",
+}
+
+
+def risolvi_nome_statistica(query):
+    """Traduce un nome in italiano (o parziale) nel campo 'type' esatto dell'API. Fallback: usa la query com'è."""
+    query = query.lower().strip()
+    if query in ALIAS_STATISTICHE:
+        return ALIAS_STATISTICHE[query]
+    for alias, tipo_api in ALIAS_STATISTICHE.items():
+        if query in alias or alias in query:
+            return tipo_api
+    return query
+
+
 def ha_statistiche_disponibili(stats):
     """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre."""
     if not stats or len(stats) < 2:
@@ -585,6 +655,7 @@ def cmd_help(chat_id):
         "/status <squadra> - Info live su una partita\n"
         "/statstypes <squadra> - Tipi di statistiche disponibili da API (diagnostica)\n"
         "/statscoverage - Copertura statistiche su tutte le partite live (diagnostica)\n"
+        "/cercastat <statistica> [soglia] - Cerca tra le partite live per statistica (es: tiri in porta 3, xg, possesso 60)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -873,6 +944,81 @@ def cmd_statscoverage(chat_id):
             json={"chat_id": chat_id, "text": pezzo}, timeout=10)
         if risposta.status_code != 200:
             log(f"Errore invio /statscoverage: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
+def cmd_cercastat(chat_id, testo_richiesta):
+    """Cerca tra tutte le partite live quelle dove una statistica scelta dall'utente è disponibile,
+    opzionalmente sopra una soglia. Es: 'tiri in porta 3', 'xg', 'possesso 60'."""
+    parole = testo_richiesta.strip().split()
+    soglia = None
+    if parole:
+        try:
+            soglia = float(parole[-1].replace(",", "."))
+            parole = parole[:-1]
+        except ValueError:
+            soglia = None
+    query_stat = " ".join(parole).strip()
+    if not query_stat:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Usa: /cercastat <statistica> [soglia]\nEs: /cercastat tiri in porta 3"}, timeout=5)
+        return
+
+    tipo_api = risolvi_nome_statistica(query_stat)
+
+    partite_cmd = get_partite_live()
+    if not partite_cmd:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento."}, timeout=5)
+        return
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": f"Ricerca '{tipo_api}'" + (f" >= {soglia}" if soglia is not None else "") + f" su {len(partite_cmd)} partite live..."}, timeout=5)
+
+    risultati = []
+    for f in partite_cmd:
+        fid = f["fixture"]["id"]
+        home = f["teams"]["home"]["name"]
+        away = f["teams"]["away"]["name"]
+        league = f["league"]["name"]
+        minute = f["fixture"]["status"].get("elapsed", "?")
+        stats = get_statistiche_partita(fid)
+        if stats and len(stats) >= 2:
+            sh = stats[0].get("statistics", [])
+            sa = stats[1].get("statistics", [])
+            vh = estrai_valore_stat_raw(sh, tipo_api)
+            va = estrai_valore_stat_raw(sa, tipo_api)
+            if vh is not None or va is not None:
+                vh_num = vh if vh is not None else 0
+                va_num = va if va is not None else 0
+                if soglia is None or vh_num >= soglia or va_num >= soglia:
+                    risultati.append((home, away, vh, va, league, minute))
+        time.sleep(0.3)
+
+    if not risultati:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Nessuna partita trovata con '{tipo_api}' disponibile" + (f" >= {soglia}" if soglia is not None else "") + "."}, timeout=5)
+        return
+
+    righe = [f"Trovate {len(risultati)} partite con '{tipo_api}'" + (f" >= {soglia}" if soglia is not None else " disponibile") + ":\n"]
+    for home, away, vh, va, league, minute in risultati[:20]:
+        vh_txt = "?" if vh is None else vh
+        va_txt = "?" if va is None else va
+        righe.append(f"- {home} {vh_txt} - {va_txt} {away} ({league}, {minute}')")
+    if len(risultati) > 20:
+        righe.append(f"\n... e altre {len(risultati) - 20} partite non mostrate")
+
+    testo = "\n".join(righe)
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+        if risposta.status_code != 200:
+            log(f"Errore invio /cercastat: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
 def cmd_setup(chat_id):
