@@ -1803,6 +1803,11 @@ BETFAIR_LOGIN_URL = "https://identitysso-cert.betfair.it/api/certlogin"
 BETFAIR_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 BETFAIR_EVENT_TYPE_CALCIO = "1"
 
+# User-Agent "da browser": senza, alcune richieste vengono bloccate dalla protezione
+# anti-bot (Cloudflare) davanti alle API Betfair, che riconosce lo User-Agent di default
+# della libreria requests come traffico automatizzato.
+BETFAIR_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
 BETFAIR_SESSION_TOKEN = None
 BETFAIR_SESSION_TIMESTAMP = 0
 BETFAIR_SESSION_TTL = 4 * 3600  # rinnova la sessione ogni 4 ore per sicurezza
@@ -1821,7 +1826,12 @@ def betfair_login(force=False):
         response = requests.post(
             BETFAIR_LOGIN_URL,
             data={"username": BETFAIR_USERNAME, "password": BETFAIR_PASSWORD},
-            headers={"X-Application": BETFAIR_APP_KEY, "Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "X-Application": BETFAIR_APP_KEY,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": BETFAIR_USER_AGENT,
+                "Accept": "application/json",
+            },
             cert=(BETFAIR_CERT_PATH, BETFAIR_KEY_PATH),
             timeout=15
         )
@@ -1854,7 +1864,9 @@ def betfair_api_call(method, params=None, retry=True):
     headers = {
         "X-Application": BETFAIR_APP_KEY,
         "X-Authentication": token,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": BETFAIR_USER_AGENT,
     }
     try:
         response = requests.post(BETFAIR_API_URL, json=payload, headers=headers, timeout=15)
