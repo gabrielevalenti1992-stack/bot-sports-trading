@@ -61,10 +61,14 @@ MOMENTUM_TIRI_IN_PORTA = 3
 MOMENTUM_TIRI_TOTALI = 5
 MOMENTUM_CORNER = 4
 
-# Pesi per l'indice di intensità (usato solo dal comando /intensita, su richiesta)
+# Pesi per l'indice di intensità (usato dal comando /intensita e dal report automatico)
 PESO_INTENSITA_TIRI = 1
 PESO_INTENSITA_PORTA = 2
 PESO_INTENSITA_CORNER = 1
+
+# Report automatico di intensità: ogni quanto (secondi) inviarlo, una volta che i dati sono pronti
+INTERVALLO_REPORT_INTENSITA = 900  # 15 minuti
+ULTIMO_REPORT_INTENSITA = 0
 
 # Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
 SOLO_LEGHE_CON_STATISTICHE = True
@@ -98,6 +102,7 @@ try:
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
     PESO_INTENSITA_PORTA = config.get("peso_intensita_porta", PESO_INTENSITA_PORTA)
     PESO_INTENSITA_CORNER = config.get("peso_intensita_corner", PESO_INTENSITA_CORNER)
+    INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
@@ -1088,6 +1093,40 @@ def calcola_indice_intensita(delta_stats):
     )
 
 
+def descrivi_motivazioni_intensita(delta_stats):
+    """Elenco leggibile delle statistiche (ultimi 15 min) che contribuiscono al ritmo della
+    partita, ordinate per contributo decrescente. Mostra solo le voci con variazione positiva."""
+    pesi = {
+        "Tiri totali": PESO_INTENSITA_TIRI,
+        "Tiri in porta": PESO_INTENSITA_PORTA,
+        "Corner": PESO_INTENSITA_CORNER,
+    }
+    etichette = {
+        "Tiri totali": "tiri totali",
+        "Tiri in porta": "tiri in porta",
+        "Corner": "corner",
+    }
+    contributi = []
+    for chiave, peso in pesi.items():
+        d_home, d_away = delta_stats.get(chiave, (0, 0))
+        totale = d_home + d_away
+        if totale > 0:
+            contributi.append((totale * peso, totale, etichette[chiave]))
+    if not contributi:
+        return "nessun aumento significativo di ritmo"
+    contributi.sort(key=lambda c: -c[0])
+    return ", ".join(f"+{totale} {etichetta}" for _, totale, etichetta in contributi)
+
+
+def simbolo_fiamma_per_posizione(posizione):
+    """Simboli fiamma solo per le prime 4 posizioni in classifica (1° = più fiamme)."""
+    if posizione <= 2:
+        return "🔥🔥🔥"
+    if posizione <= 4:
+        return "🔥🔥"
+    return ""
+
+
 def cmd_intensita(chat_id):
     """Classifica le partite live (nei campionati con statistiche note) per indice di intensità,
     calcolato sul ritmo recente (ultimi 15 min) invece che sui totali cumulativi di partita."""
@@ -1117,6 +1156,8 @@ def cmd_intensita(chat_id):
         away = f["teams"]["away"]["name"]
         league = f["league"]["name"]
         minute = f["fixture"]["status"].get("elapsed", "?")
+        score_h = f["goals"]["home"] or 0
+        score_a = f["goals"]["away"] or 0
         stats = get_statistiche_partita(fid)
         if stats and len(stats) >= 2:
             sh = stats[0].get("statistics", [])
@@ -1128,7 +1169,7 @@ def cmd_intensita(chat_id):
             }
             delta_stats, is_real = calcola_delta_15min(fid, current_stats)
             punteggio = calcola_indice_intensita(delta_stats)
-            risultati.append((punteggio, home, away, league, minute, is_real))
+            risultati.append((punteggio, home, away, league, minute, score_h, score_a, delta_stats, is_real))
         time.sleep(0.3)
 
     if not risultati:
@@ -1138,12 +1179,19 @@ def cmd_intensita(chat_id):
         return
 
     risultati.sort(key=lambda r: -r[0])
-    righe = [f"Indice di intensità (ritmo ultimi 15 min) su {len(risultati)} partite:\n"]
-    for punteggio, home, away, league, minute, is_real in risultati[:20]:
-        nota = "" if is_real else " (primo rilevamento, dato non ancora affidabile)"
-        righe.append(f"- {punteggio:.1f} pt | {home} vs {away} ({league}, {minute}'){nota}")
-    if len(risultati) > 20:
-        righe.append(f"\n... e altre {len(risultati) - 20} partite non mostrate")
+    top = risultati[:7]
+    righe = [f"Top {len(top)} partite più \"calde\" (ritmo ultimi 15 min):\n"]
+    for i, (punteggio, home, away, league, minute, score_h, score_a, delta_stats, is_real) in enumerate(top, start=1):
+        nota = " (primo rilevamento, dato non ancora affidabile)" if not is_real else ""
+        fiamme = simbolo_fiamma_per_posizione(i)
+        prefisso = f"{fiamme} " if fiamme else ""
+        motivazioni = descrivi_motivazioni_intensita(delta_stats)
+        righe.append(
+            f"{prefisso}{home} {score_h}-{score_a} {away} ({league}, {minute}'){nota}\n"
+            f"   {motivazioni}"
+        )
+    if len(risultati) > 7:
+        righe.append(f"\n... e altre {len(risultati) - 7} partite con ritmo più basso")
 
     testo = "\n".join(righe)
     for i in range(0, len(testo), 3800):
@@ -1276,6 +1324,48 @@ def calcola_delta_15min(fixture_id, current_stats):
         delta[key] = (max(0, curr_h - old_h), max(0, curr_a - old_a))
 
     return delta, True
+
+
+def invia_report_intensita_automatico(partite_valide):
+    """Chiamata una volta per ciclo dal loop principale. Non manda nulla finché lo storico
+    (azzerato ad ogni riavvio) non ha almeno un delta reale su 15 minuti; da quel momento invia
+    la classifica di intensità ogni INTERVALLO_REPORT_INTENSITA secondi, riusando i dati già
+    scaricati in questo ciclo (nessuna chiamata API aggiuntiva)."""
+    global ULTIMO_REPORT_INTENSITA
+    now = time.time()
+    if now - ULTIMO_REPORT_INTENSITA < INTERVALLO_REPORT_INTENSITA:
+        return
+
+    risultati = []
+    for f in partite_valide:
+        fixture_id = f.get("fixture", {}).get("id")
+        if not fixture_id:
+            continue
+        stato = stato_partite.get(fixture_id, {})
+        history = stato.get("history", [])
+        if not history:
+            continue
+        current_stats = history[-1]["stats"]
+        delta_stats, is_real = calcola_delta_15min(fixture_id, current_stats)
+        if not is_real:
+            continue
+        punteggio = calcola_indice_intensita(delta_stats)
+        home = stato.get("home") or f.get("teams", {}).get("home", {}).get("name", "?")
+        away = stato.get("away") or f.get("teams", {}).get("away", {}).get("name", "?")
+        league = stato.get("league") or f.get("league", {}).get("name", "?")
+        minute = f.get("fixture", {}).get("status", {}).get("elapsed", "?")
+        risultati.append((punteggio, home, away, league, minute))
+
+    if not risultati:
+        log("Report intensità automatico: dati non ancora pronti (storico insufficiente), skip.")
+        return
+
+    risultati.sort(key=lambda r: -r[0])
+    righe = [f"Report automatico intensità (ultimi 15 min) - {len(risultati)} partite:\n"]
+    for punteggio, home, away, league, minute in risultati[:15]:
+        righe.append(f"- {punteggio:.1f} pt | {home} vs {away} ({league}, {minute}')")
+    invia_messaggio_telegram("\n".join(righe))
+    ULTIMO_REPORT_INTENSITA = now
 
 
 # =============================================================================
@@ -1662,5 +1752,6 @@ if __name__ == "__main__":
             time.sleep(1)
 
         pulisci_partite_terminate(fixture_ids_live)
+        invia_report_intensita_automatico(partite_valide)
         log("Attesa 3 minuti...")
         time.sleep(180)

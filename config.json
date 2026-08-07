@@ -9,6 +9,7 @@
   "peso_intensita_tiri": 1,
   "peso_intensita_porta": 2,
   "peso_intensita_corner": 1,
+  "intervallo_report_intensita": 900,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",
