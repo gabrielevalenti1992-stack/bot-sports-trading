@@ -70,6 +70,13 @@ PESO_INTENSITA_CORNER = 1
 INTERVALLO_REPORT_INTENSITA = 900  # 15 minuti
 ULTIMO_REPORT_INTENSITA = 0
 
+# Storico minutaggi (analisi pre-partita /analisi): ogni quanto (secondi) ricontrollare le leghe
+# whitelist per nuove partite terminate da processare, e quante partite nuove processare al
+# massimo per singola lega ad ogni esecuzione (per non sforare le quote API in un colpo solo).
+INTERVALLO_AGGIORNAMENTO_STORICO = 604800  # 7 giorni
+STORICO_MAX_FIXTURES_PER_RUN = 30
+FASCE_MINUTO = ["0-15", "16-30", "31-45", "46-60", "61-75", "76-90"]
+
 # Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
 SOLO_LEGHE_CON_STATISTICHE = True
 LEGHE_CON_STATISTICHE = [
@@ -103,6 +110,8 @@ try:
     PESO_INTENSITA_PORTA = config.get("peso_intensita_porta", PESO_INTENSITA_PORTA)
     PESO_INTENSITA_CORNER = config.get("peso_intensita_corner", PESO_INTENSITA_CORNER)
     INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
+    INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
+    STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
@@ -159,6 +168,26 @@ def save_favorites(favs):
         json.dump(list(favs), f)
 
 FAVORITE_MATCHES = load_favorites()
+
+# =============================================================================
+# STORICO MINUTAGGI (analisi pre-partita /analisi)
+# =============================================================================
+STORICO_MINUTAGGI_FILE = "storico_minutaggi.json"
+
+def carica_storico_minutaggi():
+    if os.path.exists(STORICO_MINUTAGGI_FILE):
+        try:
+            with open(STORICO_MINUTAGGI_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {STORICO_MINUTAGGI_FILE}: {e}", flush=True)
+    return {}
+
+def salva_storico_minutaggi(dati):
+    with open(STORICO_MINUTAGGI_FILE, 'w') as f:
+        json.dump(dati, f)
+
+STORICO_MINUTAGGI = carica_storico_minutaggi()
 
 # =============================================================================
 # FIAMME - SOGLIE
@@ -360,6 +389,17 @@ def poll_callbacks():
 
                     elif cmd == "/intensita":
                         esegui_comando_sicuro(chat_id, cmd_intensita)
+
+                    elif cmd == "/analisi":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /analisi <squadra in casa> - <squadra in trasferta>\nEs: /analisi Milan - Juventus"}, timeout=5)
+                            continue
+                        esegui_comando_sicuro(chat_id, cmd_analisi, " ".join(args))
+
+                    elif cmd == "/aggiornastorico":
+                        esegui_comando_sicuro(chat_id, cmd_aggiornastorico)
 
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
@@ -693,6 +733,8 @@ def cmd_help(chat_id):
         "/statscoverage - Copertura statistiche su tutte le partite live (diagnostica)\n"
         "/cercastat <statistica> [soglia] - Cerca tra le partite live per statistica (es: tiri in porta 3, xg, possesso 60)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
+        "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
+        "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -1369,6 +1411,332 @@ def invia_report_intensita_automatico(partite_valide):
 
 
 # =============================================================================
+# STORICO MINUTAGGI - backfill/aggiornamento e analisi pre-partita (/analisi)
+# =============================================================================
+LEGHE_ID_STAGIONE_CACHE = {}
+LEGHE_ID_STAGIONE_TIMESTAMP = 0
+LEGHE_ID_STAGIONE_TTL = 86400  # 24 ore
+
+
+def fascia_minuto(elapsed):
+    """Fascia di 15 minuti a cui appartiene un gol, in base al minuto regolamentare
+    (i minuti di recupero contano nella fascia a cui appartengono: 45+2 -> '31-45', 90+3 -> '76-90')."""
+    elapsed = elapsed or 0
+    if elapsed <= 15:
+        return "0-15"
+    if elapsed <= 30:
+        return "16-30"
+    if elapsed <= 45:
+        return "31-45"
+    if elapsed <= 60:
+        return "46-60"
+    if elapsed <= 75:
+        return "61-75"
+    return "76-90"
+
+
+def risolvi_leghe_whitelist():
+    """Risolve (id, stagione) per ogni campionato in whitelist interrogando /leagues una sola
+    volta (cache 24h), per costruire/aggiornare lo storico minutaggi senza dover indovinare gli
+    ID numerici delle leghe usati dall'API."""
+    global LEGHE_ID_STAGIONE_CACHE, LEGHE_ID_STAGIONE_TIMESTAMP
+    now = time.time()
+    if LEGHE_ID_STAGIONE_CACHE and (now - LEGHE_ID_STAGIONE_TIMESTAMP) < LEGHE_ID_STAGIONE_TTL:
+        return LEGHE_ID_STAGIONE_CACHE
+    if not API_FOOTBALL_KEY:
+        return LEGHE_ID_STAGIONE_CACHE
+
+    url = "https://v3.football.api-sports.io/leagues"
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    params = {"current": "true"}
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        if response.status_code != 200:
+            log(f"Errore /leagues (risolvi_leghe_whitelist): HTTP {response.status_code}")
+            return LEGHE_ID_STAGIONE_CACHE
+        data = response.json()
+        mappa = {}
+        for item in data.get("response", []):
+            league = item.get("league", {})
+            nome = league.get("name", "")
+            league_id = league.get("id")
+            if not nome or not league_id:
+                continue
+            if not any(lega.lower() in nome.lower() or nome.lower() in lega.lower() for lega in LEGHE_CON_STATISTICHE):
+                continue
+            for season in item.get("seasons", []):
+                if season.get("current"):
+                    mappa[nome] = (league_id, season.get("year"))
+                    break
+        if mappa:
+            LEGHE_ID_STAGIONE_CACHE = mappa
+            LEGHE_ID_STAGIONE_TIMESTAMP = now
+            log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione")
+        return LEGHE_ID_STAGIONE_CACHE
+    except Exception as e:
+        log(f"Errore risolvi_leghe_whitelist: {e}")
+        return LEGHE_ID_STAGIONE_CACHE
+
+
+def get_fixtures_terminati(league_id, season):
+    if not API_FOOTBALL_KEY:
+        return []
+    url = "https://v3.football.api-sports.io/fixtures"
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    params = {"league": league_id, "season": season, "status": "FT"}
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=20)
+        if response.status_code != 200:
+            log(f"Errore fixtures terminati lega {league_id}: HTTP {response.status_code}")
+            return []
+        return response.json().get("response", [])
+    except Exception as e:
+        log(f"Errore get_fixtures_terminati({league_id}): {e}")
+        return []
+
+
+def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
+    """Scarica i gol delle partite terminate di una lega/stagione non ancora processate e
+    aggiorna lo storico locale (gol fatti/subiti per fascia di minuto, separati casa/trasferta,
+    per squadra). Elabora al massimo `max_fixtures` nuove partite per chiamata per non consumare
+    troppe richieste API in un colpo solo: le partite restanti vengono rimandate alla prossima
+    esecuzione (il progresso è tracciato su disco tramite fixture_ids_processati)."""
+    global STORICO_MINUTAGGI
+    max_fixtures = max_fixtures or STORICO_MAX_FIXTURES_PER_RUN
+    league_key = str(league_id)
+
+    lega_dati = STORICO_MINUTAGGI.get(league_key)
+    if not lega_dati or lega_dati.get("stagione") != season:
+        lega_dati = {"stagione": season, "fixture_ids_processati": [], "squadre": {}, "ultimo_aggiornamento": 0}
+
+    fixtures = get_fixtures_terminati(league_id, season)
+    if not fixtures:
+        lega_dati["ultimo_aggiornamento"] = time.time()
+        STORICO_MINUTAGGI[league_key] = lega_dati
+        salva_storico_minutaggi(STORICO_MINUTAGGI)
+        return 0
+
+    processati = set(lega_dati["fixture_ids_processati"])
+    nuove = [f for f in fixtures if f["fixture"]["id"] not in processati]
+    da_processare = nuove[:max_fixtures]
+    if da_processare:
+        log(f"Storico minutaggi: lega {league_id}, {len(da_processare)} nuove partite da processare (su {len(nuove)} non ancora fatte)")
+
+    for f in da_processare:
+        fixture_id = f["fixture"]["id"]
+        home_id = f["teams"]["home"]["id"]
+        home_name = f["teams"]["home"]["name"]
+        away_id = f["teams"]["away"]["id"]
+        away_name = f["teams"]["away"]["name"]
+
+        for team_id, nome in ((home_id, home_name), (away_id, away_name)):
+            squadra = lega_dati["squadre"].setdefault(str(team_id), {
+                "nome": nome,
+                "casa": {"partite": 0, "fatti": {b: 0 for b in FASCE_MINUTO}, "subiti": {b: 0 for b in FASCE_MINUTO}},
+                "trasferta": {"partite": 0, "fatti": {b: 0 for b in FASCE_MINUTO}, "subiti": {b: 0 for b in FASCE_MINUTO}},
+            })
+            squadra["nome"] = nome
+
+        lega_dati["squadre"][str(home_id)]["casa"]["partite"] += 1
+        lega_dati["squadre"][str(away_id)]["trasferta"]["partite"] += 1
+
+        eventi = fetch_fixture_events(fixture_id)
+        for ev in eventi:
+            if ev.get("type") != "Goal":
+                continue
+            if (ev.get("detail") or "").lower() == "missed penalty":
+                continue
+            minuto = (ev.get("time") or {}).get("elapsed")
+            if minuto is None:
+                continue
+            fascia = fascia_minuto(minuto)
+            team_gol_id = (ev.get("team") or {}).get("id")
+            if team_gol_id == home_id:
+                lega_dati["squadre"][str(home_id)]["casa"]["fatti"][fascia] += 1
+                lega_dati["squadre"][str(away_id)]["trasferta"]["subiti"][fascia] += 1
+            elif team_gol_id == away_id:
+                lega_dati["squadre"][str(away_id)]["trasferta"]["fatti"][fascia] += 1
+                lega_dati["squadre"][str(home_id)]["casa"]["subiti"][fascia] += 1
+
+        lega_dati["fixture_ids_processati"].append(fixture_id)
+        time.sleep(0.3)
+
+    lega_dati["ultimo_aggiornamento"] = time.time()
+    STORICO_MINUTAGGI[league_key] = lega_dati
+    salva_storico_minutaggi(STORICO_MINUTAGGI)
+    return len(da_processare)
+
+
+def aggiorna_storico_minutaggi_tutte_leghe():
+    """Forza l'aggiornamento di tutte le leghe whitelist adesso (usato da /aggiornastorico)."""
+    mappa = risolvi_leghe_whitelist()
+    if not mappa:
+        log("Storico minutaggi: nessuna lega whitelist risolta, skip aggiornamento")
+        return 0
+    totale = 0
+    for nome, (league_id, season) in mappa.items():
+        if not season:
+            continue
+        totale += aggiorna_storico_minutaggi_lega(league_id, season)
+        time.sleep(1)
+    log(f"Storico minutaggi: aggiornamento completato, {totale} nuove partite processate in totale")
+    return totale
+
+
+def aggiorna_storico_minutaggi_automatico():
+    """Chiamata ad ogni ciclo del loop principale: per ogni lega whitelist, se sono passati
+    almeno INTERVALLO_AGGIORNAMENTO_STORICO secondi dall'ultimo aggiornamento (dato letto dallo
+    storico su disco, quindi resta valido anche tra un riavvio e l'altro del bot), scarica le
+    partite nuove. Il limite STORICO_MAX_FIXTURES_PER_RUN evita di sforare le quote API anche al
+    primo avvio con molte giornate arretrate da recuperare."""
+    mappa = risolvi_leghe_whitelist()
+    if not mappa:
+        return
+    now = time.time()
+    for nome, (league_id, season) in mappa.items():
+        if not season:
+            continue
+        lega_dati = STORICO_MINUTAGGI.get(str(league_id), {})
+        ultimo = lega_dati.get("ultimo_aggiornamento", 0)
+        if now - ultimo < INTERVALLO_AGGIORNAMENTO_STORICO:
+            continue
+        log(f"Storico minutaggi: aggiornamento automatico lega {nome} ({league_id})")
+        aggiorna_storico_minutaggi_lega(league_id, season)
+        time.sleep(1)
+
+
+def trova_squadra_in_storico(nome_query):
+    """Cerca una squadra per nome (case-insensitive, match parziale) tra tutte le leghe salvate
+    nello storico. In caso di più corrispondenze sceglie quella con più partite giocate."""
+    query = nome_query.lower().strip()
+    candidati = []
+    for lega_dati in STORICO_MINUTAGGI.values():
+        for squadra in lega_dati.get("squadre", {}).values():
+            nome = squadra.get("nome", "")
+            if query in nome.lower() or nome.lower() in query:
+                partite_totali = squadra["casa"]["partite"] + squadra["trasferta"]["partite"]
+                candidati.append((partite_totali, squadra))
+    if not candidati:
+        return None
+    candidati.sort(key=lambda c: -c[0])
+    return candidati[0][1]
+
+
+def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasferta):
+    """Grafico con 2 pannelli: distribuzione gol fatti/subiti per fascia di 15 minuti,
+    squadra di casa nelle sue partite in casa, squadra ospite nelle sue partite in trasferta."""
+    try:
+        fig, axes = plt.subplots(2, 1, figsize=(6.5, 6.5), dpi=150)
+        fig.patch.set_facecolor('#1e1e1e')
+
+        color_fatti = '#22c55e'
+        color_subiti = '#ef4444'
+        color_text = '#e5e5e5'
+        color_muted = '#888888'
+
+        pannelli = [
+            (axes[0], f"{nome_casa} (in casa)", dati_casa),
+            (axes[1], f"{nome_trasferta} (in trasferta)", dati_trasferta),
+        ]
+
+        x = np.arange(len(FASCE_MINUTO))
+        larghezza = 0.35
+
+        for ax, titolo, dati in pannelli:
+            ax.set_facecolor('#1e1e1e')
+            fatti = [dati["fatti"].get(b, 0) for b in FASCE_MINUTO]
+            subiti = [dati["subiti"].get(b, 0) for b in FASCE_MINUTO]
+
+            ax.bar(x - larghezza / 2, fatti, larghezza, color=color_fatti, label="Gol fatti")
+            ax.bar(x + larghezza / 2, subiti, larghezza, color=color_subiti, label="Gol subiti")
+
+            ax.set_xticks(x)
+            ax.set_xticklabels([f"{b}'" for b in FASCE_MINUTO], fontsize=8, color=color_text)
+            ax.tick_params(axis='y', colors=color_muted, labelsize=8)
+            partite = dati.get("partite", 0)
+            ax.set_title(f"{titolo} - {partite} partite", fontsize=10, color=color_text, loc='left')
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            ax.legend(fontsize=8, labelcolor=color_text, frameon=False, loc='upper right')
+
+        plt.tight_layout()
+        foto_path = os.path.join(os.path.dirname(__file__), f'minutaggi_{int(time.time())}.png')
+        plt.savefig(foto_path, format='png', bbox_inches='tight', facecolor='#1e1e1e', edgecolor='none', pad_inches=0.15)
+        plt.close()
+        return foto_path
+    except Exception as e:
+        log(f"Errore grafico minutaggi: {e}")
+        return None
+
+
+def cmd_analisi(chat_id, testo_richiesta):
+    """/analisi <squadra in casa> - <squadra in trasferta>: mostra la distribuzione storica di
+    gol fatti/subiti per fascia di 15 minuti delle due squadre nel proprio ruolo per la partita
+    in arrivo, usando lo storico costruito da /aggiornastorico."""
+    separatore = " - " if " - " in testo_richiesta else "-"
+    if separatore not in testo_richiesta:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Usa: /analisi <squadra in casa> - <squadra in trasferta>\nEs: /analisi Milan - Juventus"}, timeout=5)
+        return
+
+    nome_casa_query, nome_trasferta_query = testo_richiesta.split(separatore, 1)
+    nome_casa_query = nome_casa_query.strip()
+    nome_trasferta_query = nome_trasferta_query.strip()
+
+    squadra_casa = trova_squadra_in_storico(nome_casa_query)
+    squadra_trasferta = trova_squadra_in_storico(nome_trasferta_query)
+
+    mancanti = [q for q, s in ((nome_casa_query, squadra_casa), (nome_trasferta_query, squadra_trasferta)) if not s]
+    if mancanti:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Nessuno storico trovato per: {', '.join(mancanti)}.\nProva prima /aggiornastorico, oppure controlla il nome."}, timeout=5)
+        return
+
+    if squadra_casa["casa"]["partite"] == 0 or squadra_trasferta["trasferta"]["partite"] == 0:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Storico insufficiente per una o entrambe le squadre nel ruolo richiesto (casa/trasferta). Aspetta altre giornate o lancia /aggiornastorico."}, timeout=5)
+        return
+
+    foto_path = genera_grafico_minutaggi(
+        squadra_casa["nome"], squadra_casa["casa"],
+        squadra_trasferta["nome"], squadra_trasferta["trasferta"]
+    )
+    messaggio = (
+        f"{squadra_casa['nome']} vs {squadra_trasferta['nome']}\n"
+        f"Distribuzione storica gol per fascia di minuto (stagione corrente)\n"
+        f"Verde = gol fatti, Rosso = gol subiti"
+    )
+
+    try:
+        if foto_path and os.path.exists(foto_path):
+            with open(foto_path, 'rb') as photo:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": messaggio},
+                    files={"photo": photo}, timeout=15)
+            os.remove(foto_path)
+        else:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": messaggio}, timeout=5)
+    except Exception as e:
+        log(f"Errore invio /analisi: {e}")
+
+
+def cmd_aggiornastorico(chat_id):
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "Aggiornamento storico minutaggi in corso, può richiedere qualche minuto..."}, timeout=5)
+    totale = aggiorna_storico_minutaggi_tutte_leghe()
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": f"Aggiornamento completato: {totale} nuove partite processate. Se erano tante, alcune potrebbero essere rimandate al prossimo aggiornamento per non sforare i limiti API."}, timeout=5)
+
+
+# =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False):
@@ -1702,6 +2070,8 @@ def imposta_comandi_telegram():
         {"command": "silenced", "description": "Lista partite silenziate"},
         {"command": "leghestats", "description": "Leghe con statistiche coperte"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
+        {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
+        {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
     ]
     try:
@@ -1753,5 +2123,6 @@ if __name__ == "__main__":
 
         pulisci_partite_terminate(fixture_ids_live)
         invia_report_intensita_automatico(partite_valide)
+        aggiorna_storico_minutaggi_automatico()
         log("Attesa 3 minuti...")
         time.sleep(180)
