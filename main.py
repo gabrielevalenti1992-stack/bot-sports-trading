@@ -82,6 +82,22 @@ SOLO_LEGHE_CON_STATISTICHE = True
 LEGHE_CON_STATISTICHE = [
     "Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1",
     "Eredivisie", "Primeira Liga", "Championship",
+    # Seconde divisioni dei campionati top
+    "Segunda División", "Segunda Division", "Serie B", "2. Bundesliga", "Ligue 2", "Eerste Divisie",
+    "League One", "League Two",
+    # Giappone e Corea del Sud
+    "J1 League", "J2 League", "K League 1", "K League 2",
+    # Belgio, Croazia, Danimarca, Romania, Turchia, Svizzera, Scozia/Irlanda del Nord, Arabia Saudita, USA
+    # (Austria è già coperta da "Bundesliga", nome condiviso con la Germania nell'API)
+    "Jupiler Pro League", "First Division A", "HNL", "Superliga", "Liga I",
+    "Süper Lig", "Super Lig", "Super League", "Premiership",
+    "Saudi Pro League", "Pro League", "Major League Soccer",
+    # Svezia, Polonia, Slovenia, Slovacchia
+    "Allsvenskan", "Ekstraklasa", "Prva Liga", "Super Liga", "Fortuna Liga",
+    # Serbia (già coperta da "Super Liga"), Repubblica Ceca, Ungheria, Finlandia, Islanda
+    "Czech Liga", "NB I", "Veikkausliiga", "Besta deild", "Úrvalsdeild",
+    # Brasile e Argentina (Brasile già coperto da "Serie A"/"Serie B"), Colombia, Uruguay
+    "Liga Profesional Argentina", "Copa de la Liga Profesional", "Primera A", "Primera División",
     "Champions League", "Europa League", "Conference League",
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
 ]
@@ -501,10 +517,12 @@ def campionato_valido(league_name, league_type, league_country=""):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
         aggiorna_leghe_attive()
-        if LEGHE_ATTIVE_CACHE:
-            if (league_country.lower(), nome) not in LEGHE_ATTIVE_CACHE:
-                return False
-        elif not any(lega.lower() in nome for lega in LEGHE_CON_STATISTICHE):
+        in_cache_dinamica = (league_country.lower(), nome) in LEGHE_ATTIVE_CACHE
+        in_whitelist_statica = any(lega.lower() in nome for lega in LEGHE_CON_STATISTICHE)
+        # Unione, non sostituzione: la whitelist statica resta una rete di sicurezza per i
+        # campionati core anche quando l'API non li marca ancora come "coperti" nella stagione
+        # corrente (es. a inizio stagione, prima che vengano giocate partite con statistiche reali).
+        if not in_cache_dinamica and not in_whitelist_statica:
             return False
     return True
 
