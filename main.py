@@ -428,14 +428,6 @@ def poll_callbacks():
                     elif cmd == "/aggiornastorico":
                         esegui_comando_sicuro(chat_id, cmd_aggiornastorico)
 
-                    elif cmd == "/quotebetfair":
-                        if not args:
-                            requests.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /quotebetfair <squadra casa> - <squadra trasferta>\nEs: /quotebetfair Milan - Juventus"}, timeout=5)
-                            continue
-                        esegui_comando_sicuro(chat_id, cmd_quotebetfair, " ".join(args))
-
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
 
@@ -773,7 +765,6 @@ def cmd_help(chat_id):
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
         "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
-        "/quotebetfair <squadra casa> - <squadra trasferta> - Quote Betfair 1X2/Over-Under/Goal-NoGoal (es: /quotebetfair Milan - Juventus)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -1788,155 +1779,6 @@ def cmd_aggiornastorico(chat_id):
 
 
 # =============================================================================
-# BETFAIR - quote 1X2 / Over-Under 2.5 / Goal-NoGoal (login non interattivo con certificato)
-# =============================================================================
-BETFAIR_RELAY_URL = os.environ.get("BETFAIR_RELAY_URL")
-BETFAIR_RELAY_SECRET = os.environ.get("BETFAIR_RELAY_SECRET")
-BETFAIR_EVENT_TYPE_CALCIO = "1"
-
-BETFAIR_CONFIGURATO = bool(BETFAIR_RELAY_URL and BETFAIR_RELAY_SECRET)
-print(f"Betfair configurato: {'SI' if BETFAIR_CONFIGURATO else 'NO (relay non configurato, funzioni quote disattivate)'}", flush=True)
-
-
-def betfair_api_call(method, params=None):
-    """Chiamata all'API Betfair tramite il relay che gira su un PC con IP italiano
-    (richiesto dall'Exchange regolamentato ADM, non raggiungibile dai datacenter di Render).
-    Login e sessione sono gestiti dal relay stesso."""
-    if not BETFAIR_CONFIGURATO:
-        return None
-    try:
-        response = requests.post(
-            f"{BETFAIR_RELAY_URL.rstrip('/')}/betfair-call",
-            json={"method": method, "params": params or {}},
-            headers={"X-Relay-Secret": BETFAIR_RELAY_SECRET},
-            timeout=20
-        )
-    except Exception as e:
-        log(f"Errore rete verso il relay Betfair ({method}): {e}")
-        return None
-
-    if response.status_code != 200:
-        log(f"Errore relay Betfair ({method}): HTTP {response.status_code} - body: {response.text[:500]!r}")
-        return None
-
-    try:
-        risultato = response.json()
-    except Exception as e:
-        log(f"Errore parsing risposta relay Betfair ({method}): {e}")
-        return None
-
-    if risultato.get("error"):
-        log(f"Errore API Betfair ({method}) dal relay: {risultato['error']}")
-        return None
-    return risultato.get("result")
-
-
-def trova_mercati_betfair(home_team, away_team):
-    """Cerca l'evento Betfair corrispondente a una partita (ricerca testuale per nome squadra di
-    casa, poi verifica che compaia anche quella in trasferta) e restituisce i cataloghi dei
-    mercati Match Odds, Over/Under 2.5 Goals e Both Teams To Score, se trovati."""
-    eventi = betfair_api_call("listEvents", {
-        "filter": {
-            "eventTypeIds": [BETFAIR_EVENT_TYPE_CALCIO],
-            "textQuery": home_team
-        }
-    })
-    if not eventi:
-        return None
-
-    evento_scelto = None
-    for e in eventi:
-        nome_evento = (e.get("event") or {}).get("name", "").lower()
-        if home_team.lower() in nome_evento and away_team.lower() in nome_evento:
-            evento_scelto = e["event"]
-            break
-    if not evento_scelto:
-        return None
-
-    cataloghi = betfair_api_call("listMarketCatalogue", {
-        "filter": {"eventIds": [evento_scelto["id"]]},
-        "marketProjection": ["MARKET_START_TIME", "RUNNER_DESCRIPTION"],
-        "maxResults": 50
-    })
-    if not cataloghi:
-        return None
-
-    mercati = {"1x2": None, "over_under_25": None, "goal_nogoal": None}
-    for m in cataloghi:
-        nome = (m.get("marketName") or "").lower()
-        if nome == "match odds":
-            mercati["1x2"] = m
-        elif "over/under 2.5" in nome:
-            mercati["over_under_25"] = m
-        elif "both teams to score" in nome:
-            mercati["goal_nogoal"] = m
-    return mercati if any(mercati.values()) else None
-
-
-def leggi_quote_mercato(market_id):
-    """Legge la miglior quota back disponibile per ogni esito di un mercato Betfair."""
-    libri = betfair_api_call("listMarketBook", {
-        "marketIds": [market_id],
-        "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
-    })
-    if not libri:
-        return None
-    libro = libri[0]
-    quote = {}
-    for runner in libro.get("runners", []):
-        selection_id = runner.get("selectionId")
-        prezzi = (runner.get("ex") or {}).get("availableToBack") or []
-        quote[selection_id] = prezzi[0]["price"] if prezzi else None
-    return quote
-
-
-def cmd_quotebetfair(chat_id, testo_richiesta):
-    """/quotebetfair <squadra casa> - <squadra trasferta>: diagnostica, mostra le quote Betfair
-    trovate per la partita (1X2, Over/Under 2.5, Goal/No Goal)."""
-    if not BETFAIR_CONFIGURATO:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Integrazione Betfair non configurata (variabili d'ambiente mancanti)."}, timeout=5)
-        return
-
-    separatore = " - " if " - " in testo_richiesta else "-"
-    if separatore not in testo_richiesta:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Usa: /quotebetfair <squadra casa> - <squadra trasferta>"}, timeout=5)
-        return
-
-    home, away = [p.strip() for p in testo_richiesta.split(separatore, 1)]
-    mercati = trova_mercati_betfair(home, away)
-    if not mercati:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessun mercato Betfair trovato per {home} vs {away}."}, timeout=5)
-        return
-
-    righe = [f"Quote Betfair {home} vs {away} (chiave Delayed, dati con ritardo):\n"]
-    for chiave, etichetta in (("1x2", "1X2"), ("over_under_25", "Over/Under 2.5"), ("goal_nogoal", "Goal/No Goal")):
-        mercato = mercati.get(chiave)
-        if not mercato:
-            righe.append(f"{etichetta}: mercato non trovato")
-            continue
-        quote = leggi_quote_mercato(mercato["marketId"])
-        if not quote:
-            righe.append(f"{etichetta}: quote non disponibili")
-            continue
-        dettagli = []
-        for runner in mercato.get("runners", []):
-            nome_esito = runner.get("runnerName", "?")
-            prezzo = quote.get(runner.get("selectionId"))
-            dettagli.append(f"{nome_esito}: {prezzo if prezzo else '?'}")
-        righe.append(f"{etichetta}: " + " | ".join(dettagli))
-
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=10)
-
-
-# =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False):
@@ -2274,7 +2116,6 @@ def imposta_comandi_telegram():
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
-        {"command": "quotebetfair", "description": "Quote Betfair 1X2/Over-Under/Goal-NoGoal"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
     ]
     try:
