@@ -42,10 +42,15 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
 
+# Chat/canale dedicato alle notifiche delle partite preferite (opzionale). Se non impostata,
+# le notifiche dei preferiti restano nella chat principale come tutte le altre.
+TELEGRAM_CHAT_ID_PREFERITI = os.environ.get("TELEGRAM_CHAT_ID_PREFERITI") or TELEGRAM_CHAT_ID
+
 CONFIG_VALIDA = all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, API_FOOTBALL_KEY])
 print(f"TOKEN presente: {'SI' if TELEGRAM_BOT_TOKEN else 'NO'}", flush=True)
 print(f"CHAT_ID presente: {'SI' if TELEGRAM_CHAT_ID else 'NO'}", flush=True)
 print(f"API_KEY presente: {'SI' if API_FOOTBALL_KEY else 'NO'}", flush=True)
+print(f"CHAT_ID preferiti dedicato: {'SI' if os.environ.get('TELEGRAM_CHAT_ID_PREFERITI') else 'NO (uso la chat principale)'}", flush=True)
 
 if not CONFIG_VALIDA:
     print("CONFIGURAZIONE INCOMPLETA - Impossibile avviare il bot", flush=True)
@@ -417,6 +422,14 @@ def poll_callbacks():
                     elif cmd == "/aggiornastorico":
                         esegui_comando_sicuro(chat_id, cmd_aggiornastorico)
 
+                    elif cmd == "/quotebetfair":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /quotebetfair <squadra casa> - <squadra trasferta>\nEs: /quotebetfair Milan - Juventus"}, timeout=5)
+                            continue
+                        esegui_comando_sicuro(chat_id, cmd_quotebetfair, " ".join(args))
+
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
 
@@ -471,30 +484,31 @@ def log(msg):
     print(msg, flush=True)
 
 
-def invia_messaggio_telegram(testo):
+def invia_messaggio_telegram(testo, chat_id=None):
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {testo[:50]}")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': testo, 'parse_mode': 'Markdown'}
+        data = {'chat_id': chat_id or TELEGRAM_CHAT_ID, 'text': testo, 'parse_mode': 'Markdown'}
         response = requests.post(url, data=data, timeout=10)
         log(f"Telegram testo - Status: {response.status_code} - {response.text[:100]}")
     except Exception as e:
         log(f"Errore invio testo Telegram: {e}")
 
 
-def invia_notifica_telegram(foto_path, messaggio, reply_markup=None):
+def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=None):
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {messaggio[:50]}")
         return
+    destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         if foto_path and os.path.exists(foto_path):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             with open(foto_path, 'rb') as photo:
                 files = {'photo': photo}
                 data = {
-                    'chat_id': TELEGRAM_CHAT_ID,
+                    'chat_id': destinatario,
                     'caption': messaggio,
                     'parse_mode': 'Markdown'
                 }
@@ -503,7 +517,7 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None):
                 response = requests.post(url, data=data, files=files, timeout=10)
                 log(f"Telegram foto - Status: {response.status_code}")
         else:
-            invia_messaggio_telegram(messaggio)
+            invia_messaggio_telegram(messaggio, chat_id=destinatario)
     except Exception as e:
         log(f"Errore invio Telegram: {e}")
 
@@ -753,6 +767,7 @@ def cmd_help(chat_id):
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
         "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
+        "/quotebetfair <squadra casa> - <squadra trasferta> - Quote Betfair 1X2/Over-Under/Goal-NoGoal (es: /quotebetfair Milan - Juventus)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -1755,6 +1770,201 @@ def cmd_aggiornastorico(chat_id):
 
 
 # =============================================================================
+# BETFAIR - quote 1X2 / Over-Under 2.5 / Goal-NoGoal (login non interattivo con certificato)
+# =============================================================================
+BETFAIR_APP_KEY = os.environ.get("BETFAIR_APP_KEY")
+BETFAIR_USERNAME = os.environ.get("BETFAIR_USERNAME")
+BETFAIR_PASSWORD = os.environ.get("BETFAIR_PASSWORD")
+BETFAIR_CERT_PATH = os.environ.get("BETFAIR_CERT_PATH")
+BETFAIR_KEY_PATH = os.environ.get("BETFAIR_KEY_PATH")
+
+BETFAIR_CONFIGURATO = all([BETFAIR_APP_KEY, BETFAIR_USERNAME, BETFAIR_PASSWORD, BETFAIR_CERT_PATH, BETFAIR_KEY_PATH])
+print(f"Betfair configurato: {'SI' if BETFAIR_CONFIGURATO else 'NO (variabili mancanti, funzioni quote disattivate)'}", flush=True)
+
+BETFAIR_LOGIN_URL = "https://identitysso-cert.betfair.it/api/certlogin"
+BETFAIR_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+BETFAIR_EVENT_TYPE_CALCIO = "1"
+
+BETFAIR_SESSION_TOKEN = None
+BETFAIR_SESSION_TIMESTAMP = 0
+BETFAIR_SESSION_TTL = 4 * 3600  # rinnova la sessione ogni 4 ore per sicurezza
+
+
+def betfair_login(force=False):
+    """Login non interattivo (bot) con certificato client, per l'Exchange italiano.
+    Riusa il token in cache se ancora valido, altrimenti rifà il login."""
+    global BETFAIR_SESSION_TOKEN, BETFAIR_SESSION_TIMESTAMP
+    if not BETFAIR_CONFIGURATO:
+        return None
+    now = time.time()
+    if not force and BETFAIR_SESSION_TOKEN and (now - BETFAIR_SESSION_TIMESTAMP) < BETFAIR_SESSION_TTL:
+        return BETFAIR_SESSION_TOKEN
+    try:
+        response = requests.post(
+            BETFAIR_LOGIN_URL,
+            data={"username": BETFAIR_USERNAME, "password": BETFAIR_PASSWORD},
+            headers={"X-Application": BETFAIR_APP_KEY, "Content-Type": "application/x-www-form-urlencoded"},
+            cert=(BETFAIR_CERT_PATH, BETFAIR_KEY_PATH),
+            timeout=15
+        )
+        data = response.json()
+        if data.get("loginStatus") == "SUCCESS":
+            BETFAIR_SESSION_TOKEN = data.get("sessionToken")
+            BETFAIR_SESSION_TIMESTAMP = now
+            log("Betfair: login riuscito")
+            return BETFAIR_SESSION_TOKEN
+        log(f"Betfair: login fallito - {data.get('loginStatus')}")
+        BETFAIR_SESSION_TOKEN = None
+        return None
+    except Exception as e:
+        log(f"Errore login Betfair: {e}")
+        return None
+
+
+def betfair_api_call(method, params=None, retry=True):
+    """Chiamata generica all'API Betting di Betfair (JSON-RPC). Se la sessione risulta scaduta,
+    rifà il login una volta sola e ritenta."""
+    token = betfair_login()
+    if not token:
+        return None
+    payload = [{
+        "jsonrpc": "2.0",
+        "method": f"SportsAPING/v1.0/{method}",
+        "params": params or {},
+        "id": 1
+    }]
+    headers = {
+        "X-Application": BETFAIR_APP_KEY,
+        "X-Authentication": token,
+        "Content-Type": "application/json"
+    }
+    try:
+        response = requests.post(BETFAIR_API_URL, json=payload, headers=headers, timeout=15)
+        risultato = response.json()
+        if isinstance(risultato, list) and risultato:
+            item = risultato[0]
+            errore = item.get("error")
+            if errore:
+                codice = ((errore.get("data") or {}).get("APINGException") or {}).get("errorCode", "")
+                if retry and codice in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
+                    log("Betfair: sessione scaduta, rifaccio login")
+                    betfair_login(force=True)
+                    return betfair_api_call(method, params, retry=False)
+                log(f"Errore API Betfair ({method}): {errore}")
+                return None
+            return item.get("result")
+        return None
+    except Exception as e:
+        log(f"Errore chiamata Betfair {method}: {e}")
+        return None
+
+
+def trova_mercati_betfair(home_team, away_team):
+    """Cerca l'evento Betfair corrispondente a una partita (ricerca testuale per nome squadra di
+    casa, poi verifica che compaia anche quella in trasferta) e restituisce i cataloghi dei
+    mercati Match Odds, Over/Under 2.5 Goals e Both Teams To Score, se trovati."""
+    eventi = betfair_api_call("listEvents", {
+        "filter": {
+            "eventTypeIds": [BETFAIR_EVENT_TYPE_CALCIO],
+            "textQuery": home_team
+        }
+    })
+    if not eventi:
+        return None
+
+    evento_scelto = None
+    for e in eventi:
+        nome_evento = (e.get("event") or {}).get("name", "").lower()
+        if home_team.lower() in nome_evento and away_team.lower() in nome_evento:
+            evento_scelto = e["event"]
+            break
+    if not evento_scelto:
+        return None
+
+    cataloghi = betfair_api_call("listMarketCatalogue", {
+        "filter": {"eventIds": [evento_scelto["id"]]},
+        "marketProjection": ["MARKET_START_TIME", "RUNNER_DESCRIPTION"],
+        "maxResults": 50
+    })
+    if not cataloghi:
+        return None
+
+    mercati = {"1x2": None, "over_under_25": None, "goal_nogoal": None}
+    for m in cataloghi:
+        nome = (m.get("marketName") or "").lower()
+        if nome == "match odds":
+            mercati["1x2"] = m
+        elif "over/under 2.5" in nome:
+            mercati["over_under_25"] = m
+        elif "both teams to score" in nome:
+            mercati["goal_nogoal"] = m
+    return mercati if any(mercati.values()) else None
+
+
+def leggi_quote_mercato(market_id):
+    """Legge la miglior quota back disponibile per ogni esito di un mercato Betfair."""
+    libri = betfair_api_call("listMarketBook", {
+        "marketIds": [market_id],
+        "priceProjection": {"priceData": ["EX_BEST_OFFERS"]}
+    })
+    if not libri:
+        return None
+    libro = libri[0]
+    quote = {}
+    for runner in libro.get("runners", []):
+        selection_id = runner.get("selectionId")
+        prezzi = (runner.get("ex") or {}).get("availableToBack") or []
+        quote[selection_id] = prezzi[0]["price"] if prezzi else None
+    return quote
+
+
+def cmd_quotebetfair(chat_id, testo_richiesta):
+    """/quotebetfair <squadra casa> - <squadra trasferta>: diagnostica, mostra le quote Betfair
+    trovate per la partita (1X2, Over/Under 2.5, Goal/No Goal)."""
+    if not BETFAIR_CONFIGURATO:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Integrazione Betfair non configurata (variabili d'ambiente mancanti)."}, timeout=5)
+        return
+
+    separatore = " - " if " - " in testo_richiesta else "-"
+    if separatore not in testo_richiesta:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Usa: /quotebetfair <squadra casa> - <squadra trasferta>"}, timeout=5)
+        return
+
+    home, away = [p.strip() for p in testo_richiesta.split(separatore, 1)]
+    mercati = trova_mercati_betfair(home, away)
+    if not mercati:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Nessun mercato Betfair trovato per {home} vs {away}."}, timeout=5)
+        return
+
+    righe = [f"Quote Betfair {home} vs {away} (chiave Delayed, dati con ritardo):\n"]
+    for chiave, etichetta in (("1x2", "1X2"), ("over_under_25", "Over/Under 2.5"), ("goal_nogoal", "Goal/No Goal")):
+        mercato = mercati.get(chiave)
+        if not mercato:
+            righe.append(f"{etichetta}: mercato non trovato")
+            continue
+        quote = leggi_quote_mercato(mercato["marketId"])
+        if not quote:
+            righe.append(f"{etichetta}: quote non disponibili")
+            continue
+        dettagli = []
+        for runner in mercato.get("runners", []):
+            nome_esito = runner.get("runnerName", "?")
+            prezzo = quote.get(runner.get("selectionId"))
+            dettagli.append(f"{nome_esito}: {prezzo if prezzo else '?'}")
+        righe.append(f"{etichetta}: " + " | ".join(dettagli))
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=10)
+
+
+# =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False):
@@ -1949,7 +2159,8 @@ def processa_partita(fixture):
                         f"- Corner: {corner_casa if current_stats else '?'} - {corner_ospite if current_stats else '?'}"
                     )
 
-                invia_notifica_telegram(foto_path, messaggio)
+                chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
+                invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
 
                 SILENCED_MATCHES.pop(str(fixture_id), None)
                 save_silenced(SILENCED_MATCHES)
@@ -2040,7 +2251,8 @@ def processa_partita(fixture):
         is_fav = str(fixture_id) in FAVORITE_MATCHES
         is_sil = str(fixture_id) in SILENCED_MATCHES
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil)
-        invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard)
+        chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
+        invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
         stato_partite[fixture_id].update({
@@ -2090,6 +2302,7 @@ def imposta_comandi_telegram():
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
+        {"command": "quotebetfair", "description": "Quote Betfair 1X2/Over-Under/Goal-NoGoal"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
     ]
     try:

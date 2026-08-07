@@ -219,4 +219,12 @@ __marimo__/
 
 # File di stato generati dal bot
 silenced_matches.json
+favorite_matches.json
+storico_minutaggi.json
+
+# Certificati e chiavi private (es. login Betfair) - mai su GitHub
+certs/
+*.pem
+*.key
+*.crt
 
