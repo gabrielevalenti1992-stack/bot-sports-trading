@@ -1858,23 +1858,34 @@ def betfair_api_call(method, params=None, retry=True):
     }
     try:
         response = requests.post(BETFAIR_API_URL, json=payload, headers=headers, timeout=15)
-        risultato = response.json()
-        if isinstance(risultato, list) and risultato:
-            item = risultato[0]
-            errore = item.get("error")
-            if errore:
-                codice = ((errore.get("data") or {}).get("APINGException") or {}).get("errorCode", "")
-                if retry and codice in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
-                    log("Betfair: sessione scaduta, rifaccio login")
-                    betfair_login(force=True)
-                    return betfair_api_call(method, params, retry=False)
-                log(f"Errore API Betfair ({method}): {errore}")
-                return None
-            return item.get("result")
-        return None
     except Exception as e:
-        log(f"Errore chiamata Betfair {method}: {e}")
+        log(f"Errore rete chiamata Betfair {method}: {e}")
         return None
+
+    if response.status_code != 200 or not response.text.strip():
+        log(f"Errore chiamata Betfair ({method}): HTTP {response.status_code} - body: {response.text[:500]!r}")
+        return None
+
+    try:
+        risultato = response.json()
+    except Exception as e:
+        log(f"Errore parsing risposta Betfair ({method}): {e} - HTTP {response.status_code} - body: {response.text[:500]!r}")
+        return None
+
+    if isinstance(risultato, list) and risultato:
+        item = risultato[0]
+        errore = item.get("error")
+        if errore:
+            codice = ((errore.get("data") or {}).get("APINGException") or {}).get("errorCode", "")
+            if retry and codice in ("INVALID_SESSION_INFORMATION", "NO_SESSION"):
+                log("Betfair: sessione scaduta, rifaccio login")
+                betfair_login(force=True)
+                return betfair_api_call(method, params, retry=False)
+            log(f"Errore API Betfair ({method}): {errore}")
+            return None
+        return item.get("result")
+    log(f"Risposta Betfair ({method}) inattesa: {str(risultato)[:500]}")
+    return None
 
 
 def trova_mercati_betfair(home_team, away_team):
