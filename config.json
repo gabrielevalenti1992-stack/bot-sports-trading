@@ -12,6 +12,7 @@
   "intervallo_report_intensita": 900,
   "intervallo_aggiornamento_storico": 604800,
   "storico_max_fixtures_per_run": 30,
+  "storico_aggiornamento_automatico": false,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",

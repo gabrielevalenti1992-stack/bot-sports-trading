@@ -77,9 +77,14 @@ ULTIMO_REPORT_INTENSITA = 0
 
 # Storico minutaggi (analisi pre-partita /analisi): ogni quanto (secondi) ricontrollare le leghe
 # whitelist per nuove partite terminate da processare, e quante partite nuove processare al
-# massimo per singola lega ad ogni esecuzione (per non sforare le quote API in un colpo solo).
+# massimo (in totale, su tutte le leghe insieme) ad ogni esecuzione, per non sforare le quote API
+# in un colpo solo. L'aggiornamento automatico è spento di default: con ~40 leghe in whitelist,
+# ogni riavvio del bot altrimenti riproverebbe il backfill su tutte, consumando in fretta la quota
+# giornaliera di API-Football. Va acceso esplicitamente in config.json quando si è pronti, oppure
+# si usa /aggiornastorico a mano quando si decide di spendere quota.
 INTERVALLO_AGGIORNAMENTO_STORICO = 604800  # 7 giorni
 STORICO_MAX_FIXTURES_PER_RUN = 30
+STORICO_AGGIORNAMENTO_AUTOMATICO = False
 FASCE_MINUTO = ["0-15", "16-30", "31-45", "46-60", "61-75", "76-90"]
 
 # Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
@@ -133,6 +138,7 @@ try:
     INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
     INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
     STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
+    STORICO_AGGIORNAMENTO_AUTOMATICO = config.get("storico_aggiornamento_automatico", STORICO_AGGIORNAMENTO_AUTOMATICO)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
@@ -1617,16 +1623,26 @@ def aggiorna_storico_minutaggi_tutte_leghe():
 
 
 def aggiorna_storico_minutaggi_automatico():
-    """Chiamata ad ogni ciclo del loop principale: per ogni lega whitelist, se sono passati
-    almeno INTERVALLO_AGGIORNAMENTO_STORICO secondi dall'ultimo aggiornamento (dato letto dallo
-    storico su disco, quindi resta valido anche tra un riavvio e l'altro del bot), scarica le
-    partite nuove. Il limite STORICO_MAX_FIXTURES_PER_RUN evita di sforare le quote API anche al
-    primo avvio con molte giornate arretrate da recuperare."""
+    """Chiamata ad ogni ciclo del loop principale, ma fa qualcosa solo se
+    STORICO_AGGIORNAMENTO_AUTOMATICO è attivo (spento di default, vedi config.json). Per ogni lega
+    whitelist, se sono passati almeno INTERVALLO_AGGIORNAMENTO_STORICO secondi dall'ultimo
+    aggiornamento (dato letto dallo storico su disco, quindi resta valido anche tra un riavvio e
+    l'altro del bot), scarica le partite nuove. STORICO_MAX_FIXTURES_PER_RUN è qui un limite
+    GLOBALE per l'intera esecuzione (su tutte le leghe insieme, non per singola lega): appena
+    raggiunto si interrompe subito, anche prima di controllare le leghe restanti, per evitare che
+    un riavvio con decine di leghe mai aggiornate consumi la quota API giornaliera in un colpo
+    solo. Le leghe non ancora controllate in questo giro verranno riprese al prossimo ciclo."""
+    if not STORICO_AGGIORNAMENTO_AUTOMATICO:
+        return
     mappa = risolvi_leghe_whitelist()
     if not mappa:
         return
     now = time.time()
+    processate_in_questo_giro = 0
     for nome, (league_id, season) in mappa.items():
+        if processate_in_questo_giro >= STORICO_MAX_FIXTURES_PER_RUN:
+            log(f"Storico minutaggi: raggiunto il limite di {STORICO_MAX_FIXTURES_PER_RUN} partite per questo ciclo, riprendo al prossimo")
+            break
         if not season:
             continue
         lega_dati = STORICO_MINUTAGGI.get(str(league_id), {})
@@ -1634,7 +1650,9 @@ def aggiorna_storico_minutaggi_automatico():
         if now - ultimo < INTERVALLO_AGGIORNAMENTO_STORICO:
             continue
         log(f"Storico minutaggi: aggiornamento automatico lega {nome} ({league_id})")
-        aggiorna_storico_minutaggi_lega(league_id, season)
+        processate_in_questo_giro += aggiorna_storico_minutaggi_lega(
+            league_id, season, max_fixtures=STORICO_MAX_FIXTURES_PER_RUN - processate_in_questo_giro
+        )
         time.sleep(1)
 
 
