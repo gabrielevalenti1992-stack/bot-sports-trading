@@ -1800,7 +1800,7 @@ BETFAIR_CONFIGURATO = all([BETFAIR_APP_KEY, BETFAIR_USERNAME, BETFAIR_PASSWORD, 
 print(f"Betfair configurato: {'SI' if BETFAIR_CONFIGURATO else 'NO (variabili mancanti, funzioni quote disattivate)'}", flush=True)
 
 BETFAIR_LOGIN_URL = "https://identitysso-cert.betfair.it/api/certlogin"
-BETFAIR_API_URL = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+BETFAIR_API_URL = "https://api.betfair.it/exchange/betting/json-rpc/v1"
 BETFAIR_EVENT_TYPE_CALCIO = "1"
 
 # User-Agent "da browser": senza, alcune richieste vengono bloccate dalla protezione
