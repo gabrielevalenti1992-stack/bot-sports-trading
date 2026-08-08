@@ -724,6 +724,14 @@ def campionato_valido(league_name, league_type, league_country=""):
     return True
 
 
+def formatta_lega(nome, paese):
+    """Nome campionato con il paese tra parentesi (es. 'Serie A (Italy)'), per capire a colpo
+    d'occhio di che campionato/nazione si tratta nelle notifiche senza doverlo cercare."""
+    if paese and paese.lower() not in ("world", "n/a", ""):
+        return f"{nome} ({paese})"
+    return nome
+
+
 # =============================================================================
 # CHIAMATE API-FOOTBALL: helper condiviso con diagnostica e notifiche throttled
 # =============================================================================
@@ -1643,8 +1651,11 @@ def invia_report_intensita_automatico(partite_valide):
         home = stato.get("home") or f.get("teams", {}).get("home", {}).get("name", "?")
         away = stato.get("away") or f.get("teams", {}).get("away", {}).get("name", "?")
         league = stato.get("league") or f.get("league", {}).get("name", "?")
+        league_country = stato.get("league_country") or f.get("league", {}).get("country", "")
         minute = f.get("fixture", {}).get("status", {}).get("elapsed", "?")
-        risultati.append((punteggio, home, away, league, minute, delta_stats))
+        score_h = stato.get("score_home", f.get("goals", {}).get("home") or 0)
+        score_a = stato.get("score_away", f.get("goals", {}).get("away") or 0)
+        risultati.append((punteggio, home, away, league, league_country, minute, score_h, score_a, delta_stats))
 
     if not risultati:
         log("Report intensità automatico: dati non ancora pronti (storico insufficiente), skip.")
@@ -1653,14 +1664,15 @@ def invia_report_intensita_automatico(partite_valide):
     risultati.sort(key=lambda r: -r[0])
     top = risultati[:7]
     righe = [f"Report automatico intensità (ultimi 15 min) - top {len(top)} di {len(risultati)} partite:\n"]
-    for i, (punteggio, home, away, league, minute, delta_stats) in enumerate(top, start=1):
+    for i, (punteggio, home, away, league, league_country, minute, score_h, score_a, delta_stats) in enumerate(top, start=1):
         fiamme = simbolo_fiamma_per_posizione(i)
         prefisso = f"{fiamme} " if fiamme else ""
         d_tiri = delta_stats.get("Tiri totali", (0, 0))
         d_porta = delta_stats.get("Tiri in porta", (0, 0))
         d_area = delta_stats.get("Tiri in area", (0, 0))
         righe.append(
-            f"{prefisso}{punteggio:.1f} pt | {home} vs {away} ({league}, {minute}')\n"
+            f"{prefisso}{punteggio:.1f} pt | {home} {score_h}-{score_a} {away} "
+            f"({formatta_lega(league, league_country)}, {minute}')\n"
             f"   Tiri totali: {d_tiri[0]} - {d_tiri[1]} | Tiri in porta: {d_porta[0]} - {d_porta[1]} | Tiri in area: {d_area[0]} - {d_area[1]}"
         )
     invia_messaggio_telegram("\n".join(righe))
@@ -2082,6 +2094,7 @@ def processa_partita(fixture):
             "home": home,
             "away": away,
             "league": league_name,
+            "league_country": league_country,
         })
 
         events = fetch_fixture_events(fixture_id)
@@ -2150,7 +2163,7 @@ def processa_partita(fixture):
 
                     messaggio = (
                         f"{home} vs {away}\n"
-                        f"{league_name}\n"
+                        f"{formatta_lega(league_name, league_country)}\n"
                         f"Risultato finale: {score_home} - {score_away}{after_text}\n"
                         f"Silenziato al {muted_minute}'\n"
                         f"Gol dopo:{minutes_text}"
@@ -2170,7 +2183,7 @@ def processa_partita(fixture):
 
                     messaggio = (
                         f"{home} vs {away}\n"
-                        f"{league_name}\n"
+                        f"{formatta_lega(league_name, league_country)}\n"
                         f"RISULTATO FINALE\n\n"
                         f"{score_home} - {score_away}\n"
                         f"{goals_text}\n"
@@ -2257,7 +2270,7 @@ def processa_partita(fixture):
 
         messaggio = (
             f"{home} vs {away}\n"
-            f"{league_name}\n"
+            f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
             f"Risultato: {score_home} - {score_away}\n"
             f"{goals_text}\n"
