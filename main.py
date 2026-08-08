@@ -611,6 +611,14 @@ def poll_callbacks():
                             continue
                         esegui_comando_sicuro(chat_id, cmd_status, " ".join(args).lower().strip("<>").strip())
 
+                    elif cmd == "/momentum":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /momentum <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
+                            continue
+                        esegui_comando_sicuro(chat_id, cmd_momentum, " ".join(args).lower().strip("<>").strip())
+
                     elif cmd == "/intensita":
                         esegui_comando_sicuro(chat_id, cmd_intensita)
 
@@ -1200,6 +1208,7 @@ def cmd_help(chat_id):
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
+        "/momentum <squadra> - Grafico dell'andamento pressione durante la partita (solo partite monitorate)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/assedio - Partite bloccate ma con pressione alta, probabile sblocco\n"
         "/fasciacalda - Squadra storicamente pericolosa in questa fascia oraria\n"
@@ -1579,6 +1588,65 @@ def cmd_status(chat_id, query):
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+
+
+def cmd_momentum(chat_id, query):
+    """/momentum <squadra>: grafico dell'andamento della pressione durante la partita, calcolato
+    sullo storico accumulato dal bot per quella partita. A differenza di /status, funziona solo
+    sulle partite monitorate automaticamente (whitelist), perché serve lo storico dell'intera
+    partita che solo il ciclo principale accumula in stato_partite."""
+    partite_cmd = get_partite_live()
+    trovate = []
+    for f in partite_cmd:
+        home = f.get("teams", {}).get("home", {}).get("name", "").lower()
+        away = f.get("teams", {}).get("away", {}).get("name", "").lower()
+        if query in home or query in away or home in query or away in query:
+            trovate.append(f)
+    if not trovate:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+        return
+
+    for f in trovate:
+        fid = f["fixture"]["id"]
+        home = f["teams"]["home"]["name"]
+        away = f["teams"]["away"]["name"]
+        league = f.get("league", {}).get("name", "")
+        minuto = f["fixture"]["status"].get("elapsed") or 0
+        score_h = f["goals"]["home"] or 0
+        score_a = f["goals"]["away"] or 0
+
+        history = stato_partite.get(fid, {}).get("history", [])
+        foto_path = genera_grafico_momentum(fid, home, away, history) if len(history) >= 2 else None
+        msg_text = f"{home} {score_h}-{score_a} {away}\n{league} | {minuto}'"
+
+        if foto_path and os.path.exists(foto_path):
+            try:
+                with open(foto_path, 'rb') as photo:
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": msg_text},
+                        files={"photo": photo}, timeout=15)
+            except Exception as e:
+                log(f"Errore invio grafico /momentum: {e}")
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+            finally:
+                try:
+                    os.remove(foto_path)
+                except Exception:
+                    pass
+        else:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": f"{msg_text}\n\nDati insufficienti per il momentum (serve che il bot abbia monitorato "
+                            f"la partita per almeno un paio di cicli, o non ci sono ancora cambiamenti nelle statistiche). "
+                            f"Riprova tra qualche minuto."
+                }, timeout=5)
 
 
 def calcola_indice_intensita(delta_stats):
@@ -2154,6 +2222,78 @@ def genera_grafico_barre(fixture_id, home_name, away_name, stats):
         return foto_path
     except Exception as e:
         log(f"Errore grafico barre: {e}")
+        return None
+
+
+def genera_grafico_momentum(fixture_id, home_name, away_name, history):
+    """Grafico "momentum": una barra per ogni intervallo tra due rilevazioni consecutive,
+    verde verso l'alto quando spinge la casa in quell'intervallo, rossa verso il basso quando
+    spinge la trasferta. Riusa gli stessi pesi di calcola_indice_intensita (tiri/porta/corner),
+    applicati separatamente alle due squadre invece che a un unico punteggio combinato.
+    Risoluzione onesta: un punto ogni ciclo (~3 min quando la partita è "attiva"), non al minuto -
+    non è quindi immediato/fluido come i widget con feed dati proprietario, ma usa dati reali."""
+    try:
+        if len(history) < 2:
+            return None
+
+        storico = sorted(history, key=lambda h: h["timestamp"])
+        etichette, punteggi_casa, punteggi_ospite = [], [], []
+        for prec, corr in zip(storico, storico[1:]):
+            s_prec, s_corr = prec["stats"], corr["stats"]
+            d_tiri_h = max(0, s_corr["Tiri totali"][0] - s_prec["Tiri totali"][0])
+            d_tiri_a = max(0, s_corr["Tiri totali"][1] - s_prec["Tiri totali"][1])
+            d_porta_h = max(0, s_corr["Tiri in porta"][0] - s_prec["Tiri in porta"][0])
+            d_porta_a = max(0, s_corr["Tiri in porta"][1] - s_prec["Tiri in porta"][1])
+            d_corner_h = max(0, s_corr["Corner"][0] - s_prec["Corner"][0])
+            d_corner_a = max(0, s_corr["Corner"][1] - s_prec["Corner"][1])
+
+            punteggi_casa.append(
+                d_tiri_h * PESO_INTENSITA_TIRI + d_porta_h * PESO_INTENSITA_PORTA + d_corner_h * PESO_INTENSITA_CORNER
+            )
+            punteggi_ospite.append(
+                d_tiri_a * PESO_INTENSITA_TIRI + d_porta_a * PESO_INTENSITA_PORTA + d_corner_a * PESO_INTENSITA_CORNER
+            )
+            etichette.append(f"{corr.get('minuto', '?')}'")
+
+        if not any(punteggi_casa) and not any(punteggi_ospite):
+            return None
+
+        color_home = '#22c55e'
+        color_away = '#ef4444'
+        color_text = '#e5e5e5'
+        color_muted = '#888888'
+
+        x = range(len(etichette))
+        fig, ax = plt.subplots(figsize=(6.0, 3.0), dpi=150)
+        fig.patch.set_facecolor('#1e1e1e')
+        ax.set_facecolor('#1e1e1e')
+
+        ax.bar(x, punteggi_casa, color=color_home, width=0.8, zorder=2, edgecolor='none')
+        ax.bar(x, [-v for v in punteggi_ospite], color=color_away, width=0.8, zorder=2, edgecolor='none')
+        ax.axhline(0, color=color_muted, linewidth=1, zorder=1)
+
+        step = max(1, len(etichette) // 10)
+        ax.set_xticks(list(x)[::step])
+        ax.set_xticklabels(etichette[::step], fontsize=8, color=color_text)
+        ax.set_yticks([])
+        for spine in ['top', 'right', 'bottom', 'left']:
+            ax.spines[spine].set_visible(False)
+
+        home_patch = mpatches.Patch(color=color_home, label=home_name)
+        away_patch = mpatches.Patch(color=color_away, label=away_name)
+        ax.legend(handles=[home_patch, away_patch], loc='lower center',
+                  bbox_to_anchor=(0.5, -0.22), ncol=2, frameon=False,
+                  fontsize=9, labelcolor=color_text)
+
+        plt.tight_layout(rect=[0, 0.08, 1, 1])
+
+        foto_path = os.path.join(os.path.dirname(__file__), f'momentum_{fixture_id}.png')
+        plt.savefig(foto_path, format='png', bbox_inches='tight',
+                    facecolor='#1e1e1e', edgecolor='none', pad_inches=0.1)
+        plt.close()
+        return foto_path
+    except Exception as e:
+        log(f"Errore grafico momentum: {e}")
         return None
 
 
@@ -2755,9 +2895,13 @@ def processa_partita(fixture):
             tiri_area_casa, tiri_area_ospite = current_stats["Tiri in area"]
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
+            # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
+            # /momentum per disegnare l'andamento su tutta la partita, non solo gli ultimi 15/20
+            # min. _calcola_delta_15min_da_storico filtra già da sé la finestra che le serve, quindi
+            # tenerlo tutto non cambia il delta 15 min. Costo trascurabile: ~1 snapshot a ciclo
+            # (~3 min), ripulito comunque a fine partita da pulisci_partite_terminate().
             history = stato_partite[fixture_id].get("history", [])
-            history.append({"timestamp": time.time(), "stats": current_stats})
-            history = [h for h in history if time.time() - h["timestamp"] <= 1200]
+            history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
             stato_partite[fixture_id]["history"] = history
             registra_esito_statistiche(league_country, league_name, True)
             if fine_1h_appena_avvenuta:
@@ -3036,6 +3180,7 @@ def imposta_comandi_telegram():
         {"command": "setup", "description": "Menu comandi a bottoni"},
         {"command": "live", "description": "Partite live monitorate"},
         {"command": "status", "description": "Info live su una squadra"},
+        {"command": "momentum", "description": "Grafico andamento pressione partita"},
         {"command": "favorites", "description": "Lista partite preferite"},
         {"command": "clearfavorites", "description": "Svuota lista preferiti"},
         {"command": "silenced", "description": "Lista partite silenziate"},
