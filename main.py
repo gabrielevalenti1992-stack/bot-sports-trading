@@ -176,6 +176,55 @@ PAROLE_ESCLUSE = [
     # Ripristinare dopo il test!
 ]
 
+# Coppe nazionali (non UEFA) sempre escluse, anche se la whitelist dinamica le marca come "con
+# statistiche coperte": la whitelist statica è pensata come un'aggiunta rispetto alla copertura
+# dinamica dell'API, non come un filtro, quindi competizioni come la League Cup inglese passavano
+# il controllo semplicemente perché API-Football ha statistiche per quella competizione, pur non
+# essendo mai state messe in whitelist di proposito (a differenza di Champions/Europa/Conference
+# League, che restano incluse).
+COPPE_NAZIONALI_ESCLUSE = [
+    "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy", "community shield",
+    "coppa italia", "supercoppa italiana",
+    "copa del rey", "supercopa de espana",
+    "dfb-pokal", "dfb pokal", "dfl-supercup",
+    "coupe de france", "coupe de la ligue", "trophee des champions",
+    "knvb beker", "johan cruijff schaal",
+    "taca de portugal", "taça de portugal", "supertaca",
+    "scottish cup", "scottish league cup", "scottish challenge cup",
+]
+
+# Leghe che, empiricamente, non restituiscono mai statistiche reali dall'API pur superando il
+# filtro whitelist per nome (tipicamente competizioni minori di un paese omonime a un campionato
+# whitelist: es. "League Two" scozzese, stesso nome della quarta serie inglese che è in whitelist).
+# Dopo SOGLIA_SENZA_STATISTICHE controlli consecutivi senza dati, la lega viene esclusa per
+# DURATA_ESCLUSIONE_SENZA_STATISTICHE secondi, per non continuare a pagare 2 chiamate a vuoto ad
+# ogni ciclo su partite che non produrranno mai una notifica utile. Non persistito su disco: si
+# ricostruisce da solo nel giro di pochi cicli ad ogni riavvio del bot.
+LEGHE_SENZA_STATISTICHE = {}
+SOGLIA_SENZA_STATISTICHE = 3
+DURATA_ESCLUSIONE_SENZA_STATISTICHE = 6 * 3600  # 6 ore
+
+
+def registra_esito_statistiche(league_country, league_name, disponibili):
+    chiave = (league_country.lower(), league_name.lower())
+    stato = LEGHE_SENZA_STATISTICHE.get(chiave, {"senza_stats_consecutive": 0, "esclusa_fino": 0})
+    if disponibili:
+        stato = {"senza_stats_consecutive": 0, "esclusa_fino": 0}
+    else:
+        stato["senza_stats_consecutive"] += 1
+        if stato["senza_stats_consecutive"] >= SOGLIA_SENZA_STATISTICHE and not stato["esclusa_fino"]:
+            stato["esclusa_fino"] = time.time() + DURATA_ESCLUSIONE_SENZA_STATISTICHE
+            log(f"  Lega '{league_name}' ({league_country}) esclusa per {DURATA_ESCLUSIONE_SENZA_STATISTICHE // 3600}h: "
+                f"nessuna statistica in {stato['senza_stats_consecutive']} controlli consecutivi")
+    LEGHE_SENZA_STATISTICHE[chiave] = stato
+
+
+def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
+    stato = LEGHE_SENZA_STATISTICHE.get((league_country.lower(), league_name.lower()))
+    if not stato:
+        return False
+    return time.time() < stato.get("esclusa_fino", 0)
+
 stato_partite = {}
 ciclo_numero = 0
 
@@ -576,7 +625,12 @@ def campionato_valido(league_name, league_type, league_country=""):
     for parola in PAROLE_ESCLUSE:
         if parola in nome:
             return False
+    for coppa in COPPE_NAZIONALI_ESCLUSE:
+        if coppa in nome:
+            return False
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
+        return False
+    if lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
         aggiorna_leghe_attive()
@@ -954,8 +1008,6 @@ def cmd_help(chat_id):
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
-        "/statstypes <squadra> - Tipi di statistiche disponibili da API (diagnostica)\n"
-        "/statscoverage - Copertura statistiche su tutte le partite live (diagnostica)\n"
         "/cercastat <statistica> [soglia] - Cerca tra le partite live per statistica (es: tiri in porta 3, xg, possesso 60)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
@@ -1666,16 +1718,25 @@ def invia_report_intensita_automatico(partite_valide):
         away = stato.get("away") or f.get("teams", {}).get("away", {}).get("name", "?")
         league = stato.get("league") or f.get("league", {}).get("name", "?")
         minute = f.get("fixture", {}).get("status", {}).get("elapsed", "?")
-        risultati.append((punteggio, home, away, league, minute))
+        risultati.append((punteggio, home, away, league, minute, delta_stats))
 
     if not risultati:
         log("Report intensità automatico: dati non ancora pronti (storico insufficiente), skip.")
         return
 
     risultati.sort(key=lambda r: -r[0])
-    righe = [f"Report automatico intensità (ultimi 15 min) - {len(risultati)} partite:\n"]
-    for punteggio, home, away, league, minute in risultati[:15]:
-        righe.append(f"- {punteggio:.1f} pt | {home} vs {away} ({league}, {minute}')")
+    top = risultati[:7]
+    righe = [f"Report automatico intensità (ultimi 15 min) - top {len(top)} di {len(risultati)} partite:\n"]
+    for i, (punteggio, home, away, league, minute, delta_stats) in enumerate(top, start=1):
+        fiamme = simbolo_fiamma_per_posizione(i)
+        prefisso = f"{fiamme} " if fiamme else ""
+        d_tiri = delta_stats.get("Tiri totali", (0, 0))
+        d_porta = delta_stats.get("Tiri in porta", (0, 0))
+        d_area = delta_stats.get("Tiri in area", (0, 0))
+        righe.append(
+            f"{prefisso}{punteggio:.1f} pt | {home} vs {away} ({league}, {minute}')\n"
+            f"   Tiri totali: {d_tiri[0]} - {d_tiri[1]} | Tiri in porta: {d_porta[0]} - {d_porta[1]} | Tiri in area: {d_area[0]} - {d_area[1]}"
+        )
     invia_messaggio_telegram("\n".join(righe))
     ULTIMO_REPORT_INTENSITA = now
 
@@ -2068,6 +2129,7 @@ def processa_partita(fixture):
         fixture_id = fixture["fixture"]["id"]
         league = fixture.get("league", {})
         league_name = league.get("name", "")
+        league_country = league.get("country", "")
 
         home = fixture["teams"]["home"]["name"]
         away = fixture["teams"]["away"]["name"]
@@ -2114,21 +2176,27 @@ def processa_partita(fixture):
             corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
             corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
 
+            tiri_area_casa = estrai_valore_stat(stats_home, "Shots insidebox")
+            tiri_area_ospite = estrai_valore_stat(stats_away, "Shots insidebox")
+
             current_stats = {
                 "Tiri totali": (tiri_casa, tiri_ospite),
                 "Tiri in porta": (tiri_p_casa, tiri_p_ospite),
                 "Corner": (corner_casa, corner_ospite),
+                "Tiri in area": (tiri_area_casa, tiri_area_ospite),
             }
-            log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite}")
+            log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
             history = stato_partite[fixture_id].get("history", [])
             history.append({"timestamp": time.time(), "stats": current_stats})
             history = [h for h in history if time.time() - h["timestamp"] <= 1200]
             stato_partite[fixture_id]["history"] = history
+            registra_esito_statistiche(league_country, league_name, True)
         else:
             current_stats = None
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
             log(f"    ⚠️ Statistiche non disponibili da API (lega potrebbe non supportare stats)")
+            registra_esito_statistiche(league_country, league_name, False)
 
         if status_short in ("FT", "AET", "PEN"):
             stato = stato_partite.get(fixture_id, {})
