@@ -498,6 +498,8 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_stop)
                         elif azione == "riprendi":
                             esegui_comando_sicuro(chat_id, cmd_riprendi)
+                        elif azione == "testpreferiti":
+                            esegui_comando_sicuro(chat_id, cmd_testpreferiti)
                         elif azione == "intensita":
                             esegui_comando_sicuro(chat_id, cmd_intensita)
                         elif azione == "help":
@@ -607,6 +609,9 @@ def poll_callbacks():
 
                     elif cmd == "/riprendi":
                         esegui_comando_sicuro(chat_id, cmd_riprendi)
+
+                    elif cmd == "/testpreferiti":
+                        esegui_comando_sicuro(chat_id, cmd_testpreferiti)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -621,15 +626,57 @@ def log(msg):
     print(msg, flush=True)
 
 
+ULTIMO_AVVISO_CANALE_PREFERITI = 0
+INTERVALLO_AVVISO_CANALE_PREFERITI = 3600  # 1 ora: non ripetere l'avviso troppo spesso
+
+
+def _e_canale_preferiti_dedicato(destinatario):
+    """True se il destinatario è il canale preferiti E questo è davvero diverso dalla chat
+    principale (cioè TELEGRAM_CHAT_ID_PREFERITI è stata impostata a un valore diverso)."""
+    return destinatario == TELEGRAM_CHAT_ID_PREFERITI and TELEGRAM_CHAT_ID_PREFERITI != TELEGRAM_CHAT_ID
+
+
+def _avvisa_e_fallback_canale_preferiti(dettaglio):
+    """Se l'invio al canale preferiti dedicato fallisce, avvisa nella chat principale (al massimo
+    una volta ogni INTERVALLO_AVVISO_CANALE_PREFERITI) invece di scoprirlo solo scavando nei log
+    di Render, e ritorna True se va ritentato l'invio nella chat principale come ripiego, per non
+    perdere la notifica."""
+    global ULTIMO_AVVISO_CANALE_PREFERITI
+    log(f"Invio al canale preferiti fallito: {dettaglio}")
+    now = time.time()
+    if now - ULTIMO_AVVISO_CANALE_PREFERITI >= INTERVALLO_AVVISO_CANALE_PREFERITI:
+        ULTIMO_AVVISO_CANALE_PREFERITI = now
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={
+                    'chat_id': TELEGRAM_CHAT_ID,
+                    'text': (
+                        "⚠️ Non riesco a mandare messaggi al canale preferiti dedicato "
+                        f"(TELEGRAM_CHAT_ID_PREFERITI): {dettaglio}\n"
+                        "Controlla che il bot sia amministratore di quel canale/gruppo e che l'ID sia corretto "
+                        "(usa /testpreferiti per riprovare). Nel frattempo le notifiche dei preferiti arrivano qui."
+                    )
+                }, timeout=10)
+        except Exception:
+            pass
+    return True
+
+
 def invia_messaggio_telegram(testo, chat_id=None):
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {testo[:50]}")
         return
+    destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': chat_id or TELEGRAM_CHAT_ID, 'text': testo, 'parse_mode': 'Markdown'}
+        data = {'chat_id': destinatario, 'text': testo, 'parse_mode': 'Markdown'}
         response = requests.post(url, data=data, timeout=10)
-        log(f"Telegram testo - Status: {response.status_code} - {response.text[:100]}")
+        log(f"Telegram testo -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
+        if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
+            if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
+                data['chat_id'] = TELEGRAM_CHAT_ID
+                requests.post(url, data=data, timeout=10)
     except Exception as e:
         log(f"Errore invio testo Telegram: {e}")
 
@@ -652,7 +699,10 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
                 if reply_markup:
                     data['reply_markup'] = json.dumps(reply_markup)
                 response = requests.post(url, data=data, files=files, timeout=10)
-                log(f"Telegram foto - Status: {response.status_code}")
+                log(f"Telegram foto -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
+            if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
+                if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
+                    invia_notifica_telegram(foto_path, messaggio, reply_markup=reply_markup, chat_id=TELEGRAM_CHAT_ID)
         else:
             invia_messaggio_telegram(messaggio, chat_id=destinatario)
     except Exception as e:
@@ -1059,6 +1109,7 @@ def cmd_help(chat_id):
         "/piano - Piano giornata: partite whitelist previste oggi e finestre orarie attive\n"
         "/stop - Metti il bot in pausa (nessuna chiamata API, nessuna notifica)\n"
         "/riprendi - Riattiva il bot dopo /stop\n"
+        "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -1277,6 +1328,41 @@ def cmd_riprendi(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "▶️ Bot riattivato. Riprendo subito a controllare le partite live."}, timeout=5)
+
+
+def cmd_testpreferiti(chat_id):
+    """Manda un messaggio di prova al canale preferiti dedicato (TELEGRAM_CHAT_ID_PREFERITI) e
+    riporta subito l'esito in questa chat, per diagnosticare se il canale è raggiungibile senza
+    dover scavare nei log di Render."""
+    if TELEGRAM_CHAT_ID_PREFERITI == TELEGRAM_CHAT_ID:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "Nessun canale preferiti dedicato configurato (TELEGRAM_CHAT_ID_PREFERITI non impostata): "
+                        "le notifiche dei preferiti arrivano in questa stessa chat."
+            }, timeout=5)
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        risposta = requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID_PREFERITI,
+                "text": "✅ Test canale preferiti: se leggi questo messaggio qui, il canale dedicato funziona."
+            }, timeout=10)
+        if risposta.status_code == 200:
+            esito = f"✅ Messaggio di test inviato con successo al canale preferiti (chat_id {TELEGRAM_CHAT_ID_PREFERITI}). Controlla che sia arrivato lì."
+        else:
+            esito = (
+                f"❌ Invio al canale preferiti fallito: HTTP {risposta.status_code} - {risposta.text[:300]}\n"
+                "Controlla che il bot sia amministratore di quel canale/gruppo e che l'ID sia corretto."
+            )
+    except Exception as e:
+        esito = f"❌ Eccezione inviando al canale preferiti: {e}"
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": esito}, timeout=5)
 
 
 def cmd_status(chat_id, query):
@@ -1660,6 +1746,7 @@ def cmd_setup(chat_id):
             [{"text": "🗓 Piano giornata", "callback_data": "cmd:piano"}],
             [{"text": "⏸ Pausa", "callback_data": "cmd:stop"},
              {"text": "▶️ Riprendi", "callback_data": "cmd:riprendi"}],
+            [{"text": "🧪 Test canale preferiti", "callback_data": "cmd:testpreferiti"}],
             [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
@@ -2482,6 +2569,7 @@ def imposta_comandi_telegram():
         {"command": "piano", "description": "Piano giornata e finestre orarie attive"},
         {"command": "stop", "description": "Metti il bot in pausa"},
         {"command": "riprendi", "description": "Riattiva il bot dopo /stop"},
+        {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
