@@ -198,8 +198,9 @@ LEGHE_CON_STATISTICHE = [
     "Allsvenskan", "Ekstraklasa", "Prva Liga", "Super Liga", "Fortuna Liga",
     # Serbia (già coperta da "Super Liga"), Repubblica Ceca, Ungheria, Finlandia, Islanda
     "Czech Liga", "NB I", "Veikkausliiga", "Besta deild", "Úrvalsdeild",
-    # Brasile e Argentina (Brasile già coperto da "Serie A"/"Serie B"), Colombia, Uruguay
+    # Brasile e Argentina (Brasile già coperto da "Serie A"/"Serie B"), Colombia, Uruguay, Bolivia
     "Liga Profesional Argentina", "Copa de la Liga Profesional", "Primera A", "Primera División",
+    "Division Profesional", "División Profesional",
     "Champions League", "Europa League", "Conference League",
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
 ]
