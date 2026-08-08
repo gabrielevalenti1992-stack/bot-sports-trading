@@ -2378,7 +2378,13 @@ def _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente):
     blocco_corrente = _blocco_minuto(minuto_corrente)
     punti_blocco = [h for h in history if _blocco_minuto(h.get("minuto")) == blocco_corrente]
 
-    if not punti_blocco:
+    # Serve ALMENO 2 punti nel blocco corrente (non solo "il blocco esiste"): con un solo punto -
+    # tipicamente lo snapshot appena preso in questo stesso ciclo, che è già dentro "history" -
+    # inizio_blocco coinciderebbe con current_stats e il delta sarebbe sempre (0,0) MA marcato
+    # come "reale" invece che "primo rilevamento". Questo è esattamente il bug che faceva apparire
+    # decine di partite con "0.0 pt" tutte uguali nel report automatico appena dopo un riavvio (o
+    # ad ogni cambio di blocco, per un ciclo).
+    if len(punti_blocco) < 2:
         return {k: (0, 0) for k in current_stats}, False
 
     inizio_blocco = min(punti_blocco, key=lambda h: h["timestamp"])
