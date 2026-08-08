@@ -2812,23 +2812,30 @@ def processa_partita(fixture):
         # Nessun indicatore quando sono pari (EQ non è utile): solo chi è avanti nel delta 15 min.
         freccia = " 🏡 CASA" if diff > 0 else " ✈️ OSP" if diff < 0 else ""
 
-        d_tiri_c = stats_dict["Tiri totali"][0]
-        d_tiri_o = stats_dict["Tiri totali"][1]
-        d_porta_c = stats_dict["Tiri in porta"][0]
-        d_porta_o = stats_dict["Tiri in porta"][1]
-        d_corner_c = stats_dict["Corner"][0]
-        d_corner_o = stats_dict["Corner"][1]
+        if current_stats:
+            d_tiri_c = stats_dict["Tiri totali"][0]
+            d_tiri_o = stats_dict["Tiri totali"][1]
+            d_porta_c = stats_dict["Tiri in porta"][0]
+            d_porta_o = stats_dict["Tiri in porta"][1]
 
-        fire_t_c = get_fire_suffix(d_tiri_c)
-        fire_t_o = get_fire_suffix(d_tiri_o)
-        fire_p_c = get_fire_suffix_shots(d_porta_c)
-        fire_p_o = get_fire_suffix_shots(d_porta_o)
+            fire_t_c = get_fire_suffix(d_tiri_c)
+            fire_t_o = get_fire_suffix(d_tiri_o)
+            fire_p_c = get_fire_suffix_shots(d_porta_c)
+            fire_p_o = get_fire_suffix_shots(d_porta_o)
 
-        # Spazio tra il valore e la fiamma, così non restano attaccati (es. "5 🔥" non "5🔥").
-        tot_c_txt = f"{d_tiri_c} {fire_t_c}" if fire_t_c else str(d_tiri_c)
-        tot_o_txt = f"{d_tiri_o} {fire_t_o}" if fire_t_o else str(d_tiri_o)
-        porta_c_txt = f"{d_porta_c} {fire_p_c}" if fire_p_c else str(d_porta_c)
-        porta_o_txt = f"{d_porta_o} {fire_p_o}" if fire_p_o else str(d_porta_o)
+            # Spazio tra il valore e la fiamma, così non restano attaccati (es. "5 🔥" non "5🔥").
+            tot_c_txt = f"{d_tiri_c} {fire_t_c}" if fire_t_c else str(d_tiri_c)
+            tot_o_txt = f"{d_tiri_o} {fire_t_o}" if fire_t_o else str(d_tiri_o)
+            porta_c_txt = f"{d_porta_c} {fire_p_c}" if fire_p_c else str(d_porta_c)
+            porta_o_txt = f"{d_porta_o} {fire_p_o}" if fire_p_o else str(d_porta_o)
+            corner_line = f"{stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}"
+        else:
+            # Nessuna statistica reale disponibile per questa lega/partita (non uno "0 - 0" vero):
+            # va detto esplicitamente, altrimenti sembra un dato reale invece che dato mancante
+            # (il grafico allegato in questo caso mostra già "Nessun dato" per coerenza).
+            tot_c_txt = tot_o_txt = porta_c_txt = porta_o_txt = "N/D"
+            corner_line = "N/D - N/D"
+            freccia = ""
 
         goals_text = ""
         if goals:
@@ -2875,7 +2882,7 @@ def processa_partita(fixture):
             f"{header_stats}:\n"
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
-            f"- Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n"
+            f"- Corner: {corner_line}\n"
             f"{tempi_text}\n"
             f"Verde = {home}\n"
             f"Rosso = {away}"
