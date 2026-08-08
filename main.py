@@ -379,10 +379,6 @@ def get_fire_suffix_shots(delta):
         return "\U0001F525"
     return ""
 
-def get_fire_suffix_corner(delta):
-    return ""
-
-
 def _esegui_comando(chat_id, funzione, args):
     """Esegue una funzione cmd_* intercettando qualsiasi eccezione, così un errore
     non passa mai inosservato: viene loggato e l'utente riceve un avviso invece del silenzio."""
@@ -1127,6 +1123,17 @@ def ha_statistiche_disponibili(stats):
     return any(s.get("value") is not None for s in stats_home + stats_away)
 
 
+def estrai_current_stats(stats_home, stats_away):
+    """Le 4 statistiche (casa, trasferta) usate ovunque nel bot: tiri totali, tiri in porta,
+    corner, tiri in area. Chi non usa "Tiri in area" può semplicemente ignorare quella chiave."""
+    return {
+        "Tiri totali": (estrai_valore_stat(stats_home, "Total Shots"), estrai_valore_stat(stats_away, "Total Shots")),
+        "Tiri in porta": (estrai_valore_stat(stats_home, "Shots on Goal"), estrai_valore_stat(stats_away, "Shots on Goal")),
+        "Corner": (estrai_valore_stat(stats_home, "Corner Kicks"), estrai_valore_stat(stats_away, "Corner Kicks")),
+        "Tiri in area": (estrai_valore_stat(stats_home, "Shots insidebox"), estrai_valore_stat(stats_away, "Shots insidebox")),
+    }
+
+
 # =============================================================================
 # COMANDI TELEGRAM (funzioni riutilizzabili da testo e da bottoni inline)
 # =============================================================================
@@ -1411,12 +1418,7 @@ def cmd_status(chat_id, query):
         if stats and len(stats) >= 2:
             sh = stats[0].get("statistics", [])
             sa = stats[1].get("statistics", [])
-            current_stats = {
-                "Tiri totali": (estrai_valore_stat(sh, "Total Shots"), estrai_valore_stat(sa, "Total Shots")),
-                "Tiri in porta": (estrai_valore_stat(sh, "Shots on Goal"), estrai_valore_stat(sa, "Shots on Goal")),
-                "Corner": (estrai_valore_stat(sh, "Corner Kicks"), estrai_valore_stat(sa, "Corner Kicks")),
-                "Tiri in area": (estrai_valore_stat(sh, "Shots insidebox"), estrai_valore_stat(sa, "Shots insidebox")),
-            }
+            current_stats = estrai_current_stats(sh, sa)
             tc, to = current_stats["Tiri totali"]
             tp, tpo = current_stats["Tiri in porta"]
             cc, co = current_stats["Corner"]
@@ -1568,11 +1570,7 @@ def cmd_intensita(chat_id):
         if stats and len(stats) >= 2:
             sh = stats[0].get("statistics", [])
             sa = stats[1].get("statistics", [])
-            current_stats = {
-                "Tiri totali": (estrai_valore_stat(sh, "Total Shots"), estrai_valore_stat(sa, "Total Shots")),
-                "Tiri in porta": (estrai_valore_stat(sh, "Shots on Goal"), estrai_valore_stat(sa, "Shots on Goal")),
-                "Corner": (estrai_valore_stat(sh, "Corner Kicks"), estrai_valore_stat(sa, "Corner Kicks")),
-            }
+            current_stats = estrai_current_stats(sh, sa)
             delta_stats, is_real = calcola_delta_15min(fid, current_stats)
             punteggio = calcola_indice_intensita(delta_stats)
             risultati.append((punteggio, home, away, league, minute, score_h, score_a, delta_stats, is_real))
@@ -1675,12 +1673,7 @@ def _scansiona_partite_valide(max_partite=40):
             continue
         sh = stats[0].get("statistics", [])
         sa = stats[1].get("statistics", [])
-        current_stats = {
-            "Tiri totali": (estrai_valore_stat(sh, "Total Shots"), estrai_valore_stat(sa, "Total Shots")),
-            "Tiri in porta": (estrai_valore_stat(sh, "Shots on Goal"), estrai_valore_stat(sa, "Shots on Goal")),
-            "Corner": (estrai_valore_stat(sh, "Corner Kicks"), estrai_valore_stat(sa, "Corner Kicks")),
-            "Tiri in area": (estrai_valore_stat(sh, "Shots insidebox"), estrai_valore_stat(sa, "Shots insidebox")),
-        }
+        current_stats = estrai_current_stats(sh, sa)
         delta_stats, delta_reale = calcola_delta_15min(fid, current_stats)
         risultati.append({
             "fixture": f,
@@ -2639,22 +2632,11 @@ def processa_partita(fixture):
         if stats and len(stats) >= 2:
             stats_home = stats[0].get("statistics", [])
             stats_away = stats[1].get("statistics", [])
-            tiri_casa = estrai_valore_stat(stats_home, "Total Shots")
-            tiri_ospite = estrai_valore_stat(stats_away, "Total Shots")
-            tiri_p_casa = estrai_valore_stat(stats_home, "Shots on Goal")
-            tiri_p_ospite = estrai_valore_stat(stats_away, "Shots on Goal")
-            corner_casa = estrai_valore_stat(stats_home, "Corner Kicks")
-            corner_ospite = estrai_valore_stat(stats_away, "Corner Kicks")
-
-            tiri_area_casa = estrai_valore_stat(stats_home, "Shots insidebox")
-            tiri_area_ospite = estrai_valore_stat(stats_away, "Shots insidebox")
-
-            current_stats = {
-                "Tiri totali": (tiri_casa, tiri_ospite),
-                "Tiri in porta": (tiri_p_casa, tiri_p_ospite),
-                "Corner": (corner_casa, corner_ospite),
-                "Tiri in area": (tiri_area_casa, tiri_area_ospite),
-            }
+            current_stats = estrai_current_stats(stats_home, stats_away)
+            tiri_casa, tiri_ospite = current_stats["Tiri totali"]
+            tiri_p_casa, tiri_p_ospite = current_stats["Tiri in porta"]
+            corner_casa, corner_ospite = current_stats["Corner"]
+            tiri_area_casa, tiri_area_ospite = current_stats["Tiri in area"]
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
             history = stato_partite[fixture_id].get("history", [])
