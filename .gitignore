@@ -221,6 +221,7 @@ __marimo__/
 silenced_matches.json
 favorite_matches.json
 storico_minutaggi.json
+piano_giornata.json
 
 # Certificati e chiavi private (es. login Betfair) - mai su GitHub
 certs/

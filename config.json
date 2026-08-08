@@ -13,6 +13,11 @@
   "intervallo_aggiornamento_storico": 604800,
   "storico_max_fixtures_per_run": 30,
   "storico_aggiornamento_automatico": false,
+  "ora_generazione_piano_giornata": 12,
+  "durata_stimata_partita_minuti": 130,
+  "margine_pre_kickoff_minuti": 10,
+  "intervallo_ciclo_attivo": 180,
+  "intervallo_ciclo_morto": 1800,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",

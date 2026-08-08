@@ -1,5 +1,7 @@
 import json
 import time
+import datetime
+from zoneinfo import ZoneInfo
 import requests
 import matplotlib
 matplotlib.use('Agg')
@@ -87,6 +89,17 @@ STORICO_MAX_FIXTURES_PER_RUN = 30
 STORICO_AGGIORNAMENTO_AUTOMATICO = False
 FASCE_MINUTO = ["0-15", "16-30", "31-45", "46-60", "61-75", "76-90"]
 
+# Piano giornata: una volta al giorno (ora locale Italia) si scarica con UNA chiamata /fixtures?date=
+# l'elenco di tutte le partite del giorno, si filtrano quelle nei campionati whitelist e si
+# costruiscono le "finestre attive" (kickoff -> kickoff+durata stimata) in cui vale la pena
+# interrogare live=all a ritmo sostenuto. Fuori da queste finestre il ciclo rallenta (vedi
+# INTERVALLO_CICLO_MORTO) invece di continuare a interrogare l'API ogni 3 minuti per niente.
+ORA_GENERAZIONE_PIANO_GIORNATA = 12  # ora locale Italia in cui (ri)generare il piano
+DURATA_STIMATA_PARTITA_MINUTI = 130  # 90' + recupero + intervallo + margine di sicurezza
+MARGINE_PRE_KICKOFF_MINUTI = 10  # anticipo con cui il ciclo torna "attivo" prima del kickoff previsto
+INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una finestra attiva (come oggi)
+INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
+
 # Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
 SOLO_LEGHE_CON_STATISTICHE = True
 LEGHE_CON_STATISTICHE = [
@@ -139,7 +152,13 @@ try:
     INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
     STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
     STORICO_AGGIORNAMENTO_AUTOMATICO = config.get("storico_aggiornamento_automatico", STORICO_AGGIORNAMENTO_AUTOMATICO)
+    ORA_GENERAZIONE_PIANO_GIORNATA = config.get("ora_generazione_piano_giornata", ORA_GENERAZIONE_PIANO_GIORNATA)
+    DURATA_STIMATA_PARTITA_MINUTI = config.get("durata_stimata_partita_minuti", DURATA_STIMATA_PARTITA_MINUTI)
+    MARGINE_PRE_KICKOFF_MINUTI = config.get("margine_pre_kickoff_minuti", MARGINE_PRE_KICKOFF_MINUTI)
+    INTERVALLO_CICLO_ATTIVO = config.get("intervallo_ciclo_attivo", INTERVALLO_CICLO_ATTIVO)
+    INTERVALLO_CICLO_MORTO = config.get("intervallo_ciclo_morto", INTERVALLO_CICLO_MORTO)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
+    print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
@@ -215,6 +234,29 @@ def salva_storico_minutaggi(dati):
         json.dump(dati, f)
 
 STORICO_MINUTAGGI = carica_storico_minutaggi()
+
+# =============================================================================
+# PIANO GIORNATA (snapshot giornaliero partite whitelist + finestre orarie attive)
+# =============================================================================
+PIANO_GIORNATA_FILE = "piano_giornata.json"
+
+
+def carica_piano_giornata():
+    if os.path.exists(PIANO_GIORNATA_FILE):
+        try:
+            with open(PIANO_GIORNATA_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {PIANO_GIORNATA_FILE}: {e}", flush=True)
+    return {"data": None, "generato_alle": 0, "partite": [], "finestre_attive": []}
+
+
+def salva_piano_giornata(piano):
+    with open(PIANO_GIORNATA_FILE, 'w') as f:
+        json.dump(piano, f)
+
+
+PIANO_GIORNATA = carica_piano_giornata()
 
 # =============================================================================
 # FIAMME - SOGLIE
@@ -368,6 +410,8 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_silenced)
                         elif azione == "leghestats":
                             esegui_comando_sicuro(chat_id, cmd_leghestats)
+                        elif azione == "piano":
+                            esegui_comando_sicuro(chat_id, cmd_piano)
                         elif azione == "intensita":
                             esegui_comando_sicuro(chat_id, cmd_intensita)
                         elif azione == "help":
@@ -468,6 +512,9 @@ def poll_callbacks():
 
                     elif cmd == "/leghestats":
                         esegui_comando_sicuro(chat_id, cmd_leghestats)
+
+                    elif cmd == "/piano":
+                        esegui_comando_sicuro(chat_id, cmd_piano)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -617,6 +664,110 @@ def get_partite_live():
             notifica_errore_api_throttled(tipo_errore, dettaglio, "get_partite_live")
         return []
     return data.get("response", [])
+
+
+# =============================================================================
+# PIANO GIORNATA: snapshot giornaliero (1 chiamata) delle partite whitelist di oggi, usato per
+# sapere in anticipo in quali fasce orarie vale la pena interrogare live=all a ritmo sostenuto.
+# =============================================================================
+STATUS_NON_LIVE_FUTURI = {"PST", "CANC", "ABD", "AWD", "WO"}  # rinviata/annullata/a tavolino: mai live
+
+
+def costruisci_finestre_attive(partite):
+    """Unisce gli intervalli [kickoff, kickoff+durata_stimata] delle partite whitelist in finestre
+    orarie senza sovrapposizioni: fuori da queste finestre nessuna partita whitelist dovrebbe
+    essere in corso."""
+    durata_sec = DURATA_STIMATA_PARTITA_MINUTI * 60
+    intervalli = sorted(
+        (p["kickoff_ts"], p["kickoff_ts"] + durata_sec) for p in partite if p.get("kickoff_ts")
+    )
+    finestre = []
+    for inizio, fine in intervalli:
+        if finestre and inizio <= finestre[-1][1]:
+            finestre[-1][1] = max(finestre[-1][1], fine)
+        else:
+            finestre.append([inizio, fine])
+    return finestre
+
+
+def costruisci_piano_giornata(data_str):
+    """Scarica con UNA chiamata /fixtures?date=YYYY-MM-DD tutte le partite del giorno (tutte le
+    leghe del mondo) e filtra in locale con campionato_valido() (nessuna chiamata aggiuntiva) per
+    ottenere l'elenco delle partite whitelist di oggi e le finestre orarie in cui sono attese live.
+    Ritorna None in caso di errore API, cosi il chiamante puo' riprovare al ciclo successivo senza
+    sovrascrivere un piano precedente ancora valido."""
+    url = "https://v3.football.api-sports.io/fixtures"
+    data, tipo_errore, dettaglio = get_api_football(url, {"date": data_str}, timeout=25, contesto="costruisci_piano_giornata")
+    if data is None:
+        if tipo_errore and tipo_errore != "config":
+            notifica_errore_api_throttled(tipo_errore, dettaglio, "costruisci_piano_giornata")
+        return None
+
+    partite = []
+    for item in data.get("response", []):
+        fixture_info = item.get("fixture", {})
+        status_short = fixture_info.get("status", {}).get("short", "")
+        if status_short in STATUS_NON_LIVE_FUTURI:
+            continue
+        league = item.get("league", {})
+        if not campionato_valido(league.get("name", ""), league.get("type", ""), league.get("country", "")):
+            continue
+        kickoff_ts = fixture_info.get("timestamp")
+        if not kickoff_ts:
+            continue
+        partite.append({
+            "fixture_id": fixture_info.get("id"),
+            "lega": league.get("name", ""),
+            "kickoff_ts": kickoff_ts,
+            "home": item.get("teams", {}).get("home", {}).get("name", "?"),
+            "away": item.get("teams", {}).get("away", {}).get("name", "?"),
+        })
+
+    finestre = costruisci_finestre_attive(partite)
+    log(f"Piano giornata {data_str}: {len(partite)} partite whitelist, {len(finestre)} finestre attive")
+    return {
+        "data": data_str,
+        "generato_alle": time.time(),
+        "partite": partite,
+        "finestre_attive": finestre,
+    }
+
+
+def dentro_finestra_attiva(piano, now_ts=None):
+    """True se now_ts (default: adesso) cade dentro una finestra attiva del piano, con un margine
+    di anticipo (MARGINE_PRE_KICKOFF_MINUTI) per non perdere l'inizio di una partita in leggero
+    ritardo sull'orario previsto."""
+    now_ts = now_ts if now_ts is not None else time.time()
+    margine_sec = MARGINE_PRE_KICKOFF_MINUTI * 60
+    for inizio, fine in piano.get("finestre_attive", []):
+        if inizio - margine_sec <= now_ts <= fine:
+            return True
+    return False
+
+
+def aggiorna_piano_giornata_se_serve():
+    """Chiamata ad ogni ciclo del loop principale (nessun costo se non serve rigenerare). Genera
+    il piano al primo avvio (qualunque sia l'ora) cosi' il bot non parte "cieco", e poi lo
+    rigenera una volta al giorno all'ora configurata (ora locale Italia)."""
+    global PIANO_GIORNATA
+    now_it = datetime.datetime.now(ZoneInfo("Europe/Rome"))
+    oggi_str = now_it.strftime("%Y-%m-%d")
+
+    if PIANO_GIORNATA.get("data") == oggi_str:
+        return
+
+    piano_mai_generato = PIANO_GIORNATA.get("data") is None
+    ora_raggiunta = now_it.hour >= ORA_GENERAZIONE_PIANO_GIORNATA
+    if not piano_mai_generato and not ora_raggiunta:
+        return
+
+    log(f"Generazione piano partite per {oggi_str} (ore {now_it.strftime('%H:%M')} orario italiano)...")
+    nuovo_piano = costruisci_piano_giornata(oggi_str)
+    if nuovo_piano is not None:
+        PIANO_GIORNATA = nuovo_piano
+        salva_piano_giornata(PIANO_GIORNATA)
+    else:
+        log("Generazione piano giornata fallita (errore API), riprovo al prossimo ciclo")
 
 
 def get_leghe_con_copertura_statistiche_raw():
@@ -810,6 +961,7 @@ def cmd_help(chat_id):
         "/silenced - Lista partite silenziate\n"
         "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)\n"
         "/leghestats - Elenco campionati con statistiche coperte da API-Football\n"
+        "/piano - Piano giornata: partite whitelist previste oggi e finestre orarie attive\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -943,6 +1095,49 @@ def cmd_leghestats(chat_id):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=10)
+
+
+def cmd_piano(chat_id):
+    """Mostra il piano giornata corrente: partite whitelist previste oggi, orari di kickoff e
+    finestre orarie attive usate dallo scheduler adattivo per decidere il ritmo dei cicli."""
+    if not PIANO_GIORNATA.get("data"):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessun piano giornata generato ancora. Verrà creato al prossimo ciclo."}, timeout=5)
+        return
+
+    tz_italia = ZoneInfo("Europe/Rome")
+    generato = datetime.datetime.fromtimestamp(PIANO_GIORNATA.get("generato_alle", 0), tz_italia)
+    partite = sorted(PIANO_GIORNATA.get("partite", []), key=lambda p: p.get("kickoff_ts", 0))
+    finestre = PIANO_GIORNATA.get("finestre_attive", [])
+
+    righe = [
+        f"Piano giornata {PIANO_GIORNATA.get('data')} (generato alle {generato.strftime('%H:%M')})\n"
+        f"{len(partite)} partite whitelist previste, {len(finestre)} finestre attive\n"
+    ]
+    for p in partite[:40]:
+        ora = datetime.datetime.fromtimestamp(p["kickoff_ts"], tz_italia).strftime("%H:%M")
+        righe.append(f"- {ora} {p['home']} - {p['away']} ({p['lega']})")
+    if len(partite) > 40:
+        righe.append(f"... e altre {len(partite) - 40} partite")
+
+    if finestre:
+        righe.append("\nFinestre attive (ciclo veloce):")
+        for inizio, fine in finestre:
+            i = datetime.datetime.fromtimestamp(inizio, tz_italia).strftime("%H:%M")
+            f_ = datetime.datetime.fromtimestamp(fine, tz_italia).strftime("%H:%M")
+            righe.append(f"- {i} - {f_}")
+
+    now_ts = time.time()
+    stato = "ATTIVA (ciclo veloce)" if dentro_finestra_attiva(PIANO_GIORNATA, now_ts) else "fuori finestra (ciclo rallentato)"
+    righe.append(f"\nAdesso: {stato}")
+
+    testo = "\n".join(righe)
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
 
 
 def cmd_status(chat_id, query):
@@ -1323,6 +1518,7 @@ def cmd_setup(chat_id):
              {"text": "🗑 Svuota preferiti", "callback_data": "cmd:clearfavorites"}],
             [{"text": "🔇 Silenziate", "callback_data": "cmd:silenced"}],
             [{"text": "📊 Leghe con statistiche", "callback_data": "cmd:leghestats"}],
+            [{"text": "🗓 Piano giornata", "callback_data": "cmd:piano"}],
             [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
@@ -2126,6 +2322,7 @@ def imposta_comandi_telegram():
         {"command": "clearfavorites", "description": "Svuota lista preferiti"},
         {"command": "silenced", "description": "Lista partite silenziate"},
         {"command": "leghestats", "description": "Leghe con statistiche coperte"},
+        {"command": "piano", "description": "Piano giornata e finestre orarie attive"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
@@ -2149,6 +2346,8 @@ if __name__ == "__main__":
             log("CONFIGURAZIONE INCOMPLETA - Attendo 30 secondi...")
             time.sleep(30)
             continue
+
+        aggiorna_piano_giornata_se_serve()
 
         ciclo_numero += 1
         log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
@@ -2186,5 +2385,15 @@ if __name__ == "__main__":
         pulisci_partite_terminate(fixture_ids_live)
         invia_report_intensita_automatico(partite_valide)
         aggiorna_storico_minutaggi_automatico()
-        log("Attesa 3 minuti...")
-        time.sleep(180)
+
+        # Scheduler adattivo (piano giornata): fuori da ogni finestra attiva prevista e senza
+        # partite valide effettivamente in corso in questo momento, il ciclo rallenta invece di
+        # continuare a interrogare l'API ogni pochi minuti per niente. Se il piano non è ancora
+        # disponibile (es. primo avvio prima che la generazione vada a buon fine) ci si comporta
+        # come se si fosse sempre in finestra attiva, per non restare ciechi.
+        piano_disponibile = PIANO_GIORNATA.get("data") is not None
+        in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
+        ciclo_attivo = in_finestra_attiva or bool(partite_valide)
+        prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
+        log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'})...")
+        time.sleep(prossimo_intervallo)
