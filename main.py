@@ -1717,7 +1717,7 @@ def cmd_momentum(chat_id, query):
 
         history = stato_partite.get(fid, {}).get("history", [])
         foto_path = genera_grafico_momentum(fid, home, away, history)
-        msg_text = f"{home} {score_h}-{score_a} {away}\n{league} | {minuto}'"
+        msg_text = f"{home} {score_h}-{score_a} {away}\n{league} | {minuto}'{nota_copertura_momentum(history)}"
 
         if foto_path and os.path.exists(foto_path):
             try:
@@ -2392,6 +2392,19 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
     except Exception as e:
         log(f"Errore grafico momentum: {e}")
         return None
+
+
+def nota_copertura_momentum(history):
+    """Se lo storico non parte da vicino al calcio d'inizio (es. il bot ha iniziato a monitorare
+    la partita a metà, o un riavvio prima della persistenza ha perso i dati precedenti), lo dice
+    esplicitamente - altrimenti il grafico sembra "rotto"/incompleto invece che semplicemente
+    privo di dati per la parte iniziale che non abbiamo mai visto."""
+    if not history:
+        return ""
+    primo_minuto = min(h.get("minuto") or 0 for h in history)
+    if primo_minuto <= 10:
+        return ""
+    return f"\n(dati disponibili da {primo_minuto}' in poi)"
 
 
 # =============================================================================
@@ -3165,9 +3178,12 @@ def processa_partita(fixture):
         # ancora abbastanza lungo si usa comunque il grafico a barre, per non restare senza foto.
         is_fav = str(fixture_id) in FAVORITE_MATCHES
         foto_path = None
+        nota_momentum = ""
         if is_fav:
             history_completo = stato_partite.get(fixture_id, {}).get("history", [])
             foto_path = genera_grafico_momentum(fixture_id, home, away, history_completo)
+            if foto_path:
+                nota_momentum = nota_copertura_momentum(history_completo)
         if not foto_path:
             foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
@@ -3249,6 +3265,7 @@ def processa_partita(fixture):
             f"{tempi_text}\n"
             f"Verde = {home}\n"
             f"Rosso = {away}"
+            f"{nota_momentum}"
         )
 
         is_sil = str(fixture_id) in SILENCED_MATCHES
