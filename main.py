@@ -40,6 +40,32 @@ def salva_json_atomico(path, obj):
     os.replace(tmp_path, path)
 
 
+def verifica_disco_scrivibile():
+    """Scrive e rilegge un file di prova in DATA_DIR all'avvio: conferma che la scrittura
+    funziona DAVVERO (permessi ok, spazio disponibile), non solo che la cartella esiste - così
+    un problema col disco persistente (es. montato ma non scrivibile) si vede subito nei log
+    invece di scoprirlo indirettamente da un file di stato mancante dopo un riavvio."""
+    test_path = data_path(".disco_test")
+    marcatore = str(time.time())
+    try:
+        with open(test_path, 'w') as f:
+            f.write(marcatore)
+        with open(test_path, 'r') as f:
+            letto = f.read()
+        os.remove(test_path)
+        if letto != marcatore:
+            print(f"DISCO: scrittura/lettura in {DATA_DIR} inconsistente (letto diverso da scritto)", flush=True)
+            return False
+        print(f"DISCO: scrittura/lettura OK in {DATA_DIR}", flush=True)
+        return True
+    except Exception as e:
+        print(f"DISCO: ERRORE scrittura/lettura in {DATA_DIR}: {e}", flush=True)
+        return False
+
+
+DISCO_SCRIVIBILE = verifica_disco_scrivibile()
+
+
 # =============================================================================
 # SERVER HTTP PER RENDER FREE (fix 501 HEAD)
 # =============================================================================
@@ -1644,6 +1670,24 @@ def cmd_status(chat_id, query):
                 json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
 
 
+def spiega_momentum_insufficiente(history):
+    """Motivo specifico per cui genera_grafico_momentum non ha prodotto un grafico, invece del
+    messaggio generico che elencava tutte le cause possibili senza dire quale si applica
+    davvero in questo caso - così chi legge sa se deve aspettare, e quanto, oppure se quella
+    lega/partita semplicemente non ha statistiche."""
+    n = len(history)
+    if n == 0:
+        return ("Il bot non ha ancora nessuna statistica per questa partita: monitoraggio appena "
+                "iniziato, oppure questa lega/incontro non ha statistiche disponibili dall'API "
+                "(succede per alcuni campionati minori - stesso motivo del 'N/D' nelle notifiche).")
+    if n < MOMENTUM_MIN_STORICO:
+        mancanti = MOMENTUM_MIN_STORICO - n
+        return (f"Solo {n} rilevazion{'e' if n == 1 else 'i'} su {MOMENTUM_MIN_STORICO} necessarie: "
+                f"mancano circa {mancanti * 3} minuti (se il bot resta acceso senza riavvii nel mezzo). Riprova più tardi.")
+    return ("Le statistiche non sono mai cambiate da quando il bot la monitora (partita ferma, "
+            "o l'API non aggiorna i dati per questa lega).")
+
+
 def cmd_momentum(chat_id, query):
     """/momentum <squadra>: grafico dell'andamento della pressione durante la partita, calcolato
     sullo storico accumulato dal bot per quella partita. A differenza di /status, funziona solo
@@ -1697,9 +1741,7 @@ def cmd_momentum(chat_id, query):
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 json={
                     "chat_id": chat_id,
-                    "text": f"{msg_text}\n\nDati insufficienti per il momentum (servono almeno {MOMENTUM_MIN_STORICO} rilevazioni, "
-                            f"~{MOMENTUM_MIN_STORICO * 3} minuti di monitoraggio senza riavvii del bot nel mezzo, o non ci sono "
-                            f"ancora cambiamenti nelle statistiche). Riprova tra qualche minuto."
+                    "text": f"{msg_text}\n\nMomentum non disponibile: {spiega_momentum_insufficiente(history)}"
                 }, timeout=5)
 
 
