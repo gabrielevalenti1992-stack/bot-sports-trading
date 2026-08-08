@@ -1134,6 +1134,21 @@ def estrai_current_stats(stats_home, stats_away):
     }
 
 
+def testo_confronto_tempi(stats_fine_1h, current_stats):
+    """Riga di riepilogo 1° tempo vs 2° tempo (il 2°T è la differenza tra il cumulativo attuale
+    e lo snapshot salvato a fine 1°T). Serve a vedere chi ha dominato sull'intero 2° tempo, non
+    solo il delta ultimi 15 min che può capovolgersi più volte nello stesso tempo."""
+    etichette = {"Tiri totali": "Tiri", "Tiri in porta": "Porta", "Corner": "Corner"}
+    parti_1t, parti_2t = [], []
+    for chiave, label in etichette.items():
+        h1, a1 = stats_fine_1h.get(chiave, (0, 0))
+        hc, ac = current_stats.get(chiave, (0, 0))
+        h2, a2 = max(0, hc - h1), max(0, ac - a1)
+        parti_1t.append(f"{label} {h1}-{a1}")
+        parti_2t.append(f"{label} {h2}-{a2}")
+    return f"\n1° tempo: {' | '.join(parti_1t)}\n2° tempo: {' | '.join(parti_2t)}\n"
+
+
 # =============================================================================
 # COMANDI TELEGRAM (funzioni riutilizzabili da testo e da bottoni inline)
 # =============================================================================
@@ -2717,6 +2732,11 @@ def processa_partita(fixture):
                             righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
                         rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
 
+                    tempi_finale_text = ""
+                    stats_1h_salvate = stato.get("stats_fine_1h")
+                    if stats_1h_salvate and current_stats:
+                        tempi_finale_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+
                     messaggio = (
                         f"{home} vs {away}\n"
                         f"{formatta_lega(league_name, league_country)}\n"
@@ -2729,7 +2749,8 @@ def processa_partita(fixture):
                         f"Statistiche finali:\n"
                         f"- Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\n"
                         f"- Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\n"
-                        f"- Corner: {corner_casa if current_stats else '?'} - {corner_ospite if current_stats else '?'}"
+                        f"- Corner: {corner_casa if current_stats else '?'} - {corner_ospite if current_stats else '?'}\n"
+                        f"{tempi_finale_text}"
                     )
 
                 chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
@@ -2835,6 +2856,13 @@ def processa_partita(fixture):
             else:
                 rigori_text += f"\n❌ Rigore sbagliato/parato al {r['minute']}': {r['player']} ({r['team']})\n"
 
+        # Confronto 1°T/2°T: solo nel 2° tempo e solo se abbiamo visto finire il 1°T (altrimenti
+        # non c'è ancora nulla da confrontare).
+        tempi_text = ""
+        stats_1h_salvate = stato_partite.get(fixture_id, {}).get("stats_fine_1h")
+        if status_short == "2H" and stats_1h_salvate and current_stats:
+            tempi_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
@@ -2847,7 +2875,8 @@ def processa_partita(fixture):
             f"{header_stats}:\n"
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
-            f"- Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n\n"
+            f"- Corner: {stats_dict['Corner'][0]} - {stats_dict['Corner'][1]}\n"
+            f"{tempi_text}\n"
             f"Verde = {home}\n"
             f"Rosso = {away}"
         )
