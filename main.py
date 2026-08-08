@@ -471,26 +471,43 @@ def poll_callbacks():
                     elif data.startswith("fav:"):
                         fid = str(int(data.split(":")[1]))
                         if fid in FAVORITE_MATCHES:
+                            # Rimozione: stesso trattamento del "silenzia" (bottoni tolti +
+                            # messaggio di conferma), invece di lasciare i bottoni lì a fare
+                            # domande su un messaggio che ormai non e' piu' un preferito.
                             FAVORITE_MATCHES.discard(fid)
-                            text = "Rimossa dai preferiti"
-                        else:
-                            FAVORITE_MATCHES.add(fid)
-                            text = "Aggiunta ai preferiti"
-                        save_favorites(FAVORITE_MATCHES)
-                        requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
-                            json={"callback_query_id": cq["id"], "text": text}, timeout=5)
-                        is_fav = fid in FAVORITE_MATCHES
-                        is_sil = fid in SILENCED_MATCHES
-                        keyboard = get_notification_keyboard(int(fid), is_fav, is_sil)
-                        if keyboard:
+                            save_favorites(FAVORITE_MATCHES)
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                json={"callback_query_id": cq["id"], "text": "Rimossa dai preferiti"}, timeout=5)
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
                                 json={
                                     "chat_id": chat_id,
                                     "message_id": msg_id,
-                                    "reply_markup": json.dumps(keyboard)
+                                    "reply_markup": json.dumps({"inline_keyboard": []})
                                 }, timeout=5)
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": "⭐ Partita rimossa dai preferiti. Torna alle notifiche normali nella chat principale (niente più canale dedicato)."
+                                }, timeout=5)
+                        else:
+                            FAVORITE_MATCHES.add(fid)
+                            save_favorites(FAVORITE_MATCHES)
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                json={"callback_query_id": cq["id"], "text": "Aggiunta ai preferiti"}, timeout=5)
+                            is_sil = fid in SILENCED_MATCHES
+                            keyboard = get_notification_keyboard(int(fid), True, is_sil)
+                            if keyboard:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
+                                    json={
+                                        "chat_id": chat_id,
+                                        "message_id": msg_id,
+                                        "reply_markup": json.dumps(keyboard)
+                                    }, timeout=5)
 
                     elif data.startswith("cmd:"):
                         azione = data.split(":", 1)[1]
