@@ -858,7 +858,11 @@ def notifica_errore_api_throttled(tipo, dettaglio, contesto):
     ULTIMO_ERRORE_API = {"tipo": tipo, "timestamp": now}
 
 
+ULTIMO_ERRORE_GET_PARTITE_LIVE = 0
+
+
 def get_partite_live():
+    global ULTIMO_ERRORE_GET_PARTITE_LIVE
     if not API_FOOTBALL_KEY:
         log("API_FOOTBALL_KEY mancante, skip get_partite_live")
         return []
@@ -867,6 +871,7 @@ def get_partite_live():
     if data is None:
         if tipo_errore and tipo_errore != "config":
             notifica_errore_api_throttled(tipo_errore, dettaglio, "get_partite_live")
+            ULTIMO_ERRORE_GET_PARTITE_LIVE = time.time()
         return []
     return data.get("response", [])
 
@@ -951,19 +956,20 @@ def dentro_finestra_attiva(piano, now_ts=None):
 
 
 def aggiorna_piano_giornata_se_serve():
-    """Chiamata ad ogni ciclo del loop principale (nessun costo se non serve rigenerare). Genera
-    il piano al primo avvio (qualunque sia l'ora) cosi' il bot non parte "cieco", e poi lo
-    rigenera una volta al giorno all'ora configurata (ora locale Italia)."""
+    """Chiamata ad ogni ciclo del loop principale (nessun costo se non serve rigenerare). Rigenera
+    il piano una volta al giorno, solo durante l'ora esatta configurata (ora locale Italia).
+    Non genera piu' anche al primo avvio a qualunque ora: il filesystem di Render non e'
+    persistente tra un riavvio e l'altro, quindi dopo un riavvio il piano risulta sempre "mai
+    generato" e senza questo limite ogni riavvio (a qualsiasi ora) provocava una chiamata
+    /fixtures?date= immediata. In attesa del piano il ciclo principale tratta comunque ogni
+    momento come finestra attiva (fail-safe), quindi non si perde nessuna partita."""
     global PIANO_GIORNATA
     now_it = datetime.datetime.now(ZoneInfo("Europe/Rome"))
     oggi_str = now_it.strftime("%Y-%m-%d")
 
     if PIANO_GIORNATA.get("data") == oggi_str:
         return
-
-    piano_mai_generato = PIANO_GIORNATA.get("data") is None
-    ora_raggiunta = now_it.hour >= ORA_GENERAZIONE_PIANO_GIORNATA
-    if not piano_mai_generato and not ora_raggiunta:
+    if now_it.hour != ORA_GENERAZIONE_PIANO_GIORNATA:
         return
 
     log(f"Generazione piano partite per {oggi_str} (ore {now_it.strftime('%H:%M')} orario italiano)...")
@@ -1054,6 +1060,47 @@ def extract_goals(events):
             })
     goals.sort(key=lambda g: g["minute"])
     return goals
+
+
+def extract_cartellini_rossi(events):
+    """Cartellini rossi (diretti o secondo giallo) dagli eventi della partita."""
+    rossi = []
+    for ev in events:
+        if ev.get("type") != "Card":
+            continue
+        dettaglio = (ev.get("detail") or "").lower()
+        if "red" not in dettaglio:
+            continue
+        rossi.append({
+            "minute": ev["time"]["elapsed"],
+            "player": (ev.get("player") or {}).get("name") or "Sconosciuto",
+            "team": ev["team"]["name"],
+            "dettaglio": ev.get("detail") or "Red Card",
+        })
+    rossi.sort(key=lambda c: c["minute"])
+    return rossi
+
+
+def extract_rigori(events):
+    """Rigori segnati o sbagliati dagli eventi della partita (esclude quelli concessi ma non
+    ancora battuti: l'API non li espone come evento a sé finché non vengono calciati)."""
+    rigori = []
+    for ev in events:
+        dettaglio = (ev.get("detail") or "").lower()
+        if dettaglio == "penalty" and ev.get("type") == "Goal":
+            esito = "segnato"
+        elif dettaglio == "missed penalty":
+            esito = "sbagliato"
+        else:
+            continue
+        rigori.append({
+            "minute": ev["time"]["elapsed"],
+            "player": (ev.get("player") or {}).get("name") or "Sconosciuto",
+            "team": ev["team"]["name"],
+            "esito": esito,
+        })
+    rigori.sort(key=lambda r: r["minute"])
+    return rigori
 
 
 def estrai_valore_stat(stats_team, nome_stat):
@@ -2879,6 +2926,7 @@ if __name__ == "__main__":
         log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
 
         partite = get_partite_live()
+        chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
         partite_valide = [
             f for f in partite
             if campionato_valido(
@@ -2890,10 +2938,16 @@ if __name__ == "__main__":
         log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
 
         if ciclo_numero == 1 or ciclo_numero % 10 == 0:
-            invia_messaggio_telegram(
-                f"Bot attivo - Ciclo #{ciclo_numero}\n"
-                f"Partite live: {len(partite)} totali, {len(partite_valide)} monitorate"
-            )
+            if chiamata_partite_live_fallita:
+                invia_messaggio_telegram(
+                    f"Bot attivo - Ciclo #{ciclo_numero}\n"
+                    f"Ultima chiamata API fallita (vedi errore sopra): dato partite live non affidabile"
+                )
+            else:
+                invia_messaggio_telegram(
+                    f"Bot attivo - Ciclo #{ciclo_numero}\n"
+                    f"Partite live: {len(partite)} totali, {len(partite_valide)} monitorate"
+                )
 
         # Si itera solo sulle partite valide (non su tutte le partite live del mondo): lo sleep(1)
         # tra una chiamata e l'altra serve a distanziare le chiamate API fatte da processa_partita
