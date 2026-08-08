@@ -23,6 +23,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # =============================================================================
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIR, exist_ok=True)
+print(f"DATA_DIR: {DATA_DIR} ({'da env var DATA_DIR' if os.environ.get('DATA_DIR') else 'fallback, nessuna env var DATA_DIR impostata'})", flush=True)
 
 
 def data_path(nome_file):
@@ -298,6 +299,7 @@ def salva_stato_partite(dati):
 
 
 stato_partite = carica_stato_partite()
+print(f"stato_partite recuperato da disco: {len(stato_partite)} partite (0 = primo avvio o disco non persistente)", flush=True)
 ciclo_numero = 0
 
 # Storico dei 15 minuti usato da /status, separato da stato_partite: quest'ultimo viene ripulito
