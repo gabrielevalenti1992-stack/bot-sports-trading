@@ -3051,7 +3051,17 @@ def processa_partita(fixture):
             log(f"  -> Skip")
             return
 
-        foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
+        # Preferiti: grafico momentum (andamento pressione nel tempo) invece del grafico a barre
+        # proporzionale, perché è quello che serve per decidere se entrare - se lo storico non è
+        # ancora abbastanza lungo si usa comunque il grafico a barre, per non restare senza foto.
+        is_fav = str(fixture_id) in FAVORITE_MATCHES
+        foto_path = None
+        if is_fav:
+            history_completo = stato_partite.get(fixture_id, {}).get("history", [])
+            if len(history_completo) >= 2:
+                foto_path = genera_grafico_momentum(fixture_id, home, away, history_completo)
+        if not foto_path:
+            foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         # Nessun indicatore quando sono pari (EQ non è utile): solo chi è avanti nel delta 15 min.
@@ -3133,7 +3143,6 @@ def processa_partita(fixture):
             f"Rosso = {away}"
         )
 
-        is_fav = str(fixture_id) in FAVORITE_MATCHES
         is_sil = str(fixture_id) in SILENCED_MATCHES
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
