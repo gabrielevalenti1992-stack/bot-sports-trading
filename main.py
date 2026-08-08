@@ -1533,11 +1533,11 @@ def cmd_status(chat_id, query):
         intensita_text = ""
         if current_stats:
             history = STATUS_HISTORY.get(fid, [])
-            history.append({"timestamp": time.time(), "stats": current_stats})
+            history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
             history = [h for h in history if time.time() - h["timestamp"] <= 1200]
             STATUS_HISTORY[fid] = history
 
-            delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats)
+            delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats, minuto)
             if is_real:
                 punteggio = calcola_indice_intensita(delta_stats)
                 motivazioni = descrivi_motivazioni_intensita(delta_stats)
@@ -1735,7 +1735,7 @@ def cmd_intensita(chat_id):
             sh = stats[0].get("statistics", [])
             sa = stats[1].get("statistics", [])
             current_stats = estrai_current_stats(sh, sa)
-            delta_stats, is_real = calcola_delta_15min(fid, current_stats)
+            delta_stats, is_real = calcola_delta_15min(fid, current_stats, f["fixture"]["status"].get("elapsed") or 0)
             punteggio = calcola_indice_intensita(delta_stats)
             risultati.append((punteggio, home, away, league, minute, score_h, score_a, delta_stats, is_real))
         time.sleep(0.3)
@@ -1838,7 +1838,8 @@ def _scansiona_partite_valide(max_partite=40):
         sh = stats[0].get("statistics", [])
         sa = stats[1].get("statistics", [])
         current_stats = estrai_current_stats(sh, sa)
-        delta_stats, delta_reale = calcola_delta_15min(fid, current_stats)
+        minuto = f["fixture"]["status"].get("elapsed") or 0
+        delta_stats, delta_reale = calcola_delta_15min(fid, current_stats, minuto)
         risultati.append({
             "fixture": f,
             "fid": fid,
@@ -1846,7 +1847,7 @@ def _scansiona_partite_valide(max_partite=40):
             "away": f["teams"]["away"]["name"],
             "league": f.get("league", {}).get("name", ""),
             "league_country": f.get("league", {}).get("country", ""),
-            "minute": f["fixture"]["status"].get("elapsed") or 0,
+            "minute": minuto,
             "score_h": f["goals"]["home"] or 0,
             "score_a": f["goals"]["away"] or 0,
             "stats": current_stats,
@@ -2311,28 +2312,34 @@ def get_notification_keyboard(fixture_id, is_favorite=False, is_silenced=False):
 
 
 # =============================================================================
-# DELTA 15 MINUTI
+# DELTA 15 MINUTI - a blocchi fissi (0-15', 15-30', 30-45', 45-60', 60-75', 75-90'...): si azzera
+# esattamente ad ogni multiplo di 15 minuti di gioco, invece di scorrere con una finestra reale
+# calcolata da "adesso". Stessa risorsa (stato_partite[fid]["history"]) usata da /momentum.
 # =============================================================================
-def _calcola_delta_15min_da_storico(history, current_stats):
-    now = time.time()
-    history_15m = [h for h in history if now - h["timestamp"] <= 900]
+def _blocco_minuto(minuto):
+    return (minuto or 0) // 15
 
-    if not history_15m or len(history_15m) < 2:
+
+def _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente):
+    blocco_corrente = _blocco_minuto(minuto_corrente)
+    punti_blocco = [h for h in history if _blocco_minuto(h.get("minuto")) == blocco_corrente]
+
+    if not punti_blocco:
         return {k: (0, 0) for k in current_stats}, False
 
-    old = history_15m[0]
+    inizio_blocco = min(punti_blocco, key=lambda h: h["timestamp"])
     delta = {}
     for key in current_stats:
         curr_h, curr_a = current_stats[key]
-        old_h, old_a = old["stats"].get(key, (0, 0))
+        old_h, old_a = inizio_blocco["stats"].get(key, (0, 0))
         delta[key] = (max(0, curr_h - old_h), max(0, curr_a - old_a))
     return delta, True
 
 
-def calcola_delta_15min(fixture_id, current_stats):
+def calcola_delta_15min(fixture_id, current_stats, minuto_corrente):
     stato = stato_partite.get(fixture_id, {})
     history = stato.get("history", [])
-    return _calcola_delta_15min_da_storico(history, current_stats)
+    return _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente)
 
 
 def invia_report_intensita_automatico(partite_valide):
@@ -2355,7 +2362,7 @@ def invia_report_intensita_automatico(partite_valide):
         if not history:
             continue
         current_stats = history[-1]["stats"]
-        delta_stats, is_real = calcola_delta_15min(fixture_id, current_stats)
+        delta_stats, is_real = calcola_delta_15min(fixture_id, current_stats, history[-1].get("minuto") or 0)
         if not is_real:
             continue
         punteggio = calcola_indice_intensita(delta_stats)
@@ -2896,10 +2903,10 @@ def processa_partita(fixture):
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
             # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
-            # /momentum per disegnare l'andamento su tutta la partita, non solo gli ultimi 15/20
-            # min. _calcola_delta_15min_da_storico filtra già da sé la finestra che le serve, quindi
-            # tenerlo tutto non cambia il delta 15 min. Costo trascurabile: ~1 snapshot a ciclo
-            # (~3 min), ripulito comunque a fine partita da pulisci_partite_terminate().
+            # /momentum per disegnare l'andamento su tutta la partita, non solo il blocco di 15 min
+            # corrente. _calcola_delta_15min_da_storico filtra già da sé i punti del blocco che le
+            # servono, quindi tenerlo tutto non cambia il delta 15 min. Costo trascurabile: ~1
+            # snapshot a ciclo (~3 min), ripulito comunque a fine partita da pulisci_partite_terminate().
             history = stato_partite[fixture_id].get("history", [])
             history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
             stato_partite[fixture_id]["history"] = history
@@ -3029,7 +3036,7 @@ def processa_partita(fixture):
             return
 
         if current_stats:
-            delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats)
+            delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats, minuto)
             stats_dict = delta_stats
             header_stats = "Statistiche ultimi 15 min" if is_real_delta else "Primo rilevamento"
         else:
