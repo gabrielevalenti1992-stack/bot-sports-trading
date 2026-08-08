@@ -100,6 +100,12 @@ MARGINE_PRE_KICKOFF_MINUTI = 10  # anticipo con cui il ciclo torna "attivo" prim
 INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una finestra attiva (come oggi)
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 
+# Minuti di recupero: se superano questa soglia in un tempo (1° o 2°), la partita merita una
+# notifica dedicata anche se le altre soglie (tiri, momentum...) non sono soddisfatte, perché più
+# recupero significa più tempo utile per operare su una squadra in attacco. Per i preferiti la
+# soglia non si applica: qualsiasi recupero (anche solo 1') viene comunque segnalato.
+SOGLIA_RECUPERO_LUNGO_MINUTI = 3
+
 # Filtro leghe con statistiche note (per evitare notifiche su campionati minori senza dati API)
 SOLO_LEGHE_CON_STATISTICHE = True
 LEGHE_CON_STATISTICHE = [
@@ -157,6 +163,7 @@ try:
     MARGINE_PRE_KICKOFF_MINUTI = config.get("margine_pre_kickoff_minuti", MARGINE_PRE_KICKOFF_MINUTI)
     INTERVALLO_CICLO_ATTIVO = config.get("intervallo_ciclo_attivo", INTERVALLO_CICLO_ATTIVO)
     INTERVALLO_CICLO_MORTO = config.get("intervallo_ciclo_morto", INTERVALLO_CICLO_MORTO)
+    SOGLIA_RECUPERO_LUNGO_MINUTI = config.get("soglia_recupero_lungo_minuti", SOGLIA_RECUPERO_LUNGO_MINUTI)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
@@ -2024,9 +2031,9 @@ def cmd_aggiornastorico(chat_id):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
-def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False):
-    # PRIORITÀ MASSIMA: gol appena segnato -> notifica sempre, nessun cooldown
-    if gol_appena_segnato:
+def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False):
+    # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre
+    if gol_appena_segnato or recupero_lungo:
         return True
 
     stato = stato_partite.get(fixture_id, {})
@@ -2092,6 +2099,7 @@ def processa_partita(fixture):
         score_away = fixture["goals"]["away"] or 0
         minuto = fixture["fixture"]["status"].get("elapsed") or 0
         status_short = fixture["fixture"]["status"].get("short", "LIVE")
+        extra_corrente = fixture["fixture"]["status"].get("extra")
 
         log(f"  ✅ {home} vs {away} - {minuto}' ({league_name})")
 
@@ -2102,12 +2110,40 @@ def processa_partita(fixture):
         if gol_appena_segnato and stato_precedente:
             log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
 
+        # Minuti di recupero: si tiene il valore più recente annunciato dall'API per il tempo in
+        # corso, e si rileva il momento in cui il tempo finisce (1H->altro, 2H->altro) per poterlo
+        # segnalare come "appena concluso" con una notifica dedicata se è abbastanza lungo.
+        prev_status_short = stato_precedente.get("last_status_short")
+        recupero_1h = stato_precedente.get("recupero_1h")
+        recupero_2h = stato_precedente.get("recupero_2h")
+        if status_short == "1H" and extra_corrente is not None:
+            recupero_1h = extra_corrente
+        elif status_short == "2H" and extra_corrente is not None:
+            recupero_2h = extra_corrente
+
+        recupero_appena_concluso = None
+        if prev_status_short == "1H" and status_short != "1H" and recupero_1h is not None:
+            recupero_appena_concluso = ("1° tempo", recupero_1h)
+        elif prev_status_short == "2H" and status_short != "2H" and recupero_2h is not None:
+            recupero_appena_concluso = ("2° tempo", recupero_2h)
+
+        recupero_da_segnalare = None
+        if recupero_appena_concluso:
+            fase_recupero, minuti_recupero = recupero_appena_concluso
+            e_preferita = str(fixture_id) in FAVORITE_MATCHES
+            if minuti_recupero > SOGLIA_RECUPERO_LUNGO_MINUTI or (e_preferita and minuti_recupero >= 1):
+                recupero_da_segnalare = (fase_recupero, minuti_recupero)
+                log(f"    ⏱ Recupero {fase_recupero} concluso: +{minuti_recupero}' (da segnalare)")
+
         if fixture_id not in stato_partite:
             stato_partite[fixture_id] = {}
         stato_partite[fixture_id].update({
             "score_home": score_home,
             "score_away": score_away,
             "last_minute": minuto,
+            "last_status_short": status_short,
+            "recupero_1h": recupero_1h,
+            "recupero_2h": recupero_2h,
             "home": home,
             "away": away,
             "league": league_name,
@@ -2198,12 +2234,20 @@ def processa_partita(fixture):
                         if len(goals) > 1:
                             goals_text += f"Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
 
+                    recupero_parti = []
+                    if recupero_1h:
+                        recupero_parti.append(f"1° tempo +{recupero_1h}'")
+                    if recupero_2h:
+                        recupero_parti.append(f"2° tempo +{recupero_2h}'")
+                    recupero_finale_text = f"Recupero: {', '.join(recupero_parti)}\n" if recupero_parti else ""
+
                     messaggio = (
                         f"{home} vs {away}\n"
                         f"{formatta_lega(league_name, league_country)}\n"
                         f"RISULTATO FINALE\n\n"
                         f"{score_home} - {score_away}\n"
                         f"{goals_text}\n"
+                        f"{recupero_finale_text}"
                         f"Statistiche finali:\n"
                         f"- Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\n"
                         f"- Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\n"
@@ -2251,7 +2295,7 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=gol_appena_segnato):
+        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=gol_appena_segnato, recupero_lungo=recupero_da_segnalare is not None):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
@@ -2292,12 +2336,22 @@ def processa_partita(fixture):
             if len(goals) > 1:
                 goals_text += f"Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
 
+        recupero_text = ""
+        if recupero_da_segnalare:
+            fase_recupero, minuti_recupero = recupero_da_segnalare
+            lungo_txt = " (lungo)" if minuti_recupero > SOGLIA_RECUPERO_LUNGO_MINUTI else ""
+            recupero_text = f"\n⏱ Recupero {fase_recupero}: +{minuti_recupero}'{lungo_txt}\n"
+        elif status_short in ("1H", "2H") and extra_corrente is not None:
+            fase_corrente = "1° tempo" if status_short == "1H" else "2° tempo"
+            recupero_text = f"\n⏱ Recupero {fase_corrente} annunciato: +{extra_corrente}'\n"
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
             f"Risultato: {score_home} - {score_away}\n"
-            f"{goals_text}\n"
+            f"{goals_text}"
+            f"{recupero_text}\n"
             f"{header_stats}:\n"
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"

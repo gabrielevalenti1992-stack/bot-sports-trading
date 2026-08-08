@@ -18,6 +18,7 @@
   "margine_pre_kickoff_minuti": 10,
   "intervallo_ciclo_attivo": 180,
   "intervallo_ciclo_morto": 1800,
+  "soglia_recupero_lungo_minuti": 3,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",
