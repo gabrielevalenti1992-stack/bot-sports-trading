@@ -539,29 +539,84 @@ def campionato_valido(league_name, league_type, league_country=""):
     return True
 
 
+# =============================================================================
+# CHIAMATE API-FOOTBALL: helper condiviso con diagnostica e notifiche throttled
+# =============================================================================
+ULTIMO_ERRORE_API = {"tipo": None, "timestamp": 0}
+INTERVALLO_NOTIFICA_ERRORE_API = 1800  # 30 minuti: non ripetere la stessa notifica più spesso
+
+
+def _log_quota_headers(response):
+    """Logga la quota residua che l'API restituisce già negli header di ogni risposta,
+    senza bisogno di una chiamata dedicata per controllarla."""
+    limite = response.headers.get("x-ratelimit-requests-limit")
+    residuo = response.headers.get("x-ratelimit-requests-remaining")
+    if limite or residuo:
+        log(f"    [quota API-Football] {residuo}/{limite} richieste rimaste oggi")
+
+
+def _classifica_errore_http(status_code):
+    if status_code == 429:
+        return "rate_limit", "limite di richieste (al minuto o giornaliero) superato"
+    if status_code in (401, 403):
+        return "auth", "chiave API non valida o piano non abilitato per questa risorsa"
+    return f"http_{status_code}", f"HTTP {status_code}"
+
+
+def get_api_football(url, params, timeout, contesto):
+    """GET verso API-Football con diagnostica sempre loggata (status, header di quota residua,
+    corpo dell'errore troncato), usando solo i dati già presenti nella risposta ricevuta: nessuna
+    chiamata aggiuntiva viene fatta per il debug. Ritorna (json_o_None, tipo_errore_o_None,
+    dettaglio_errore_o_None)."""
+    if not API_FOOTBALL_KEY:
+        return None, "config", "API_FOOTBALL_KEY mancante"
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=timeout)
+    except Exception as e:
+        log(f"[{contesto}] Eccezione di rete: {e}")
+        return None, "rete", f"eccezione di rete ({e})"
+
+    _log_quota_headers(response)
+
+    if response.status_code != 200:
+        tipo, motivo = _classifica_errore_http(response.status_code)
+        log(f"[{contesto}] {motivo} - corpo: {response.text[:500]}")
+        return None, tipo, motivo
+
+    data = response.json()
+    errori = data.get("errors")
+    if errori:
+        log(f"[{contesto}] Errore applicativo API: {errori}")
+        return None, "api_errors", str(errori)
+
+    return data, None, None
+
+
+def notifica_errore_api_throttled(tipo, dettaglio, contesto):
+    """Manda un messaggio Telegram sull'errore API solo se lo stesso tipo di errore non è già
+    stato notificato negli ultimi INTERVALLO_NOTIFICA_ERRORE_API secondi, per non spammare la
+    chat ad ogni ciclo mentre l'errore persiste (es. quota esaurita per ore)."""
+    global ULTIMO_ERRORE_API
+    now = time.time()
+    if ULTIMO_ERRORE_API["tipo"] == tipo and (now - ULTIMO_ERRORE_API["timestamp"]) < INTERVALLO_NOTIFICA_ERRORE_API:
+        log(f"[{contesto}] Errore '{tipo}' ripetuto, notifica Telegram soppressa (ancora in cooldown)")
+        return
+    invia_messaggio_telegram(f"Errore API ({contesto})\n{dettaglio}")
+    ULTIMO_ERRORE_API = {"tipo": tipo, "timestamp": now}
+
+
 def get_partite_live():
     if not API_FOOTBALL_KEY:
         log("API_FOOTBALL_KEY mancante, skip get_partite_live")
         return []
     url = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    params = {"live": "all"}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        log(f"API-Football status: {response.status_code}")
-        if response.status_code != 200:
-            invia_messaggio_telegram(f"Errore API\nHTTP {response.status_code}")
-            return []
-        data = response.json()
-        errori = data.get("errors", {})
-        if errori:
-            invia_messaggio_telegram(f"Errore API\n{errori}")
-            return []
-        return data.get("response", [])
-    except Exception as e:
-        log(f"Errore get_partite_live: {e}")
-        invia_messaggio_telegram(f"Eccezione API\n{e}")
+    data, tipo_errore, dettaglio = get_api_football(url, {"live": "all"}, timeout=15, contesto="get_partite_live")
+    if data is None:
+        if tipo_errore and tipo_errore != "config":
+            notifica_errore_api_throttled(tipo_errore, dettaglio, "get_partite_live")
         return []
+    return data.get("response", [])
 
 
 def get_leghe_con_copertura_statistiche_raw():
@@ -569,32 +624,24 @@ def get_leghe_con_copertura_statistiche_raw():
     if not API_FOOTBALL_KEY:
         return []
     url = "https://v3.football.api-sports.io/leagues"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    params = {"current": "true"}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=20)
-        if response.status_code != 200:
-            log(f"Errore /leagues: HTTP {response.status_code}")
-            return []
-        data = response.json()
-        risultati = []
-        for item in data.get("response", []):
-            league = item.get("league", {})
-            country = item.get("country", {})
-            for season in item.get("seasons", []):
-                if not season.get("current"):
-                    continue
-                coverage = season.get("coverage", {}) or {}
-                fixtures_cov = coverage.get("fixtures", {}) or {}
-                stats_ok = bool(fixtures_cov.get("statistics_fixtures", fixtures_cov.get("statistics", False)))
-                if stats_ok:
-                    nome = league.get("name", "?")
-                    paese = country.get("name", "?")
-                    risultati.append((paese, nome))
-        return sorted(set(risultati))
-    except Exception as e:
-        log(f"Errore get_leghe_con_copertura_statistiche_raw: {e}")
+    data, _, _ = get_api_football(url, {"current": "true"}, timeout=20, contesto="get_leghe_con_copertura_statistiche_raw")
+    if data is None:
         return []
+    risultati = []
+    for item in data.get("response", []):
+        league = item.get("league", {})
+        country = item.get("country", {})
+        for season in item.get("seasons", []):
+            if not season.get("current"):
+                continue
+            coverage = season.get("coverage", {}) or {}
+            fixtures_cov = coverage.get("fixtures", {}) or {}
+            stats_ok = bool(fixtures_cov.get("statistics_fixtures", fixtures_cov.get("statistics", False)))
+            if stats_ok:
+                nome = league.get("name", "?")
+                paese = country.get("name", "?")
+                risultati.append((paese, nome))
+    return sorted(set(risultati))
 
 
 def get_leghe_con_copertura_statistiche():
@@ -623,33 +670,26 @@ def get_statistiche_partita(fixture_id, debug=False):
     if not API_FOOTBALL_KEY:
         return None
     url = "https://v3.football.api-sports.io/fixtures/statistics"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    params = {"fixture": fixture_id}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        if debug:
-            log(f"    [DEBUG stats {fixture_id}] HTTP {response.status_code} - body: {response.text[:1500]}")
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        return data.get("response", [])
-    except Exception as e:
-        log(f"Errore statistiche {fixture_id}: {e}")
+    data, tipo_errore, dettaglio = get_api_football(
+        url, {"fixture": fixture_id}, timeout=15, contesto=f"get_statistiche_partita({fixture_id})")
+    if debug:
+        if data is not None:
+            log(f"    [DEBUG stats {fixture_id}] risposta OK - {json.dumps(data)[:1500]}")
+        else:
+            log(f"    [DEBUG stats {fixture_id}] errore: {tipo_errore} - {dettaglio}")
+    if data is None:
         return None
+    return data.get("response", [])
 
 
 def fetch_fixture_events(fixture_id):
     if not API_FOOTBALL_KEY:
         return []
     url = "https://v3.football.api-sports.io/fixtures/events"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    params = {"fixture": fixture_id}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        return response.json().get("response", [])
-    except Exception as e:
-        log(f"Errore eventi {fixture_id}: {e}")
+    data, _, _ = get_api_football(url, {"fixture": fixture_id}, timeout=10, contesto=f"fetch_fixture_events({fixture_id})")
+    if data is None:
         return []
+    return data.get("response", [])
 
 
 def extract_goals(events):
@@ -1477,52 +1517,39 @@ def risolvi_leghe_whitelist():
         return LEGHE_ID_STAGIONE_CACHE
 
     url = "https://v3.football.api-sports.io/leagues"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    params = {"current": "true"}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=20)
-        if response.status_code != 200:
-            log(f"Errore /leagues (risolvi_leghe_whitelist): HTTP {response.status_code}")
-            return LEGHE_ID_STAGIONE_CACHE
-        data = response.json()
-        mappa = {}
-        for item in data.get("response", []):
-            league = item.get("league", {})
-            nome = league.get("name", "")
-            league_id = league.get("id")
-            if not nome or not league_id:
-                continue
-            if not any(lega.lower() in nome.lower() or nome.lower() in lega.lower() for lega in LEGHE_CON_STATISTICHE):
-                continue
-            for season in item.get("seasons", []):
-                if season.get("current"):
-                    mappa[nome] = (league_id, season.get("year"))
-                    break
-        if mappa:
-            LEGHE_ID_STAGIONE_CACHE = mappa
-            LEGHE_ID_STAGIONE_TIMESTAMP = now
-            log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione")
+    data, _, _ = get_api_football(url, {"current": "true"}, timeout=20, contesto="risolvi_leghe_whitelist")
+    if data is None:
         return LEGHE_ID_STAGIONE_CACHE
-    except Exception as e:
-        log(f"Errore risolvi_leghe_whitelist: {e}")
-        return LEGHE_ID_STAGIONE_CACHE
+    mappa = {}
+    for item in data.get("response", []):
+        league = item.get("league", {})
+        nome = league.get("name", "")
+        league_id = league.get("id")
+        if not nome or not league_id:
+            continue
+        if not any(lega.lower() in nome.lower() or nome.lower() in lega.lower() for lega in LEGHE_CON_STATISTICHE):
+            continue
+        for season in item.get("seasons", []):
+            if season.get("current"):
+                mappa[nome] = (league_id, season.get("year"))
+                break
+    if mappa:
+        LEGHE_ID_STAGIONE_CACHE = mappa
+        LEGHE_ID_STAGIONE_TIMESTAMP = now
+        log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione")
+    return LEGHE_ID_STAGIONE_CACHE
 
 
 def get_fixtures_terminati(league_id, season):
     if not API_FOOTBALL_KEY:
         return []
     url = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": API_FOOTBALL_KEY}
-    params = {"league": league_id, "season": season, "status": "FT"}
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=20)
-        if response.status_code != 200:
-            log(f"Errore fixtures terminati lega {league_id}: HTTP {response.status_code}")
-            return []
-        return response.json().get("response", [])
-    except Exception as e:
-        log(f"Errore get_fixtures_terminati({league_id}): {e}")
+    data, _, _ = get_api_football(
+        url, {"league": league_id, "season": season, "status": "FT"}, timeout=20,
+        contesto=f"get_fixtures_terminati({league_id})")
+    if data is None:
         return []
+    return data.get("response", [])
 
 
 def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
@@ -1834,27 +1861,13 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
 # PROCESSA SINGOLA PARTITA
 # =============================================================================
 def processa_partita(fixture):
+    """Elabora una partita live già filtrata dal chiamante (main loop): qui non si ricontrolla più
+    campionato_valido(), il filtro è fatto una sola volta a monte per evitare il doppio controllo
+    e per far sì che lo sleep tra una partita e l'altra scatti solo per partite valide."""
     try:
         fixture_id = fixture["fixture"]["id"]
         league = fixture.get("league", {})
         league_name = league.get("name", "")
-        league_type = league.get("type", "")
-        league_country = league.get("country", "")
-
-        if not campionato_valido(league_name, league_type, league_country):
-            motivo = "Type non riconosciuto"
-            for escluso in PAROLE_ESCLUSE:
-                if escluso in league_name.lower():
-                    motivo = f"Parola esclusa: '{escluso}'"
-                    break
-            else:
-                if SOLO_LEGHE_CON_STATISTICHE:
-                    if LEGHE_ATTIVE_CACHE:
-                        motivo = "Non in whitelist dinamica leghe con statistiche"
-                    elif not any(lega.lower() in league_name.lower() for lega in LEGHE_CON_STATISTICHE):
-                        motivo = "Non in whitelist leghe con statistiche"
-            log(f"  ❌ {league_name} - SCARTATA ({motivo})")
-            return
 
         home = fixture["teams"]["home"]["name"]
         away = fixture["teams"]["away"]["name"]
@@ -2157,11 +2170,16 @@ if __name__ == "__main__":
                 f"Partite live: {len(partite)} totali, {len(partite_valide)} monitorate"
             )
 
-        fixture_ids_live = set()
-        for fixture in partite:
-            fixture_id = fixture.get("fixture", {}).get("id")
-            if fixture_id:
-                fixture_ids_live.add(fixture_id)
+        # Si itera solo sulle partite valide (non su tutte le partite live del mondo): lo sleep(1)
+        # tra una chiamata e l'altra serve a distanziare le chiamate API fatte da processa_partita
+        # (statistiche + eventi), quindi non ha senso pagarlo anche per le migliaia di partite
+        # scartate (dilettanti, giovanili, campionati fuori whitelist) su cui non viene fatta
+        # nessuna chiamata. stato_partite contiene solo partite valide, quindi fixture_ids_live
+        # può essere costruito direttamente da partite_valide.
+        fixture_ids_live = {
+            f["fixture"]["id"] for f in partite_valide if f.get("fixture", {}).get("id")
+        }
+        for fixture in partite_valide:
             processa_partita(fixture)
             time.sleep(1)
 
