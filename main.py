@@ -539,6 +539,20 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_testpreferiti)
                         elif azione == "intensita":
                             esegui_comando_sicuro(chat_id, cmd_intensita)
+                        elif azione == "scanner":
+                            esegui_comando_sicuro(chat_id, cmd_scanner)
+                        elif azione == "assedio":
+                            esegui_comando_sicuro(chat_id, cmd_assedio)
+                        elif azione == "fasciacalda":
+                            esegui_comando_sicuro(chat_id, cmd_fasciacalda)
+                        elif azione == "rimonta":
+                            esegui_comando_sicuro(chat_id, cmd_rimonta)
+                        elif azione == "concretezza":
+                            esegui_comando_sicuro(chat_id, cmd_concretezza)
+                        elif azione == "xgtiro":
+                            esegui_comando_sicuro(chat_id, cmd_xgtiro)
+                        elif azione == "qualita":
+                            esegui_comando_sicuro(chat_id, cmd_qualita)
                         elif azione == "help":
                             esegui_comando_sicuro(chat_id, cmd_help)
 
@@ -566,6 +580,27 @@ def poll_callbacks():
 
                     elif cmd == "/intensita":
                         esegui_comando_sicuro(chat_id, cmd_intensita)
+
+                    elif cmd == "/assedio":
+                        esegui_comando_sicuro(chat_id, cmd_assedio)
+
+                    elif cmd == "/fasciacalda":
+                        esegui_comando_sicuro(chat_id, cmd_fasciacalda)
+
+                    elif cmd == "/rimonta":
+                        esegui_comando_sicuro(chat_id, cmd_rimonta)
+
+                    elif cmd == "/concretezza":
+                        esegui_comando_sicuro(chat_id, cmd_concretezza)
+
+                    elif cmd == "/xgtiro":
+                        esegui_comando_sicuro(chat_id, cmd_xgtiro)
+
+                    elif cmd == "/qualita":
+                        esegui_comando_sicuro(chat_id, cmd_qualita)
+
+                    elif cmd == "/scanner":
+                        esegui_comando_sicuro(chat_id, cmd_scanner)
 
                     elif cmd == "/analisi":
                         if not args:
@@ -1054,6 +1089,13 @@ def cmd_help(chat_id):
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
+        "/assedio - Partite bloccate ma con pressione alta, probabile sblocco\n"
+        "/fasciacalda - Squadra storicamente pericolosa in questa fascia oraria\n"
+        "/rimonta - Squadra in svantaggio che spinge più che nel 1° tempo\n"
+        "/concretezza - Chi trasforma meglio i tiri in occasioni vere\n"
+        "/xgtiro - Poche occasioni ma di alta qualità (xG per tiro)\n"
+        "/qualita - Tiri quasi pari ma una squadra molto più concreta\n"
+        "/scanner - Applica tutte le strategie insieme, top 7 con i simboli\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
         "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
         "/favorites - Lista partite preferite\n"
@@ -1520,6 +1562,366 @@ def cmd_intensita(chat_id):
             log(f"Errore invio /intensita: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
+# =============================================================================
+# SEI STRATEGIE + /scanner
+# =============================================================================
+# Soglie di partenza per le sei strategie: numeri ragionevoli scelti da zero (le soglie esatte
+# discusse in sessioni precedenti non sono state salvate nel codice), pensati per essere
+# facilmente ritoccati qui se in pratica risultano troppo permissivi o troppo restrittivi.
+SOGLIA_ASSEDIO_MINUTO = 20
+SOGLIA_ASSEDIO_GOL_MAX = 1
+SOGLIA_ASSEDIO_RITMO_MIN = 4
+PESO_ASSEDIO_XG = 3
+
+SOGLIA_FASCIACALDA_MEDIA = 0.30
+SOGLIA_FASCIACALDA_PARTITE_MIN = 9
+SOGLIA_FASCIACALDA_GOLEADA = 3
+
+SOGLIA_RIMONTA_MIN = 4
+
+SOGLIA_CONCRETEZZA_TIRI_MIN = 3
+SOGLIA_CONCRETEZZA_MIN = 0.5
+
+SOGLIA_XGTIRO_TIRI_MIN = 2
+SOGLIA_XGTIRO_TIRI_MAX = 6
+SOGLIA_XGTIRO_MIN = 0.15
+
+SOGLIA_QUALITA_DIFF_TIRI_MAX = 2
+SOGLIA_QUALITA_DIFF_INDICE_MIN = 0.25
+
+
+def estrai_xg(stats_team):
+    """xG (expected_goals) della squadra, o None se il campo non è presente/valorizzato
+    (distingue "dato assente" da "0.0 reale", a differenza di estrai_valore_stat)."""
+    for stat in stats_team:
+        if (stat.get("type") or "").lower() == "expected_goals":
+            val = stat.get("value")
+            if val is None:
+                return None
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _scansiona_partite_valide(max_partite=40):
+    """Raccoglie partite live valide con statistiche correnti, delta 15 min e xG: usata da tutte
+    le sei strategie e da /scanner, così ognuna riusa la stessa scansione invece di rifare le
+    chiamate da capo (nessuna chiamata aggiuntiva oltre a lanciarne una)."""
+    partite_raw = get_partite_live()
+    partite_valide = [
+        f for f in partite_raw
+        if campionato_valido(
+            f.get("league", {}).get("name", ""),
+            f.get("league", {}).get("type", ""),
+            f.get("league", {}).get("country", "")
+        )
+    ]
+    da_scandire = partite_valide[:max_partite]
+    risultati = []
+    for f in da_scandire:
+        fid = f["fixture"]["id"]
+        stats = get_statistiche_partita(fid)
+        if not (stats and len(stats) >= 2):
+            time.sleep(0.3)
+            continue
+        sh = stats[0].get("statistics", [])
+        sa = stats[1].get("statistics", [])
+        current_stats = {
+            "Tiri totali": (estrai_valore_stat(sh, "Total Shots"), estrai_valore_stat(sa, "Total Shots")),
+            "Tiri in porta": (estrai_valore_stat(sh, "Shots on Goal"), estrai_valore_stat(sa, "Shots on Goal")),
+            "Corner": (estrai_valore_stat(sh, "Corner Kicks"), estrai_valore_stat(sa, "Corner Kicks")),
+            "Tiri in area": (estrai_valore_stat(sh, "Shots insidebox"), estrai_valore_stat(sa, "Shots insidebox")),
+        }
+        delta_stats, delta_reale = calcola_delta_15min(fid, current_stats)
+        risultati.append({
+            "fixture": f,
+            "fid": fid,
+            "home": f["teams"]["home"]["name"],
+            "away": f["teams"]["away"]["name"],
+            "league": f.get("league", {}).get("name", ""),
+            "league_country": f.get("league", {}).get("country", ""),
+            "minute": f["fixture"]["status"].get("elapsed") or 0,
+            "score_h": f["goals"]["home"] or 0,
+            "score_a": f["goals"]["away"] or 0,
+            "stats": current_stats,
+            "delta": delta_stats,
+            "delta_reale": delta_reale,
+            "xg_home": estrai_xg(sh),
+            "xg_away": estrai_xg(sa),
+            "stato_precedente": stato_partite.get(fid, {}),
+        })
+        time.sleep(0.3)
+    return risultati, len(partite_valide)
+
+
+def valuta_assedio(p):
+    """1. Assedio senza gol: partita ancora bloccata (0-1 gol totali) dopo il 20', ma con ritmo
+    alto negli ultimi 15' e xG cumulativo molto superiore ai gol realmente segnati (squadra
+    "sfortunata" o portiere in giornata, probabile sblocco vicino)."""
+    if p["minute"] < SOGLIA_ASSEDIO_MINUTO or not p["delta_reale"]:
+        return None
+    gol_totali = p["score_h"] + p["score_a"]
+    if gol_totali > SOGLIA_ASSEDIO_GOL_MAX:
+        return None
+    ritmo = calcola_indice_intensita(p["delta"])
+    if ritmo < SOGLIA_ASSEDIO_RITMO_MIN:
+        return None
+    xg_tot = (p["xg_home"] or 0) + (p["xg_away"] or 0)
+    bonus_xg = max(0, xg_tot - gol_totali) * PESO_ASSEDIO_XG
+    dettaglio = f"ritmo {ritmo:.1f}pt ultimi 15'"
+    if xg_tot > 0:
+        dettaglio += f", xG {xg_tot:.2f} vs {gol_totali} gol"
+    return ritmo + bonus_xg, dettaglio
+
+
+def valuta_fasciacalda(p):
+    """2. Pattern orario storico: il minuto attuale è dentro una fascia di 15' in cui una delle
+    due squadre segna o subisce, storicamente e nel proprio ruolo, molto sopra la media — solo se
+    la partita non è già in goleada."""
+    if abs(p["score_h"] - p["score_a"]) >= SOGLIA_FASCIACALDA_GOLEADA:
+        return None
+    fascia = fascia_minuto(p["minute"])
+    candidati = []
+    squadra_casa = trova_squadra_in_storico(p["home"])
+    if squadra_casa and squadra_casa["casa"]["partite"] >= SOGLIA_FASCIACALDA_PARTITE_MIN:
+        partite = squadra_casa["casa"]["partite"]
+        fatti = squadra_casa["casa"]["fatti"].get(fascia, 0)
+        subiti = squadra_casa["casa"]["subiti"].get(fascia, 0)
+        if fatti / partite >= SOGLIA_FASCIACALDA_MEDIA:
+            candidati.append((fatti / partite, f"{p['home']} segna spesso in casa in questa fascia ({fatti}/{partite} partite)"))
+        if subiti / partite >= SOGLIA_FASCIACALDA_MEDIA:
+            candidati.append((subiti / partite, f"{p['home']} subisce spesso in casa in questa fascia ({subiti}/{partite} partite)"))
+    squadra_trasferta = trova_squadra_in_storico(p["away"])
+    if squadra_trasferta and squadra_trasferta["trasferta"]["partite"] >= SOGLIA_FASCIACALDA_PARTITE_MIN:
+        partite = squadra_trasferta["trasferta"]["partite"]
+        fatti = squadra_trasferta["trasferta"]["fatti"].get(fascia, 0)
+        subiti = squadra_trasferta["trasferta"]["subiti"].get(fascia, 0)
+        if fatti / partite >= SOGLIA_FASCIACALDA_MEDIA:
+            candidati.append((fatti / partite, f"{p['away']} segna spesso in trasferta in questa fascia ({fatti}/{partite} partite)"))
+        if subiti / partite >= SOGLIA_FASCIACALDA_MEDIA:
+            candidati.append((subiti / partite, f"{p['away']} subisce spesso in trasferta in questa fascia ({subiti}/{partite} partite)"))
+    if not candidati:
+        return None
+    candidati.sort(key=lambda c: -c[0])
+    media, dettaglio = candidati[0]
+    return media * 10, f"fascia {fascia}': {dettaglio}"
+
+
+def valuta_rimonta(p):
+    """3. Rimonta in atto: la squadra in svantaggio mostra un'impennata di ritmo nel 2° tempo
+    rispetto alla propria prima parte (confronto con se stessa nel tempo, non con l'avversaria)."""
+    if p["score_h"] == p["score_a"]:
+        return None
+    stats_1h = p["stato_precedente"].get("stats_fine_1h")
+    if not stats_1h:
+        return None
+    idx = 0 if p["score_h"] < p["score_a"] else 1
+    nome_squadra = p["home"] if idx == 0 else p["away"]
+    d_tiri = p["stats"]["Tiri totali"][idx] - stats_1h["Tiri totali"][idx]
+    d_porta = p["stats"]["Tiri in porta"][idx] - stats_1h["Tiri in porta"][idx]
+    d_corner = p["stats"]["Corner"][idx] - stats_1h["Corner"][idx]
+    punteggio = d_tiri * PESO_INTENSITA_TIRI + d_porta * PESO_INTENSITA_PORTA + d_corner * PESO_INTENSITA_CORNER
+    if punteggio < SOGLIA_RIMONTA_MIN:
+        return None
+    sotto, sopra = sorted((p["score_h"], p["score_a"]))
+    return punteggio, f"{nome_squadra} (sotto {sotto}-{sopra}): 2°T vs 1°T +{d_tiri} tiri, +{d_porta} porta, +{d_corner} corner"
+
+
+def _indice_concretezza(p, idx):
+    """Combina Tiri in area/Tiri totali (quanto tira da posizione pericolosa) e Tiri in
+    porta/Tiri totali (quanto è preciso): alto su entrambi = squadra che attacca davvero."""
+    tiri_tot = p["stats"]["Tiri totali"][idx]
+    if tiri_tot < SOGLIA_CONCRETEZZA_TIRI_MIN:
+        return None
+    rapporto_area = p["stats"]["Tiri in area"][idx] / tiri_tot
+    rapporto_porta = p["stats"]["Tiri in porta"][idx] / tiri_tot
+    return (rapporto_area + rapporto_porta) / 2, rapporto_area, rapporto_porta, tiri_tot
+
+
+def valuta_concretezza(p):
+    """4. Indice di concretezza offensiva: quale squadra trasforma meglio i tiri in occasioni
+    vere, non solo per volume."""
+    candidati = []
+    for idx, nome in ((0, p["home"]), (1, p["away"])):
+        esito = _indice_concretezza(p, idx)
+        if esito is None:
+            continue
+        indice, rapporto_area, rapporto_porta, tiri_tot = esito
+        candidati.append((indice, nome, rapporto_area, rapporto_porta, tiri_tot))
+    if not candidati:
+        return None
+    candidati.sort(key=lambda c: -c[0])
+    indice, nome, rapporto_area, rapporto_porta, tiri_tot = candidati[0]
+    if indice < SOGLIA_CONCRETEZZA_MIN:
+        return None
+    return indice * 10, f"{nome}: {round(rapporto_area * 100)}% tiri da area, {round(rapporto_porta * 100)}% in porta (su {tiri_tot} tiri)"
+
+
+def valuta_xgtiro(p):
+    """5. xG per tiro: poche occasioni ma di alta qualità (expected_goals / tiri totali alto)."""
+    candidati = []
+    for idx, nome, xg in ((0, p["home"], p["xg_home"]), (1, p["away"], p["xg_away"])):
+        if xg is None:
+            continue
+        tiri_tot = p["stats"]["Tiri totali"][idx]
+        if not (SOGLIA_XGTIRO_TIRI_MIN <= tiri_tot <= SOGLIA_XGTIRO_TIRI_MAX):
+            continue
+        candidati.append((xg / tiri_tot, nome, xg, tiri_tot))
+    if not candidati:
+        return None
+    candidati.sort(key=lambda c: -c[0])
+    xg_per_tiro, nome, xg, tiri_tot = candidati[0]
+    if xg_per_tiro < SOGLIA_XGTIRO_MIN:
+        return None
+    return xg_per_tiro * 10, f"{nome}: xG {xg:.2f} su {tiri_tot} tiri ({xg_per_tiro:.2f} xG/tiro)"
+
+
+def valuta_qualita(p):
+    """6. Confronto di qualità (non di volume): tiri quasi pari tra le due squadre, ma l'indice di
+    concretezza (punto 4) di una è nettamente superiore all'altra."""
+    tiri_h = p["stats"]["Tiri totali"][0]
+    tiri_a = p["stats"]["Tiri totali"][1]
+    if abs(tiri_h - tiri_a) > SOGLIA_QUALITA_DIFF_TIRI_MAX:
+        return None
+    esito_h = _indice_concretezza(p, 0)
+    esito_a = _indice_concretezza(p, 1)
+    if esito_h is None or esito_a is None:
+        return None
+    indice_h = esito_h[0]
+    indice_a = esito_a[0]
+    diff = indice_h - indice_a
+    if abs(diff) < SOGLIA_QUALITA_DIFF_INDICE_MIN:
+        return None
+    migliore = p["home"] if diff > 0 else p["away"]
+    return abs(diff) * 10, f"{migliore} molto più concreta a parità di tiri ({tiri_h}-{tiri_a}): indice {max(indice_h, indice_a):.2f} vs {min(indice_h, indice_a):.2f}"
+
+
+STRATEGIE = [
+    ("Assedio", "🟥", valuta_assedio, "match fermi ma con pressione alta"),
+    ("Fascia calda", "⏰", valuta_fasciacalda, "squadra storicamente pericolosa in questa fascia oraria"),
+    ("Rimonta", "🔄", valuta_rimonta, "squadra in svantaggio che spinge più che nel 1° tempo"),
+    ("Concretezza", "🎯", valuta_concretezza, "squadra che trasforma bene i tiri in occasioni vere"),
+    ("xG per tiro", "💎", valuta_xgtiro, "poche occasioni ma di alta qualità"),
+    ("Qualità", "⚖️", valuta_qualita, "tiri quasi pari ma una squadra molto più concreta"),
+]
+
+
+def _cmd_strategia(chat_id, nome, emoji, valuta_fn, descrizione):
+    risultati_scan, totale_valide = _scansiona_partite_valide()
+    if not risultati_scan:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
+        return
+    trovati = []
+    for p in risultati_scan:
+        esito = valuta_fn(p)
+        if esito is not None:
+            punteggio, dettaglio = esito
+            trovati.append((punteggio, p, dettaglio))
+    if not trovati:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"{emoji} Nessuna partita soddisfa i criteri di '{nome}' in questo momento (su {len(risultati_scan)} partite scandite)."}, timeout=5)
+        return
+    trovati.sort(key=lambda t: -t[0])
+    top = trovati[:7]
+    righe = [f"{emoji} {nome} - top {len(top)} di {len(trovati)} partite ({descrizione})\n"]
+    for punteggio, p, dettaglio in top:
+        righe.append(
+            f"{p['home']} {p['score_h']}-{p['score_a']} {p['away']} "
+            f"({formatta_lega(p['league'], p['league_country'])}, {p['minute']}')\n   {dettaglio}"
+        )
+    testo = "\n".join(righe)
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+        if risposta.status_code != 200:
+            log(f"Errore invio strategia '{nome}': HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
+def cmd_assedio(chat_id):
+    _cmd_strategia(chat_id, *STRATEGIE[0][:2], STRATEGIE[0][2], STRATEGIE[0][3])
+
+
+def cmd_fasciacalda(chat_id):
+    _cmd_strategia(chat_id, *STRATEGIE[1][:2], STRATEGIE[1][2], STRATEGIE[1][3])
+
+
+def cmd_rimonta(chat_id):
+    _cmd_strategia(chat_id, *STRATEGIE[2][:2], STRATEGIE[2][2], STRATEGIE[2][3])
+
+
+def cmd_concretezza(chat_id):
+    _cmd_strategia(chat_id, *STRATEGIE[3][:2], STRATEGIE[3][2], STRATEGIE[3][3])
+
+
+def cmd_xgtiro(chat_id):
+    _cmd_strategia(chat_id, *STRATEGIE[4][:2], STRATEGIE[4][2], STRATEGIE[4][3])
+
+
+def cmd_qualita(chat_id):
+    _cmd_strategia(chat_id, *STRATEGIE[5][:2], STRATEGIE[5][2], STRATEGIE[5][3])
+
+
+def cmd_scanner(chat_id):
+    """/scanner: applica tutte e sei le strategie insieme sulla stessa scansione (nessuna
+    chiamata aggiuntiva rispetto a lanciarne una sola) e mostra la top 7 con i simboli di quelle
+    soddisfatte, più una legenda."""
+    risultati_scan, totale_valide = _scansiona_partite_valide()
+    if not risultati_scan:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
+        return
+
+    valutazioni = []
+    for p in risultati_scan:
+        simboli = []
+        dettagli = []
+        punteggio_tot = 0
+        for nome, emoji, valuta_fn, _descr in STRATEGIE:
+            esito = valuta_fn(p)
+            if esito is not None:
+                punteggio, dettaglio = esito
+                simboli.append(emoji)
+                punteggio_tot += punteggio
+                dettagli.append(f"{emoji} {nome}: {dettaglio}")
+        if simboli:
+            valutazioni.append((len(simboli), punteggio_tot, p, simboli, dettagli))
+
+    if not valutazioni:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"🔍 Nessuna partita soddisfa nessuna strategia in questo momento (su {len(risultati_scan)} partite scandite)."}, timeout=5)
+        return
+
+    valutazioni.sort(key=lambda v: (-v[0], -v[1]))
+    top = valutazioni[:7]
+    righe = [f"🔍 Scanner strategie - top {len(top)} di {len(valutazioni)} partite\n"]
+    for n_simboli, punteggio_tot, p, simboli, dettagli in top:
+        righe.append(
+            f"{''.join(simboli)} {p['home']} {p['score_h']}-{p['score_a']} {p['away']} "
+            f"({formatta_lega(p['league'], p['league_country'])}, {p['minute']}')"
+        )
+        righe.extend(f"   {d}" for d in dettagli)
+        righe.append("")
+    righe.append("Legenda: " + " | ".join(f"{emoji} {nome}" for nome, emoji, _fn, _d in STRATEGIE))
+
+    testo = "\n".join(righe)
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+        if risposta.status_code != 200:
+            log(f"Errore invio /scanner: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
 def cmd_setup(chat_id):
     keyboard = {
         "inline_keyboard": [
@@ -1532,6 +1934,13 @@ def cmd_setup(chat_id):
              {"text": "▶️ Riprendi", "callback_data": "cmd:riprendi"}],
             [{"text": "🧪 Test canale preferiti", "callback_data": "cmd:testpreferiti"}],
             [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
+            [{"text": "🔍 Scanner strategie", "callback_data": "cmd:scanner"}],
+            [{"text": "🟥 Assedio", "callback_data": "cmd:assedio"},
+             {"text": "⏰ Fascia calda", "callback_data": "cmd:fasciacalda"}],
+            [{"text": "🔄 Rimonta", "callback_data": "cmd:rimonta"},
+             {"text": "🎯 Concretezza", "callback_data": "cmd:concretezza"}],
+            [{"text": "💎 xG per tiro", "callback_data": "cmd:xgtiro"},
+             {"text": "⚖️ Qualità", "callback_data": "cmd:qualita"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
     }
@@ -2127,6 +2536,10 @@ def processa_partita(fixture):
         elif prev_status_short == "2H" and status_short != "2H" and recupero_2h is not None:
             recupero_appena_concluso = ("2° tempo", recupero_2h)
 
+        # Serve a /rimonta: alla fine del 1° tempo si fotografano le statistiche per poterle
+        # confrontare con quelle del 2° tempo (la squadra contro se stessa, non contro l'avversaria).
+        fine_1h_appena_avvenuta = prev_status_short == "1H" and status_short != "1H"
+
         recupero_da_segnalare = None
         if recupero_appena_concluso:
             fase_recupero, minuti_recupero = recupero_appena_concluso
@@ -2184,6 +2597,9 @@ def processa_partita(fixture):
             history = [h for h in history if time.time() - h["timestamp"] <= 1200]
             stato_partite[fixture_id]["history"] = history
             registra_esito_statistiche(league_country, league_name, True)
+            if fine_1h_appena_avvenuta:
+                stato_partite[fixture_id]["stats_fine_1h"] = current_stats
+                log(f"    📸 Statistiche di fine 1° tempo salvate per /rimonta")
         else:
             current_stats = None
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
@@ -2310,7 +2726,7 @@ def processa_partita(fixture):
 
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         # Nessun indicatore quando sono pari (EQ non è utile): solo chi è avanti nel delta 15 min.
-        freccia = " CASA" if diff > 0 else " OSP" if diff < 0 else ""
+        freccia = " 🏡 CASA" if diff > 0 else " ✈️ OSP" if diff < 0 else ""
 
         d_tiri_c = stats_dict["Tiri totali"][0]
         d_tiri_o = stats_dict["Tiri totali"][1]
@@ -2415,6 +2831,13 @@ def imposta_comandi_telegram():
         {"command": "riprendi", "description": "Riattiva il bot dopo /stop"},
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
+        {"command": "assedio", "description": "Partite bloccate ma con pressione alta"},
+        {"command": "fasciacalda", "description": "Squadra pericolosa in questa fascia oraria"},
+        {"command": "rimonta", "description": "Squadra in svantaggio che spinge di più"},
+        {"command": "concretezza", "description": "Chi trasforma meglio i tiri in occasioni"},
+        {"command": "xgtiro", "description": "Poche occasioni ma di alta qualità"},
+        {"command": "qualita", "description": "Tiri quasi pari, una squadra più concreta"},
+        {"command": "scanner", "description": "Applica tutte le strategie insieme"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
