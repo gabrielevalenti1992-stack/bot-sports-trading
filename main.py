@@ -139,6 +139,13 @@ PESO_INTENSITA_TIRI = 1
 PESO_INTENSITA_PORTA = 2
 PESO_INTENSITA_CORNER = 1
 
+# Peso per il delta di xG (expected_goals) nel grafico /momentum: un tiro pesa ~0.05-0.3 xG,
+# quindi il peso è più alto degli altri per rendere il contributo comparabile (es. 0.2 xG in un
+# intervallo pesa quanto ~2 tiri in porta). NOTA: xGOT (expected goals on target) non è un campo
+# fornito da API-Football (verificato) - solo xG "semplice" è disponibile, quindi è l'unica
+# metrica di qualità del tiro che possiamo usare, non xGOT.
+PESO_MOMENTUM_XG = 10
+
 # Report automatico di intensità: ogni quanto (secondi) inviarlo, una volta che i dati sono pronti
 INTERVALLO_REPORT_INTENSITA = 900  # 15 minuti
 ULTIMO_REPORT_INTENSITA = 0
@@ -2325,8 +2332,11 @@ def genera_grafico_barre(fixture_id, home_name, away_name, stats):
 def genera_grafico_momentum(fixture_id, home_name, away_name, history):
     """Grafico "momentum": una barra per ogni intervallo tra due rilevazioni consecutive,
     verde verso l'alto quando spinge la casa in quell'intervallo, rossa verso il basso quando
-    spinge la trasferta. Riusa gli stessi pesi di calcola_indice_intensita (tiri/porta/corner),
-    applicati separatamente alle due squadre invece che a un unico punteggio combinato.
+    spinge la trasferta. Punteggio = tiri totali + tiri in porta (pesati) + corner + delta di xG
+    (se disponibile) - la qualità del tiro (xG), non solo la quantità, quindi un singolo tiro
+    pericoloso può pesare quanto una raffica di tiri innocui. NOTA: xGOT (expected goals on
+    target) non è un dato fornito da API-Football, solo xG "semplice" - non è nel calcolo perché
+    non esiste nella fonte dati, non per una scelta di design.
     Risoluzione onesta: un punto ogni ciclo (~3 min quando la partita è "attiva"), non al minuto -
     non è quindi immediato/fluido come i widget con feed dati proprietario, ma usa dati reali."""
     try:
@@ -2344,11 +2354,21 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
             d_corner_h = max(0, s_corr["Corner"][0] - s_prec["Corner"][0])
             d_corner_a = max(0, s_corr["Corner"][1] - s_prec["Corner"][1])
 
+            xg_prec = prec.get("xg") or [None, None]
+            xg_corr = corr.get("xg") or [None, None]
+            d_xg_h = d_xg_a = 0
+            if xg_prec[0] is not None and xg_corr[0] is not None:
+                d_xg_h = max(0, xg_corr[0] - xg_prec[0])
+            if xg_prec[1] is not None and xg_corr[1] is not None:
+                d_xg_a = max(0, xg_corr[1] - xg_prec[1])
+
             punteggi_casa.append(
-                d_tiri_h * PESO_INTENSITA_TIRI + d_porta_h * PESO_INTENSITA_PORTA + d_corner_h * PESO_INTENSITA_CORNER
+                d_tiri_h * PESO_INTENSITA_TIRI + d_porta_h * PESO_INTENSITA_PORTA
+                + d_corner_h * PESO_INTENSITA_CORNER + d_xg_h * PESO_MOMENTUM_XG
             )
             punteggi_ospite.append(
-                d_tiri_a * PESO_INTENSITA_TIRI + d_porta_a * PESO_INTENSITA_PORTA + d_corner_a * PESO_INTENSITA_CORNER
+                d_tiri_a * PESO_INTENSITA_TIRI + d_porta_a * PESO_INTENSITA_PORTA
+                + d_corner_a * PESO_INTENSITA_CORNER + d_xg_a * PESO_MOMENTUM_XG
             )
             etichette.append(f"{corr.get('minuto', '?')}'")
 
@@ -2361,13 +2381,28 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
         color_muted = '#888888'
 
         x = range(len(etichette))
-        fig, ax = plt.subplots(figsize=(6.0, 3.0), dpi=150)
+        fig, ax = plt.subplots(figsize=(6.0, 3.2), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
         ax.set_facecolor('#1e1e1e')
 
-        ax.bar(x, punteggi_casa, color=color_home, width=0.8, zorder=2, edgecolor='none')
-        ax.bar(x, [-v for v in punteggi_ospite], color=color_away, width=0.8, zorder=2, edgecolor='none')
+        barre_casa = ax.bar(x, punteggi_casa, color=color_home, width=0.8, zorder=2, edgecolor='none')
+        barre_ospite = ax.bar(x, [-v for v in punteggi_ospite], color=color_away, width=0.8, zorder=2, edgecolor='none')
         ax.axhline(0, color=color_muted, linewidth=1, zorder=1)
+
+        # Etichette numeriche sopra/sotto le barre non nulle: senza, il grafico è solo colore
+        # senza un numero da leggere, e sembra un abbozzo invece di un'analisi.
+        picco = max([abs(v) for v in punteggi_casa + punteggi_ospite] or [1])
+        margine_etichetta = picco * 0.06
+        for rect, val in zip(barre_casa, punteggi_casa):
+            if val > 0:
+                ax.text(rect.get_x() + rect.get_width() / 2, val + margine_etichetta, f"{val:.1f}",
+                        ha='center', va='bottom', fontsize=7, color=color_home, zorder=3)
+        for rect, val in zip(barre_ospite, punteggi_ospite):
+            if val > 0:
+                ax.text(rect.get_x() + rect.get_width() / 2, -val - margine_etichetta, f"{val:.1f}",
+                        ha='center', va='top', fontsize=7, color=color_away, zorder=3)
+
+        ax.set_ylim(-picco * 1.25, picco * 1.25)
 
         step = max(1, len(etichette) // 10)
         ax.set_xticks(list(x)[::step])
@@ -2375,6 +2410,9 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
         ax.set_yticks([])
         for spine in ['top', 'right', 'bottom', 'left']:
             ax.spines[spine].set_visible(False)
+
+        ax.set_title(f"{home_name} vs {away_name} - momentum (tiri, porta, corner, xG)",
+                     fontsize=9, color=color_text, pad=10)
 
         home_patch = mpatches.Patch(color=color_home, label=home_name)
         away_patch = mpatches.Patch(color=color_away, label=away_name)
@@ -3023,7 +3061,10 @@ def processa_partita(fixture):
             # servono, quindi tenerlo tutto non cambia il delta 15 min. Costo trascurabile: ~1
             # snapshot a ciclo (~3 min), ripulito comunque a fine partita da pulisci_partite_terminate().
             history = stato_partite[fixture_id].get("history", [])
-            history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
+            history.append({
+                "timestamp": time.time(), "minuto": minuto, "stats": current_stats,
+                "xg": [estrai_xg(stats_home), estrai_xg(stats_away)],
+            })
             stato_partite[fixture_id]["history"] = history
             registra_esito_statistiche(league_country, league_name, True)
             if fine_1h_appena_avvenuta:
