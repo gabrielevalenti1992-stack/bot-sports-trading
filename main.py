@@ -164,10 +164,14 @@ except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
 PAROLE_ESCLUSE = [
-    "women", "femminile", "female", "u20", "u19", "u18", "u17", "u16", "u15",
-    "under-20", "under-19", "under-18", "under-17", "under 20", "under 19",
-    "under 18", "under 17", "youth", "amateur", "dilettanti", "regional",
-    "reserves", "riserve"
+    "women", "femminile", "female", "u21", "u20", "u19", "u18", "u17", "u16", "u15",
+    "under-21", "under-20", "under-19", "under-18", "under-17", "under 21", "under 20",
+    "under 19", "under 18", "under 17", "youth", "amateur", "dilettanti", "regional",
+    "reserves", "riserve",
+    # Campionati di sviluppo/riserve il cui nome inizia come un campionato whitelist (es. "Premier
+    # League 2" contiene "Premier League" e passerebbe il match a sottostringa della whitelist):
+    # vanno esclusi esplicitamente qui, non li ferma il controllo U21 perché non contengono "u21".
+    "premier league 2", "professional development league"
     # TEST TEMPORANEO: "friendlies", "amichevoli", "friendly" rimossi per verificare grafici/notifiche
     # Ripristinare dopo il test!
 ]
