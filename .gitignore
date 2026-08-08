@@ -223,6 +223,7 @@ favorite_matches.json
 storico_minutaggi.json
 piano_giornata.json
 bot_pausa.json
+modalita_notifiche.json
 
 # Certificati e chiavi private (es. login Betfair) - mai su GitHub
 certs/

@@ -68,6 +68,12 @@ MOMENTUM_TIRI_IN_PORTA = 3
 MOMENTUM_TIRI_TOTALI = 5
 MOMENTUM_CORNER = 4
 
+# Preferiti: bypassano le soglie normali (molto più reattivi), ma non per il minimo indivisibile
+# (un singolo tiro non sul bersaglio non merita una notifica intera con foto). Serve un cambiamento
+# comunque percepibile dall'ultimo invio: almeno questi tiri totali in più, oppure almeno 1 tiro in
+# porta o 1 corner in più negli ultimi 15 min.
+SOGLIA_MIN_CAMBIO_PREFERITI = 2
+
 # Pesi per l'indice di intensità (usato dal comando /intensita e dal report automatico)
 PESO_INTENSITA_TIRI = 1
 PESO_INTENSITA_PORTA = 2
@@ -149,6 +155,7 @@ try:
     MOMENTUM_TIRI_IN_PORTA = config.get("momentum_tiri_in_porta", MOMENTUM_TIRI_IN_PORTA)
     MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
+    SOGLIA_MIN_CAMBIO_PREFERITI = config.get("soglia_min_cambio_preferiti", SOGLIA_MIN_CAMBIO_PREFERITI)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -355,6 +362,32 @@ def salva_pausa(stato):
 STATO_PAUSA = carica_pausa()
 
 # =============================================================================
+# MODALITA' ESSENZIALE (/modalitaessenziale, /modalitacompleta): quando attiva, deve_notificare()
+# lascia passare SOLO gli eventi forzati (gol, cartellino rosso, rigore, recupero lungo),
+# sopprimendo le notifiche di soglia (differenza tiri, momentum, refresh ogni 30 min) anche per i
+# preferiti. Persistita su disco come /stop, cosi' un riavvio del bot non la resetta a sua insaputa.
+# =============================================================================
+MODALITA_FILE = "modalita_notifiche.json"
+
+
+def carica_modalita():
+    if os.path.exists(MODALITA_FILE):
+        try:
+            with open(MODALITA_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {MODALITA_FILE}: {e}", flush=True)
+    return {"essenziale": False}
+
+
+def salva_modalita(stato):
+    with open(MODALITA_FILE, 'w') as f:
+        json.dump(stato, f)
+
+
+MODALITA_NOTIFICHE = carica_modalita()
+
+# =============================================================================
 # FIAMME - SOGLIE
 # =============================================================================
 FIRE_THRESHOLDS = {
@@ -531,6 +564,10 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_stop)
                         elif azione == "riprendi":
                             esegui_comando_sicuro(chat_id, cmd_riprendi)
+                        elif azione == "modalitaessenziale":
+                            esegui_comando_sicuro(chat_id, cmd_modalitaessenziale)
+                        elif azione == "modalitacompleta":
+                            esegui_comando_sicuro(chat_id, cmd_modalitacompleta)
                         elif azione == "testpreferiti":
                             esegui_comando_sicuro(chat_id, cmd_testpreferiti)
                         elif azione == "intensita":
@@ -655,6 +692,12 @@ def poll_callbacks():
 
                     elif cmd == "/riprendi":
                         esegui_comando_sicuro(chat_id, cmd_riprendi)
+
+                    elif cmd == "/modalitaessenziale":
+                        esegui_comando_sicuro(chat_id, cmd_modalitaessenziale)
+
+                    elif cmd == "/modalitacompleta":
+                        esegui_comando_sicuro(chat_id, cmd_modalitacompleta)
 
                     elif cmd == "/testpreferiti":
                         esegui_comando_sicuro(chat_id, cmd_testpreferiti)
@@ -1174,6 +1217,8 @@ def cmd_help(chat_id):
         "/piano - Piano giornata: partite whitelist previste oggi e finestre orarie attive\n"
         "/stop - Metti il bot in pausa (nessuna chiamata API, nessuna notifica)\n"
         "/riprendi - Riattiva il bot dopo /stop\n"
+        "/modalitaessenziale - Solo gol/rossi/rigori/recupero lungo, sospende le altre notifiche\n"
+        "/modalitacompleta - Torna alle notifiche di soglia normali\n"
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/setup - Menu comandi a bottoni"
     )
@@ -1364,6 +1409,42 @@ def cmd_riprendi(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "▶️ Bot riattivato. Riprendo subito a controllare le partite live."}, timeout=5)
+
+
+def cmd_modalitaessenziale(chat_id):
+    """Attiva la modalità essenziale: da qui in poi solo gol, cartellini rossi, rigori e recupero
+    lungo generano una notifica, per ridurre il rumore nelle serate con tante partite insieme."""
+    global MODALITA_NOTIFICHE
+    if MODALITA_NOTIFICHE.get("essenziale"):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "La modalità essenziale è già attiva."}, timeout=5)
+        return
+    MODALITA_NOTIFICHE = {"essenziale": True}
+    salva_modalita(MODALITA_NOTIFICHE)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": "🔕 Modalità essenziale attiva: da ora solo gol, cartellini rossi, rigori e "
+                    "recupero lungo. Le notifiche di soglia (tiri, momentum) sono sospese, anche "
+                    "per i preferiti. Invia /modalitacompleta per tornare come prima."
+        }, timeout=5)
+
+
+def cmd_modalitacompleta(chat_id):
+    """Disattiva la modalità essenziale, tornando alle soglie normali di notifica."""
+    global MODALITA_NOTIFICHE
+    if not MODALITA_NOTIFICHE.get("essenziale"):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "La modalità completa è già attiva."}, timeout=5)
+        return
+    MODALITA_NOTIFICHE = {"essenziale": False}
+    salva_modalita(MODALITA_NOTIFICHE)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "🔔 Modalità completa ripristinata: tornano le notifiche di soglia normali."}, timeout=5)
 
 
 def cmd_testpreferiti(chat_id):
@@ -1987,6 +2068,8 @@ def cmd_setup(chat_id):
             [{"text": "🗓 Piano giornata", "callback_data": "cmd:piano"}],
             [{"text": "⏸ Pausa", "callback_data": "cmd:stop"},
              {"text": "▶️ Riprendi", "callback_data": "cmd:riprendi"}],
+            [{"text": "🔕 Modalità essenziale", "callback_data": "cmd:modalitaessenziale"},
+             {"text": "🔔 Modalità completa", "callback_data": "cmd:modalitacompleta"}],
             [{"text": "🧪 Test canale preferiti", "callback_data": "cmd:testpreferiti"}],
             [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
             [{"text": "🔍 Scanner strategie", "callback_data": "cmd:scanner"}],
@@ -2496,9 +2579,16 @@ def cmd_aggiornastorico(chat_id):
 # REGOLE DI NOTIFICA
 # =============================================================================
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False):
-    # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre
+    # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
+    # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
+    # passare).
     if gol_appena_segnato or recupero_lungo:
         return True
+
+    # Modalità essenziale: tutto il resto (soglie tiri, momentum, refresh forzato, preferiti) è
+    # sospeso finché non torna la modalità completa.
+    if MODALITA_NOTIFICHE.get("essenziale"):
+        return False
 
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
@@ -2508,9 +2598,20 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     if tiri_casa == ultima_casa and tiri_ospite == ultima_ospite:
         return False
 
-    # Preferiti: notifica sempre se le stats sono cambiate (bypassa le soglie)
+    # Preferiti: molto più reattivi delle altre partite (bypassano le soglie sotto), ma non per il
+    # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio.
     if str(fixture_id) in FAVORITE_MATCHES:
-        return True
+        if ultima_casa < 0:
+            return True  # prima notifica per questa partita preferita: sempre subito
+        cambio_tiri_totali = (tiri_casa + tiri_ospite) - (ultima_casa + ultima_ospite)
+        if cambio_tiri_totali >= SOGLIA_MIN_CAMBIO_PREFERITI:
+            return True
+        if delta_stats:
+            d_porta = delta_stats.get("Tiri in porta", (0, 0))
+            d_corner = delta_stats.get("Corner", (0, 0))
+            if (d_porta[0] + d_porta[1]) >= 1 or (d_corner[0] + d_corner[1]) >= 1:
+                return True
+        return False
 
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)
@@ -2941,6 +3042,8 @@ def imposta_comandi_telegram():
         {"command": "piano", "description": "Piano giornata e finestre orarie attive"},
         {"command": "stop", "description": "Metti il bot in pausa"},
         {"command": "riprendi", "description": "Riattiva il bot dopo /stop"},
+        {"command": "modalitaessenziale", "description": "Solo gol/rossi/rigori/recupero lungo"},
+        {"command": "modalitacompleta", "description": "Torna alle notifiche normali"},
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "assedio", "description": "Partite bloccate ma con pressione alta"},
