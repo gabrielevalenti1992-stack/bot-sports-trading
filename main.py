@@ -13,6 +13,33 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =============================================================================
+# PERSISTENZA SU DISCO: tutti i file di stato vivono in DATA_DIR invece che nella
+# cartella del progetto. Su Render, senza un Persistent Disk collegato, il filesystem del
+# container (compresa la cartella del progetto) viene ricreato da zero ad ogni riavvio/redeploy -
+# quindi PRIMA di collegare un disco, DATA_DIR resta la cartella dello script (stesso
+# comportamento di sempre, niente di nuovo si rompe). DOPO aver collegato un Persistent Disk
+# Render e impostato la env var DATA_DIR sul suo mount path (es. /var/data), questi stessi file
+# sopravvivono ai riavvii per davvero.
+# =============================================================================
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def data_path(nome_file):
+    return os.path.join(DATA_DIR, nome_file)
+
+
+def salva_json_atomico(path, obj):
+    """Scrive prima su un file temporaneo e poi rinomina, cosi' un crash a metà scrittura
+    (es. il processo ucciso durante un redeploy) non lascia un JSON troncato/corrotto sul disco
+    persistente - os.replace() è atomico sullo stesso filesystem."""
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, 'w') as f:
+        json.dump(obj, f)
+    os.replace(tmp_path, path)
+
+
+# =============================================================================
 # SERVER HTTP PER RENDER FREE (fix 501 HEAD)
 # =============================================================================
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -245,7 +272,32 @@ def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     return time.time() < stato.get("esclusa_fino", 0)
 
-stato_partite = {}
+# =============================================================================
+# STATO PARTITE LIVE: punteggi, storico statistiche (usato da /momentum e dal delta 15 min a
+# blocchi), snapshot di fine 1°T, cartellini/rigori già notificati. Persistito su disco (a
+# differenza di prima, quando era puro dizionario in memoria): un riavvio del bot nel bel mezzo
+# di una partita non perde più nulla, riprende esattamente da dov'era. Le chiavi sono fixture_id
+# interi lato Python, ma JSON le forza a stringhe: vanno riconvertite al caricamento.
+# =============================================================================
+STATO_PARTITE_FILE = data_path("stato_partite.json")
+
+
+def carica_stato_partite():
+    if os.path.exists(STATO_PARTITE_FILE):
+        try:
+            with open(STATO_PARTITE_FILE, 'r') as f:
+                dati = json.load(f)
+            return {int(k): v for k, v in dati.items()}
+        except Exception as e:
+            print(f"Errore lettura {STATO_PARTITE_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_stato_partite(dati):
+    salva_json_atomico(STATO_PARTITE_FILE, dati)
+
+
+stato_partite = carica_stato_partite()
 ciclo_numero = 0
 
 # Storico dei 15 minuti usato da /status, separato da stato_partite: quest'ultimo viene ripulito
@@ -258,7 +310,7 @@ STATUS_HISTORY = {}
 # =============================================================================
 # STATO SILENZIATI (dict con score al momento del silenzio)
 # =============================================================================
-SILENCED_FILE = "silenced_matches.json"
+SILENCED_FILE = data_path("silenced_matches.json")
 
 def load_silenced():
     if os.path.exists(SILENCED_FILE):
@@ -270,15 +322,14 @@ def load_silenced():
     return {}
 
 def save_silenced(silenced):
-    with open(SILENCED_FILE, 'w') as f:
-        json.dump(silenced, f)
+    salva_json_atomico(SILENCED_FILE, silenced)
 
 SILENCED_MATCHES = load_silenced()
 
 # =============================================================================
 # STATO PREFERITI
 # =============================================================================
-FAVORITES_FILE = "favorite_matches.json"
+FAVORITES_FILE = data_path("favorite_matches.json")
 
 def load_favorites():
     if os.path.exists(FAVORITES_FILE):
@@ -290,15 +341,14 @@ def load_favorites():
     return set()
 
 def save_favorites(favs):
-    with open(FAVORITES_FILE, 'w') as f:
-        json.dump(list(favs), f)
+    salva_json_atomico(FAVORITES_FILE, list(favs))
 
 FAVORITE_MATCHES = load_favorites()
 
 # =============================================================================
 # STORICO MINUTAGGI (analisi pre-partita /analisi)
 # =============================================================================
-STORICO_MINUTAGGI_FILE = "storico_minutaggi.json"
+STORICO_MINUTAGGI_FILE = data_path("storico_minutaggi.json")
 
 def carica_storico_minutaggi():
     if os.path.exists(STORICO_MINUTAGGI_FILE):
@@ -310,15 +360,14 @@ def carica_storico_minutaggi():
     return {}
 
 def salva_storico_minutaggi(dati):
-    with open(STORICO_MINUTAGGI_FILE, 'w') as f:
-        json.dump(dati, f)
+    salva_json_atomico(STORICO_MINUTAGGI_FILE, dati)
 
 STORICO_MINUTAGGI = carica_storico_minutaggi()
 
 # =============================================================================
 # PIANO GIORNATA (snapshot giornaliero partite whitelist + finestre orarie attive)
 # =============================================================================
-PIANO_GIORNATA_FILE = "piano_giornata.json"
+PIANO_GIORNATA_FILE = data_path("piano_giornata.json")
 
 
 def carica_piano_giornata():
@@ -332,8 +381,7 @@ def carica_piano_giornata():
 
 
 def salva_piano_giornata(piano):
-    with open(PIANO_GIORNATA_FILE, 'w') as f:
-        json.dump(piano, f)
+    salva_json_atomico(PIANO_GIORNATA_FILE, piano)
 
 
 PIANO_GIORNATA = carica_piano_giornata()
@@ -346,7 +394,7 @@ PIANO_GIORNATA = carica_piano_giornata()
 # apposta: un riavvio del bot (es. redeploy) mentre l'utente è offline non deve far ripartire le
 # chiamate a sua insaputa.
 # =============================================================================
-PAUSA_FILE = "bot_pausa.json"
+PAUSA_FILE = data_path("bot_pausa.json")
 INTERVALLO_PROMEMORIA_PAUSA = 6 * 3600  # 6 ore: ogni quanto ricordare che il bot è ancora in pausa
 
 
@@ -361,8 +409,7 @@ def carica_pausa():
 
 
 def salva_pausa(stato):
-    with open(PAUSA_FILE, 'w') as f:
-        json.dump(stato, f)
+    salva_json_atomico(PAUSA_FILE, stato)
 
 
 STATO_PAUSA = carica_pausa()
@@ -373,7 +420,7 @@ STATO_PAUSA = carica_pausa()
 # sopprimendo le notifiche di soglia (differenza tiri, momentum, refresh ogni 30 min) anche per i
 # preferiti. Persistita su disco come /stop, cosi' un riavvio del bot non la resetta a sua insaputa.
 # =============================================================================
-MODALITA_FILE = "modalita_notifiche.json"
+MODALITA_FILE = data_path("modalita_notifiche.json")
 
 
 def carica_modalita():
@@ -387,8 +434,7 @@ def carica_modalita():
 
 
 def salva_modalita(stato):
-    with open(MODALITA_FILE, 'w') as f:
-        json.dump(stato, f)
+    salva_json_atomico(MODALITA_FILE, stato)
 
 
 MODALITA_NOTIFICHE = carica_modalita()
@@ -3297,6 +3343,7 @@ if __name__ == "__main__":
             time.sleep(1)
 
         pulisci_partite_terminate(fixture_ids_live)
+        salva_stato_partite(stato_partite)
         invia_report_intensita_automatico(partite_valide)
         aggiorna_storico_minutaggi_automatico()
 

@@ -224,6 +224,8 @@ storico_minutaggi.json
 piano_giornata.json
 bot_pausa.json
 modalita_notifiche.json
+stato_partite.json
+*.json.tmp
 
 # Certificati e chiavi private (es. login Betfair) - mai su GitHub
 certs/
