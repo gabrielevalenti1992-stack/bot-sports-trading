@@ -2617,6 +2617,24 @@ def processa_partita(fixture):
         else:
             log(f"    ⚽ Nessun gol registrato")
 
+        # Cartellini rossi e rigori: stessa lista fresca ad ogni ciclo (nessuna chiamata in più,
+        # è già dentro "events"), confrontata con quella salvata al ciclo precedente per capire
+        # quali sono nuovi. Se stato_precedente è vuoto (prima volta che vediamo la partita) il
+        # default fa combaciare le due liste, cosi' non si notifica un cartellino/rigore già
+        # avvenuto prima che il bot iniziasse a monitorarla (stesso criterio usato per i gol).
+        cartellini_rossi = extract_cartellini_rossi(events)
+        rigori = extract_rigori(events)
+        prev_cartellini_rossi = stato_precedente.get("cartellini_rossi", cartellini_rossi)
+        prev_rigori = stato_precedente.get("rigori", rigori)
+        nuovi_cartellini_rossi = [c for c in cartellini_rossi if c not in prev_cartellini_rossi]
+        nuovi_rigori = [r for r in rigori if r not in prev_rigori]
+        if nuovi_cartellini_rossi:
+            log(f"    🟥 Nuovo cartellino rosso: {nuovi_cartellini_rossi}")
+        if nuovi_rigori:
+            log(f"    ⚠️ Nuovo rigore: {nuovi_rigori}")
+        stato_partite[fixture_id]["cartellini_rossi"] = cartellini_rossi
+        stato_partite[fixture_id]["rigori"] = rigori
+
         stats = get_statistiche_partita(fixture_id)
         if stats and len(stats) >= 2:
             stats_home = stats[0].get("statistics", [])
@@ -2704,6 +2722,19 @@ def processa_partita(fixture):
                         recupero_parti.append(f"2° tempo +{recupero_2h}'")
                     recupero_finale_text = f"Recupero: {', '.join(recupero_parti)}\n" if recupero_parti else ""
 
+                    cartellini_finale_text = ""
+                    if cartellini_rossi:
+                        righe = [f"🟥 {c['minute']}' {c['player']} ({c['team']})" for c in cartellini_rossi]
+                        cartellini_finale_text = "Cartellini rossi:\n" + "\n".join(righe) + "\n"
+
+                    rigori_finale_text = ""
+                    if rigori:
+                        righe = []
+                        for r in rigori:
+                            esito_emoji = "⚽" if r["esito"] == "segnato" else "❌"
+                            righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
+                        rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
+
                     messaggio = (
                         f"{home} vs {away}\n"
                         f"{formatta_lega(league_name, league_country)}\n"
@@ -2711,6 +2742,8 @@ def processa_partita(fixture):
                         f"{score_home} - {score_away}\n"
                         f"{goals_text}\n"
                         f"{recupero_finale_text}"
+                        f"{cartellini_finale_text}"
+                        f"{rigori_finale_text}"
                         f"Statistiche finali:\n"
                         f"- Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\n"
                         f"- Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\n"
@@ -2758,7 +2791,8 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=gol_appena_segnato, recupero_lungo=recupero_da_segnalare is not None):
+        evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
+        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=evento_forzato, recupero_lungo=recupero_da_segnalare is not None):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
@@ -2808,12 +2842,25 @@ def processa_partita(fixture):
             fase_corrente = "1° tempo" if status_short == "1H" else "2° tempo"
             recupero_text = f"\n⏱ Recupero {fase_corrente} annunciato: +{extra_corrente}'\n"
 
+        cartellini_text = ""
+        for c in nuovi_cartellini_rossi:
+            cartellini_text += f"\n🟥 Rosso al {c['minute']}': {c['player']} ({c['team']})\n"
+
+        rigori_text = ""
+        for r in nuovi_rigori:
+            if r["esito"] == "segnato":
+                rigori_text += f"\n⚽ Rigore segnato al {r['minute']}': {r['player']} ({r['team']})\n"
+            else:
+                rigori_text += f"\n❌ Rigore sbagliato/parato al {r['minute']}': {r['player']} ({r['team']})\n"
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
             f"Risultato: {score_home} - {score_away}\n"
             f"{goals_text}"
+            f"{cartellini_text}"
+            f"{rigori_text}"
             f"{recupero_text}\n"
             f"{header_stats}:\n"
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
