@@ -369,7 +369,7 @@ def get_fire_suffix_corner(delta):
     return ""
 
 
-def esegui_comando_sicuro(chat_id, funzione, *args):
+def _esegui_comando(chat_id, funzione, args):
     """Esegue una funzione cmd_* intercettando qualsiasi eccezione, così un errore
     non passa mai inosservato: viene loggato e l'utente riceve un avviso invece del silenzio."""
     try:
@@ -382,6 +382,14 @@ def esegui_comando_sicuro(chat_id, funzione, *args):
                 json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}", "parse_mode": "Markdown"}, timeout=5)
         except Exception:
             pass
+
+
+def esegui_comando_sicuro(chat_id, funzione, *args):
+    """Lancia il comando in un thread separato invece di eseguirlo nel thread che fa polling di
+    Telegram: alcuni comandi (es. /intensita) possono girare per decine di secondi o
+    più se ci sono molte partite live, e senza questo il polling di /stop e di qualsiasi altro
+    comando resterebbe bloccato fino al termine di quello in corso."""
+    threading.Thread(target=_esegui_comando, args=(chat_id, funzione, args), daemon=True).start()
 
 # =============================================================================
 # THREAD: ASCOLTA CLICK SUI BOTTONI + COMANDI MANUALI
@@ -534,17 +542,6 @@ def poll_callbacks():
                                 json={"chat_id": chat_id, "text": "Usa: /statstypes <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_statstypes, " ".join(args).lower().strip("<>").strip())
-
-                    elif cmd == "/statscoverage":
-                        esegui_comando_sicuro(chat_id, cmd_statscoverage)
-
-                    elif cmd == "/cercastat":
-                        if not args:
-                            requests.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /cercastat <statistica> [soglia]\nEs: /cercastat tiri in porta 3"}, timeout=5)
-                            continue
-                        esegui_comando_sicuro(chat_id, cmd_cercastat, " ".join(args))
 
                     elif cmd == "/intensita":
                         esegui_comando_sicuro(chat_id, cmd_intensita)
@@ -1016,68 +1013,6 @@ def estrai_valore_stat(stats_team, nome_stat):
     return 0
 
 
-def estrai_valore_stat_raw(stats_team, nome_stat):
-    """Come estrai_valore_stat ma distingue 'campo assente/valore null' (None) da un valore reale, anche 0."""
-    nome_stat = nome_stat.lower()
-    for stat in stats_team:
-        if (stat.get("type") or "").lower() == nome_stat:
-            val = stat.get("value")
-            if val is None:
-                return None
-            try:
-                return float(str(val).replace("%", "").strip())
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
-# Alias in italiano -> nome esatto del campo "type" usato da API-Football
-ALIAS_STATISTICHE = {
-    "tiri": "Total Shots",
-    "tiri totali": "Total Shots",
-    "tiri in porta": "Shots on Goal",
-    "tiri porta": "Shots on Goal",
-    "tiri fuori": "Shots off Goal",
-    "tiri fuori porta": "Shots off Goal",
-    "tiri bloccati": "Blocked Shots",
-    "tiri dentro area": "Shots insidebox",
-    "tiri in area": "Shots insidebox",
-    "tiri interni area": "Shots insidebox",
-    "tiri fuori area": "Shots outsidebox",
-    "corner": "Corner Kicks",
-    "calci d'angolo": "Corner Kicks",
-    "angoli": "Corner Kicks",
-    "falli": "Fouls",
-    "fuorigioco": "Offsides",
-    "possesso": "Ball Possession",
-    "possesso palla": "Ball Possession",
-    "gialli": "Yellow Cards",
-    "cartellini gialli": "Yellow Cards",
-    "rossi": "Red Cards",
-    "cartellini rossi": "Red Cards",
-    "parate": "Goalkeeper Saves",
-    "passaggi": "Total passes",
-    "passaggi totali": "Total passes",
-    "passaggi accurati": "Passes accurate",
-    "precisione passaggi": "Passes %",
-    "xg": "expected_goals",
-    "gol attesi": "expected_goals",
-    "expected goals": "expected_goals",
-    "gol evitati": "goals_prevented",
-}
-
-
-def risolvi_nome_statistica(query):
-    """Traduce un nome in italiano (o parziale) nel campo 'type' esatto dell'API. Fallback: usa la query com'è."""
-    query = query.lower().strip()
-    if query in ALIAS_STATISTICHE:
-        return ALIAS_STATISTICHE[query]
-    for alias, tipo_api in ALIAS_STATISTICHE.items():
-        if query in alias or alias in query:
-            return tipo_api
-    return query
-
-
 def ha_statistiche_disponibili(stats):
     """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre."""
     if not stats or len(stats) < 2:
@@ -1097,7 +1032,6 @@ def cmd_help(chat_id):
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
-        "/cercastat <statistica> [soglia] - Cerca tra le partite live per statistica (es: tiri in porta 3, xg, possesso 60)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
         "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
@@ -1462,156 +1396,6 @@ def cmd_statstypes(chat_id, query):
             log(f"Errore invio /statstypes: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
-def cmd_statscoverage(chat_id):
-    """Diagnostica: scansiona TUTTE le partite live in questo momento e calcola, per ogni tipo
-    di statistica, su quante partite (con almeno dati disponibili) il valore è realmente popolato
-    (non null). Serve a trovare una statistica "universale" utilizzabile su qualsiasi campionato
-    coperto dall'API, invece di indovinare da pochi esempi."""
-    partite_raw = get_partite_live()
-    partite_cmd = [
-        f for f in partite_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
-    ]
-    if not partite_cmd:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
-        return
-
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Scansione statistiche su {len(partite_cmd)} partite live nei campionati con statistiche note (su {len(partite_raw)} live totali), attendi..."}, timeout=5)
-
-    conteggio_presente = {}
-    totale_con_stats = 0
-    for f in partite_cmd:
-        fid = f["fixture"]["id"]
-        stats = get_statistiche_partita(fid)
-        if stats and len(stats) >= 2:
-            stats_home = stats[0].get("statistics", [])
-            stats_away = stats[1].get("statistics", [])
-            if stats_home or stats_away:
-                totale_con_stats += 1
-                tipi_con_valore = set()
-                for s in stats_home + stats_away:
-                    t = s.get("type")
-                    if t and s.get("value") is not None:
-                        tipi_con_valore.add(t)
-                for t in tipi_con_valore:
-                    conteggio_presente[t] = conteggio_presente.get(t, 0) + 1
-        time.sleep(0.3)
-
-    if totale_con_stats == 0:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita ha statistiche disponibili in questo momento."}, timeout=5)
-        return
-
-    righe = sorted(conteggio_presente.items(), key=lambda kv: -kv[1])
-    testo = (
-        f"Copertura statistiche reali (non null) su {totale_con_stats} partite con dati "
-        f"(su {len(partite_cmd)} live totali):\n\n"
-    )
-    for tipo, cnt in righe:
-        pct = round(100 * cnt / totale_con_stats)
-        testo += f"- {tipo}: {cnt}/{totale_con_stats} ({pct}%)\n"
-
-    for i in range(0, len(testo), 3800):
-        pezzo = testo[i:i + 3800]
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
-        if risposta.status_code != 200:
-            log(f"Errore invio /statscoverage: HTTP {risposta.status_code} - {risposta.text[:300]}")
-
-
-def cmd_cercastat(chat_id, testo_richiesta):
-    """Cerca tra tutte le partite live quelle dove una statistica scelta dall'utente è disponibile,
-    opzionalmente sopra una soglia. Es: 'tiri in porta 3', 'xg', 'possesso 60'."""
-    parole = testo_richiesta.strip().split()
-    soglia = None
-    if parole:
-        try:
-            soglia = float(parole[-1].replace(",", "."))
-            parole = parole[:-1]
-        except ValueError:
-            soglia = None
-    query_stat = " ".join(parole).strip()
-    if not query_stat:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Usa: /cercastat <statistica> [soglia]\nEs: /cercastat tiri in porta 3"}, timeout=5)
-        return
-
-    tipo_api = risolvi_nome_statistica(query_stat)
-
-    partite_raw = get_partite_live()
-    partite_cmd = [
-        f for f in partite_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
-    ]
-    if not partite_cmd:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
-        return
-
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Ricerca '{tipo_api}'" + (f" >= {soglia}" if soglia is not None else "") + f" su {len(partite_cmd)} partite live nei campionati con statistiche note (su {len(partite_raw)} live totali)..."}, timeout=5)
-
-    risultati = []
-    for f in partite_cmd:
-        fid = f["fixture"]["id"]
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-        league = f["league"]["name"]
-        minute = f["fixture"]["status"].get("elapsed", "?")
-        stats = get_statistiche_partita(fid)
-        if stats and len(stats) >= 2:
-            sh = stats[0].get("statistics", [])
-            sa = stats[1].get("statistics", [])
-            vh = estrai_valore_stat_raw(sh, tipo_api)
-            va = estrai_valore_stat_raw(sa, tipo_api)
-            if vh is not None or va is not None:
-                vh_num = vh if vh is not None else 0
-                va_num = va if va is not None else 0
-                if soglia is None or vh_num >= soglia or va_num >= soglia:
-                    risultati.append((home, away, vh, va, league, minute))
-        time.sleep(0.3)
-
-    if not risultati:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita trovata con '{tipo_api}' disponibile" + (f" >= {soglia}" if soglia is not None else "") + "."}, timeout=5)
-        return
-
-    righe = [f"Trovate {len(risultati)} partite con '{tipo_api}'" + (f" >= {soglia}" if soglia is not None else " disponibile") + ":\n"]
-    for home, away, vh, va, league, minute in risultati[:20]:
-        vh_txt = "?" if vh is None else vh
-        va_txt = "?" if va is None else va
-        righe.append(f"- {home} {vh_txt} - {va_txt} {away} ({league}, {minute}')")
-    if len(risultati) > 20:
-        righe.append(f"\n... e altre {len(risultati) - 20} partite non mostrate")
-
-    testo = "\n".join(righe)
-    for i in range(0, len(testo), 3800):
-        pezzo = testo[i:i + 3800]
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
-        if risposta.status_code != 200:
-            log(f"Errore invio /cercastat: HTTP {risposta.status_code} - {risposta.text[:300]}")
-
-
 def calcola_indice_intensita(delta_stats):
     """Punteggio pesato basato sul ritmo (delta ultimi 15 min) di tiri totali, tiri in porta e corner.
     Più alto = probabilità maggiore che la partita sia "calda" in questo momento."""
@@ -1677,12 +1461,15 @@ def cmd_intensita(chat_id):
             json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
         return
 
+    MAX_PARTITE_SCANDITE = 40
+    da_scandire = partite_cmd[:MAX_PARTITE_SCANDITE]
+    avviso_limite = f" (limitata alle prime {MAX_PARTITE_SCANDITE} su {len(partite_cmd)})" if len(partite_cmd) > MAX_PARTITE_SCANDITE else ""
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Calcolo indice di intensità su {len(partite_cmd)} partite, attendi..."}, timeout=5)
+        json={"chat_id": chat_id, "text": f"Calcolo indice di intensità su {len(da_scandire)} partite{avviso_limite}, attendi..."}, timeout=5)
 
     risultati = []
-    for f in partite_cmd:
+    for f in da_scandire:
         fid = f["fixture"]["id"]
         home = f["teams"]["home"]["name"]
         away = f["teams"]["away"]["name"]
