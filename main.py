@@ -312,6 +312,35 @@ def salva_piano_giornata(piano):
 PIANO_GIORNATA = carica_piano_giornata()
 
 # =============================================================================
+# PAUSA MANUALE (/stop, /riprendi): quando l'utente sa che non sta seguendo il trading (es. sta
+# per disconnettersi per un paio d'ore), può mettere il bot in pausa esplicitamente invece di
+# aspettare che lo scheduler adattivo rallenti da solo in base al piano giornata. In pausa il ciclo
+# non chiama affatto l'API e non manda notifiche, finché non arriva /riprendi. Persistita su disco
+# apposta: un riavvio del bot (es. redeploy) mentre l'utente è offline non deve far ripartire le
+# chiamate a sua insaputa.
+# =============================================================================
+PAUSA_FILE = "bot_pausa.json"
+INTERVALLO_PROMEMORIA_PAUSA = 6 * 3600  # 6 ore: ogni quanto ricordare che il bot è ancora in pausa
+
+
+def carica_pausa():
+    if os.path.exists(PAUSA_FILE):
+        try:
+            with open(PAUSA_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {PAUSA_FILE}: {e}", flush=True)
+    return {"in_pausa": False, "dal": 0, "ultimo_promemoria": 0}
+
+
+def salva_pausa(stato):
+    with open(PAUSA_FILE, 'w') as f:
+        json.dump(stato, f)
+
+
+STATO_PAUSA = carica_pausa()
+
+# =============================================================================
 # FIAMME - SOGLIE
 # =============================================================================
 FIRE_THRESHOLDS = {
@@ -465,6 +494,10 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_leghestats)
                         elif azione == "piano":
                             esegui_comando_sicuro(chat_id, cmd_piano)
+                        elif azione == "stop":
+                            esegui_comando_sicuro(chat_id, cmd_stop)
+                        elif azione == "riprendi":
+                            esegui_comando_sicuro(chat_id, cmd_riprendi)
                         elif azione == "intensita":
                             esegui_comando_sicuro(chat_id, cmd_intensita)
                         elif azione == "help":
@@ -568,6 +601,12 @@ def poll_callbacks():
 
                     elif cmd == "/piano":
                         esegui_comando_sicuro(chat_id, cmd_piano)
+
+                    elif cmd == "/stop":
+                        esegui_comando_sicuro(chat_id, cmd_stop)
+
+                    elif cmd == "/riprendi":
+                        esegui_comando_sicuro(chat_id, cmd_riprendi)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -1018,6 +1057,8 @@ def cmd_help(chat_id):
         "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)\n"
         "/leghestats - Elenco campionati con statistiche coperte da API-Football\n"
         "/piano - Piano giornata: partite whitelist previste oggi e finestre orarie attive\n"
+        "/stop - Metti il bot in pausa (nessuna chiamata API, nessuna notifica)\n"
+        "/riprendi - Riattiva il bot dopo /stop\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -1185,7 +1226,12 @@ def cmd_piano(chat_id):
             righe.append(f"- {i} - {f_}")
 
     now_ts = time.time()
-    stato = "ATTIVA (ciclo veloce)" if dentro_finestra_attiva(PIANO_GIORNATA, now_ts) else "fuori finestra (ciclo rallentato)"
+    if STATO_PAUSA.get("in_pausa"):
+        stato = "IN PAUSA MANUALE (nessuna chiamata API, invia /riprendi per riattivare)"
+    elif dentro_finestra_attiva(PIANO_GIORNATA, now_ts):
+        stato = "ATTIVA (ciclo veloce)"
+    else:
+        stato = "fuori finestra (ciclo rallentato)"
     righe.append(f"\nAdesso: {stato}")
 
     testo = "\n".join(righe)
@@ -1194,6 +1240,43 @@ def cmd_piano(chat_id):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+
+
+def cmd_stop(chat_id):
+    """Mette il bot in pausa manuale: il ciclo principale smette di chiamare l'API e di mandare
+    notifiche finché non arriva /riprendi. Utile quando l'utente sa già che non seguirà il trading
+    per un po' (es. si sta disconnettendo), indipendentemente da cosa dice il piano giornata."""
+    global STATO_PAUSA
+    if STATO_PAUSA.get("in_pausa"):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Il bot è già in pausa. Invia /riprendi per riattivarlo."}, timeout=5)
+        return
+    STATO_PAUSA = {"in_pausa": True, "dal": time.time(), "ultimo_promemoria": time.time()}
+    salva_pausa(STATO_PAUSA)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": "⏸ Bot in pausa. Nessuna chiamata API e nessuna notifica finché non invii /riprendi.\n"
+                    "Ogni 6 ore ti mando un promemoria se resta in pausa, per non farti dimenticare di riattivarlo."
+        }, timeout=5)
+
+
+def cmd_riprendi(chat_id):
+    """Toglie la pausa manuale e fa ripartire subito il ciclo (invece di aspettare il prossimo
+    giro), così le partite in corso vengono recuperate senza ritardo."""
+    global STATO_PAUSA
+    if not STATO_PAUSA.get("in_pausa"):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Il bot non è in pausa."}, timeout=5)
+        return
+    STATO_PAUSA = {"in_pausa": False, "dal": 0, "ultimo_promemoria": 0}
+    salva_pausa(STATO_PAUSA)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "▶️ Bot riattivato. Riprendo subito a controllare le partite live."}, timeout=5)
 
 
 def cmd_status(chat_id, query):
@@ -1575,6 +1658,8 @@ def cmd_setup(chat_id):
             [{"text": "🔇 Silenziate", "callback_data": "cmd:silenced"}],
             [{"text": "📊 Leghe con statistiche", "callback_data": "cmd:leghestats"}],
             [{"text": "🗓 Piano giornata", "callback_data": "cmd:piano"}],
+            [{"text": "⏸ Pausa", "callback_data": "cmd:stop"},
+             {"text": "▶️ Riprendi", "callback_data": "cmd:riprendi"}],
             [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
@@ -2395,6 +2480,8 @@ def imposta_comandi_telegram():
         {"command": "silenced", "description": "Lista partite silenziate"},
         {"command": "leghestats", "description": "Leghe con statistiche coperte"},
         {"command": "piano", "description": "Piano giornata e finestre orarie attive"},
+        {"command": "stop", "description": "Metti il bot in pausa"},
+        {"command": "riprendi", "description": "Riattiva il bot dopo /stop"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
@@ -2417,6 +2504,18 @@ if __name__ == "__main__":
         if not CONFIG_VALIDA:
             log("CONFIGURAZIONE INCOMPLETA - Attendo 30 secondi...")
             time.sleep(30)
+            continue
+
+        if STATO_PAUSA.get("in_pausa"):
+            ora = time.time()
+            da_quanto = ora - STATO_PAUSA.get("dal", ora)
+            if ora - STATO_PAUSA.get("ultimo_promemoria", 0) >= INTERVALLO_PROMEMORIA_PAUSA:
+                ore = round(da_quanto / 3600, 1)
+                invia_messaggio_telegram(f"⏸ Bot ancora in pausa da {ore}h. Invia /riprendi per riattivarlo.")
+                STATO_PAUSA["ultimo_promemoria"] = ora
+                salva_pausa(STATO_PAUSA)
+            log(f"In pausa manuale da {round(da_quanto / 60)} min, nessuna chiamata API. Attesa {INTERVALLO_CICLO_MORTO}s...")
+            time.sleep(INTERVALLO_CICLO_MORTO)
             continue
 
         aggiorna_piano_giornata_se_serve()
