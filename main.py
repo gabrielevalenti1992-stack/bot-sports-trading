@@ -74,6 +74,12 @@ MOMENTUM_CORNER = 4
 # porta o 1 corner in più negli ultimi 15 min.
 SOGLIA_MIN_CAMBIO_PREFERITI = 2
 
+# Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
+# barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
+# es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
+# non mandare nessun grafico piuttosto che mandarne uno inutile/fuorviante.
+MOMENTUM_MIN_STORICO = 6
+
 # Pesi per l'indice di intensità (usato dal comando /intensita e dal report automatico)
 PESO_INTENSITA_TIRI = 1
 PESO_INTENSITA_PORTA = 2
@@ -1618,7 +1624,7 @@ def cmd_momentum(chat_id, query):
         score_a = f["goals"]["away"] or 0
 
         history = stato_partite.get(fid, {}).get("history", [])
-        foto_path = genera_grafico_momentum(fid, home, away, history) if len(history) >= 2 else None
+        foto_path = genera_grafico_momentum(fid, home, away, history)
         msg_text = f"{home} {score_h}-{score_a} {away}\n{league} | {minuto}'"
 
         if foto_path and os.path.exists(foto_path):
@@ -1643,9 +1649,9 @@ def cmd_momentum(chat_id, query):
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 json={
                     "chat_id": chat_id,
-                    "text": f"{msg_text}\n\nDati insufficienti per il momentum (serve che il bot abbia monitorato "
-                            f"la partita per almeno un paio di cicli, o non ci sono ancora cambiamenti nelle statistiche). "
-                            f"Riprova tra qualche minuto."
+                    "text": f"{msg_text}\n\nDati insufficienti per il momentum (servono almeno {MOMENTUM_MIN_STORICO} rilevazioni, "
+                            f"~{MOMENTUM_MIN_STORICO * 3} minuti di monitoraggio senza riavvii del bot nel mezzo, o non ci sono "
+                            f"ancora cambiamenti nelle statistiche). Riprova tra qualche minuto."
                 }, timeout=5)
 
 
@@ -2234,7 +2240,7 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
     Risoluzione onesta: un punto ogni ciclo (~3 min quando la partita è "attiva"), non al minuto -
     non è quindi immediato/fluido come i widget con feed dati proprietario, ma usa dati reali."""
     try:
-        if len(history) < 2:
+        if len(history) < MOMENTUM_MIN_STORICO:
             return None
 
         storico = sorted(history, key=lambda h: h["timestamp"])
@@ -3065,8 +3071,7 @@ def processa_partita(fixture):
         foto_path = None
         if is_fav:
             history_completo = stato_partite.get(fixture_id, {}).get("history", [])
-            if len(history_completo) >= 2:
-                foto_path = genera_grafico_momentum(fixture_id, home, away, history_completo)
+            foto_path = genera_grafico_momentum(fixture_id, home, away, history_completo)
         if not foto_path:
             foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
