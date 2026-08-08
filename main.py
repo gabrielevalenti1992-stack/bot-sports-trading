@@ -228,6 +228,13 @@ def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
 stato_partite = {}
 ciclo_numero = 0
 
+# Storico dei 15 minuti usato da /status, separato da stato_partite: quest'ultimo viene ripulito
+# ad ogni ciclo per le partite non più whitelist (pulisci_partite_terminate), quindi una partita
+# fuori whitelist (es. una coppa) controllata a mano con /status perderebbe subito lo storico se
+# usasse stato_partite. In memoria soltanto, non persistito: non è un problema se si azzera ad un
+# riavvio del bot, l'utente lo ricostruisce controllando di nuovo la partita.
+STATUS_HISTORY = {}
+
 # =============================================================================
 # STATO SILENZIATI (dict con score al momento del silenzio)
 # =============================================================================
@@ -498,8 +505,6 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_clearfavorites)
                         elif azione == "silenced":
                             esegui_comando_sicuro(chat_id, cmd_silenced)
-                        elif azione == "leghestats":
-                            esegui_comando_sicuro(chat_id, cmd_leghestats)
                         elif azione == "piano":
                             esegui_comando_sicuro(chat_id, cmd_piano)
                         elif azione == "stop":
@@ -534,14 +539,6 @@ def poll_callbacks():
                                 json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_status, " ".join(args).lower().strip("<>").strip())
-
-                    elif cmd == "/statstypes":
-                        if not args:
-                            requests.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /statstypes <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
-                            continue
-                        esegui_comando_sicuro(chat_id, cmd_statstypes, " ".join(args).lower().strip("<>").strip())
 
                     elif cmd == "/intensita":
                         esegui_comando_sicuro(chat_id, cmd_intensita)
@@ -594,9 +591,6 @@ def poll_callbacks():
 
                     elif cmd == "/live":
                         esegui_comando_sicuro(chat_id, cmd_live)
-
-                    elif cmd == "/leghestats":
-                        esegui_comando_sicuro(chat_id, cmd_leghestats)
 
                     elif cmd == "/piano":
                         esegui_comando_sicuro(chat_id, cmd_piano)
@@ -939,11 +933,6 @@ def get_leghe_con_copertura_statistiche_raw():
     return sorted(set(risultati))
 
 
-def get_leghe_con_copertura_statistiche():
-    """Versione per /leghestats: righe 'Paese - Nome lega' pronte da mostrare."""
-    return [f"{paese} - {nome}" for paese, nome in get_leghe_con_copertura_statistiche_raw()]
-
-
 def aggiorna_leghe_attive(force=False):
     """Aggiorna la cache dinamica delle leghe con statistiche coperte (usata da campionato_valido).
     Se l'API non risponde o non restituisce nulla, la cache precedente resta valida (fallback)."""
@@ -1039,7 +1028,6 @@ def cmd_help(chat_id):
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
         "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)\n"
-        "/leghestats - Elenco campionati con statistiche coperte da API-Football\n"
         "/piano - Piano giornata: partite whitelist previste oggi e finestre orarie attive\n"
         "/stop - Metti il bot in pausa (nessuna chiamata API, nessuna notifica)\n"
         "/riprendi - Riattiva il bot dopo /stop\n"
@@ -1148,35 +1136,6 @@ def cmd_live(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
-
-
-def cmd_leghestats(chat_id):
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "Recupero elenco campionati con statistiche coperte da API-Football...", "parse_mode": "Markdown"}, timeout=5)
-    raw = aggiorna_leghe_attive(force=True) or []
-    leghe = [f"{paese} - {nome}" for paese, nome in raw]
-    if not leghe:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessun campionato trovato o errore chiamando /leagues.", "parse_mode": "Markdown"}, timeout=5)
-        return
-    testo = (
-        f"Campionati con statistiche coperte (stagione corrente): {len(leghe)}\n"
-        f"Questa lista è ora usata direttamente come filtro per /live e le notifiche.\n\n"
-    )
-    for riga in leghe:
-        linea = f"- {riga}\n"
-        if len(testo) + len(linea) > 3800:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=10)
-            testo = ""
-        testo += linea
-    if testo:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": testo, "parse_mode": "Markdown"}, timeout=10)
 
 
 def cmd_piano(chat_id):
@@ -1300,6 +1259,10 @@ def cmd_testpreferiti(chat_id):
 
 
 def cmd_status(chat_id, query):
+    """/status <squadra>: info live sulla partita trovata, statistiche totali casa/trasferta,
+    intensità (ultimi 15 min) calcolata solo per questa partita — funziona anche su partite fuori
+    whitelist (es. una coppa) accumulando uno storico dedicato (STATUS_HISTORY) ad ogni chiamata —
+    e, se disponibile, la distribuzione storica gol per fascia di minuto delle due squadre."""
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
@@ -1316,84 +1279,87 @@ def cmd_status(chat_id, query):
         fid = f["fixture"]["id"]
         home = f["teams"]["home"]["name"]
         away = f["teams"]["away"]["name"]
+        league = f.get("league", {}).get("name", "")
         minuto = f["fixture"]["status"].get("elapsed") or 0
         score_h = f["goals"]["home"] or 0
         score_a = f["goals"]["away"] or 0
+
         stats = get_statistiche_partita(fid)
         stats_text = ""
+        current_stats = None
         if stats and len(stats) >= 2:
             sh = stats[0].get("statistics", [])
             sa = stats[1].get("statistics", [])
-            tc = estrai_valore_stat(sh, "Total Shots")
-            to = estrai_valore_stat(sa, "Total Shots")
-            tp = estrai_valore_stat(sh, "Shots on Goal")
-            tpo = estrai_valore_stat(sa, "Shots on Goal")
-            cc = estrai_valore_stat(sh, "Corner Kicks")
-            co = estrai_valore_stat(sa, "Corner Kicks")
-            stats_text = f"\nStats: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co}"
+            current_stats = {
+                "Tiri totali": (estrai_valore_stat(sh, "Total Shots"), estrai_valore_stat(sa, "Total Shots")),
+                "Tiri in porta": (estrai_valore_stat(sh, "Shots on Goal"), estrai_valore_stat(sa, "Shots on Goal")),
+                "Corner": (estrai_valore_stat(sh, "Corner Kicks"), estrai_valore_stat(sa, "Corner Kicks")),
+                "Tiri in area": (estrai_valore_stat(sh, "Shots insidebox"), estrai_valore_stat(sa, "Shots insidebox")),
+            }
+            tc, to = current_stats["Tiri totali"]
+            tp, tpo = current_stats["Tiri in porta"]
+            cc, co = current_stats["Corner"]
+            ta, tao = current_stats["Tiri in area"]
+            stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
+
+        intensita_text = ""
+        if current_stats:
+            history = STATUS_HISTORY.get(fid, [])
+            history.append({"timestamp": time.time(), "stats": current_stats})
+            history = [h for h in history if time.time() - h["timestamp"] <= 1200]
+            STATUS_HISTORY[fid] = history
+
+            delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats)
+            if is_real:
+                punteggio = calcola_indice_intensita(delta_stats)
+                motivazioni = descrivi_motivazioni_intensita(delta_stats)
+                d_tiri = delta_stats.get("Tiri totali", (0, 0))
+                intensita_text = (
+                    f"\n\nIntensità (ultimi 15 min) di questa partita: {punteggio:.1f} pt\n"
+                    f"Casa {d_tiri[0]} - {d_tiri[1]} Fuori | {motivazioni}"
+                )
+            else:
+                intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
+
         events = fetch_fixture_events(fid)
         goals = extract_goals(events)
         last_text = ""
         if goals:
             last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
-        msg_text = f"{home} vs {away}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}"
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
 
+        msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
 
-def cmd_statstypes(chat_id, query):
-    """Diagnostica: mostra tutti i 'type' di statistiche che l'API restituisce per una partita live,
-    per verificare se sono coperti Shots insidebox / expected_goals (xG) sul piano attuale."""
-    partite_cmd = get_partite_live()
-    trovate = []
-    for f in partite_cmd:
-        home = f.get("teams", {}).get("home", {}).get("name", "").lower()
-        away = f.get("teams", {}).get("away", {}).get("name", "").lower()
-        if query in home or query in away or home in query or away in query:
-            trovate.append(f)
-    if not trovate:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
-        return
-    for f in trovate:
-        fid = f["fixture"]["id"]
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-        stats = get_statistiche_partita(fid, debug=True)
-        if not stats or len(stats) < 2:
-            testo = f"{home} vs {away}\nNessuna statistica disponibile da API per questa partita."
-        else:
-            stats_home = stats[0].get("statistics", [])
-            stats_away = stats[1].get("statistics", [])
-            tipi_home = [s.get("type") for s in stats_home if s.get("type")]
-            tipi_away = [s.get("type") for s in stats_away if s.get("type")]
-            tipi = sorted(set(tipi_home) | set(tipi_away))
-
-            def stato_campo(nome_parziale):
-                """Presente e popolato / presente ma vuoto (null) / assente, cercando per sottostringa nel type."""
-                trovato = False
-                for s in stats_home + stats_away:
-                    t = (s.get("type") or "").lower()
-                    if nome_parziale in t:
-                        trovato = True
-                        if s.get("value") is not None:
-                            return "SI (con dati)"
-                return "PRESENTE MA VUOTO (null)" if trovato else "NO (campo assente)"
-
-            testo = (
-                f"{home} vs {away}\n"
-                f"Tipi di statistiche restituiti dall'API:\n"
-                + "\n".join(f"- {t}" for t in tipi)
-                + f"\n\nShots insidebox: {stato_campo('insidebox')}"
-                + f"\nexpected_goals (xG): {stato_campo('expected')}"
+        squadra_casa = trova_squadra_in_storico(home)
+        squadra_trasferta = trova_squadra_in_storico(away)
+        foto_path = None
+        if (squadra_casa and squadra_casa["casa"]["partite"] > 0
+                and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
+            foto_path = genera_grafico_minutaggi(
+                squadra_casa["nome"], squadra_casa["casa"],
+                squadra_trasferta["nome"], squadra_trasferta["trasferta"]
             )
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": testo}, timeout=5)
-        if risposta.status_code != 200:
-            log(f"Errore invio /statstypes: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+        if foto_path and os.path.exists(foto_path):
+            try:
+                with open(foto_path, 'rb') as photo:
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": msg_text},
+                        files={"photo": photo}, timeout=15)
+            except Exception as e:
+                log(f"Errore invio grafico /status: {e}")
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+            finally:
+                try:
+                    os.remove(foto_path)
+                except Exception:
+                    pass
+        else:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
 
 
 def calcola_indice_intensita(delta_stats):
@@ -1529,7 +1495,6 @@ def cmd_setup(chat_id):
             [{"text": "⭐ Preferiti", "callback_data": "cmd:favorites"},
              {"text": "🗑 Svuota preferiti", "callback_data": "cmd:clearfavorites"}],
             [{"text": "🔇 Silenziate", "callback_data": "cmd:silenced"}],
-            [{"text": "📊 Leghe con statistiche", "callback_data": "cmd:leghestats"}],
             [{"text": "🗓 Piano giornata", "callback_data": "cmd:piano"}],
             [{"text": "⏸ Pausa", "callback_data": "cmd:stop"},
              {"text": "▶️ Riprendi", "callback_data": "cmd:riprendi"}],
@@ -1629,11 +1594,8 @@ def get_notification_keyboard(fixture_id, is_favorite=False, is_silenced=False):
 # =============================================================================
 # DELTA 15 MINUTI
 # =============================================================================
-def calcola_delta_15min(fixture_id, current_stats):
-    stato = stato_partite.get(fixture_id, {})
-    history = stato.get("history", [])
+def _calcola_delta_15min_da_storico(history, current_stats):
     now = time.time()
-
     history_15m = [h for h in history if now - h["timestamp"] <= 900]
 
     if not history_15m or len(history_15m) < 2:
@@ -1645,8 +1607,13 @@ def calcola_delta_15min(fixture_id, current_stats):
         curr_h, curr_a = current_stats[key]
         old_h, old_a = old["stats"].get(key, (0, 0))
         delta[key] = (max(0, curr_h - old_h), max(0, curr_a - old_a))
-
     return delta, True
+
+
+def calcola_delta_15min(fixture_id, current_stats):
+    stato = stato_partite.get(fixture_id, {})
+    history = stato.get("history", [])
+    return _calcola_delta_15min_da_storico(history, current_stats)
 
 
 def invia_report_intensita_automatico(partite_valide):
@@ -2352,7 +2319,6 @@ def imposta_comandi_telegram():
         {"command": "favorites", "description": "Lista partite preferite"},
         {"command": "clearfavorites", "description": "Svuota lista preferiti"},
         {"command": "silenced", "description": "Lista partite silenziate"},
-        {"command": "leghestats", "description": "Leghe con statistiche coperte"},
         {"command": "piano", "description": "Piano giornata e finestre orarie attive"},
         {"command": "stop", "description": "Metti il bot in pausa"},
         {"command": "riprendi", "description": "Riattiva il bot dopo /stop"},
