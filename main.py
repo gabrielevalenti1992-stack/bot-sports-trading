@@ -3101,8 +3101,11 @@ def processa_partita(fixture):
 
                     tempi_finale_text = ""
                     stats_1h_salvate = stato.get("stats_fine_1h")
-                    if stats_1h_salvate and current_stats:
-                        tempi_finale_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+                    if current_stats:
+                        if stats_1h_salvate:
+                            tempi_finale_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+                        else:
+                            tempi_finale_text = "(1°T/2°T non disponibile: il bot ha iniziato a monitorare questa partita dopo l'intervallo)\n"
 
                     messaggio = (
                         f"{home} vs {away}\n"
@@ -3242,12 +3245,16 @@ def processa_partita(fixture):
             else:
                 rigori_text += f"\n❌ Rigore sbagliato/parato al {r['minute']}': {r['player']} ({r['team']})\n"
 
-        # Confronto 1°T/2°T: solo nel 2° tempo e solo se abbiamo visto finire il 1°T (altrimenti
-        # non c'è ancora nulla da confrontare).
+        # Confronto 1°T/2°T: solo nel 2° tempo. Se manca lo snapshot di fine 1°T (il bot ha
+        # iniziato a monitorare la partita dopo l'intervallo, es. per un riavvio nel mezzo) lo
+        # dice esplicitamente, invece di lasciare intuire una sezione sparita per errore.
         tempi_text = ""
         stats_1h_salvate = stato_partite.get(fixture_id, {}).get("stats_fine_1h")
-        if status_short == "2H" and stats_1h_salvate and current_stats:
-            tempi_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+        if status_short == "2H" and current_stats:
+            if stats_1h_salvate:
+                tempi_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+            else:
+                tempi_text = "\n(1°T/2°T non disponibile: il bot ha iniziato a monitorare questa partita dopo l'intervallo)\n"
 
         messaggio = (
             f"{home} vs {away}\n"
