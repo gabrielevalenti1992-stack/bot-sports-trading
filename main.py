@@ -3406,6 +3406,25 @@ def processa_partita(fixture):
             else:
                 tempi_text = "\n(1°T/2°T non disponibile: il bot ha iniziato a monitorare questa partita dopo l'intervallo)\n"
 
+        # Totale partita (cumulativo, non il delta ultimi 15 min): prima si vedeva nel grafico a
+        # barre proporzionale, che per i preferiti è stato sostituito dal grafico momentum (che
+        # mostra l'andamento a intervalli, non il cumulativo) - senza questa riga di testo quel
+        # dato sparirebbe del tutto dalla notifica.
+        if current_stats:
+            tot_tiri_h, tot_tiri_a = current_stats["Tiri totali"]
+            tot_porta_h, tot_porta_a = current_stats["Tiri in porta"]
+            tot_corner_h, tot_corner_a = current_stats["Corner"]
+            tot_area_h, tot_area_a = current_stats["Tiri in area"]
+            totale_text = (
+                f"Totale partita:\n"
+                f"- Tiri totali: {tot_tiri_h} - {tot_tiri_a}\n"
+                f"- Tiri in porta: {tot_porta_h} - {tot_porta_a}\n"
+                f"- Corner: {tot_corner_h} - {tot_corner_a}\n"
+                f"- Tiri in area: {tot_area_h} - {tot_area_a}\n\n"
+            )
+        else:
+            totale_text = ""
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
@@ -3415,6 +3434,7 @@ def processa_partita(fixture):
             f"{cartellini_text}"
             f"{rigori_text}"
             f"{recupero_text}\n"
+            f"{totale_text}"
             f"{header_stats}:\n"
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
