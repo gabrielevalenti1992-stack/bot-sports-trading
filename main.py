@@ -1301,6 +1301,17 @@ def extract_goals(events):
     return goals
 
 
+def goals_coerenti_con_risultato(goals, home, away, score_home, score_away):
+    """L'endpoint eventi a volte continua a includere un gol poi annullato dal VAR (o corretto
+    per un altro motivo) anche quando il risultato ufficiale della partita non lo conta più -
+    visto in produzione: "Primo gol... -> 1-0" nel testo con il risultato reale tornato a 0-0.
+    Tiene solo tanti gol per squadra quanti ne mostra il risultato reale, scartando gli eventuali
+    gol "in eccesso" più recenti (il più plausibile ad essere quello poi annullato)."""
+    gol_casa = sorted([g for g in goals if g["team"] == home], key=lambda g: g["minute"])[:score_home]
+    gol_ospite = sorted([g for g in goals if g["team"] == away], key=lambda g: g["minute"])[:score_away]
+    return sorted(gol_casa + gol_ospite, key=lambda g: g["minute"])
+
+
 def calcola_punteggio_ai_gol(goals, home, away):
     """Per ogni gol (in ordine cronologico) il risultato ESATTO subito dopo quel gol, non il
     punteggio finale - serve a mostrare "chi ha fatto il 2-1" invece di dover risalire alle
@@ -1772,6 +1783,7 @@ def cmd_status(chat_id, query):
 
         events = fetch_fixture_events(fid)
         goals = extract_goals(events)
+        goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
         last_text = ""
         if goals:
             last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
@@ -3430,6 +3442,7 @@ def processa_partita(fixture):
 
         events = fetch_fixture_events(fixture_id)
         goals = extract_goals(events)
+        goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
         if goals:
             log(f"    ⚽ Gol trovati: {len(goals)}")
         else:
