@@ -2462,7 +2462,11 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
         color_muted = '#888888'
 
         x = range(len(etichette))
-        fig, ax = plt.subplots(figsize=(6.0, 3.2), dpi=150)
+        # Larghezza proporzionale al numero di barre: con poche barre (partita appena iniziata,
+        # storico ancora corto) il grafico resta compatto invece di allargarsi a vuoto, con tanto
+        # spazio centrale inutilizzato.
+        larghezza = max(3.5, min(6.0, 1.2 + 0.25 * len(x)))
+        fig, ax = plt.subplots(figsize=(larghezza, 3.2), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
         ax.set_facecolor('#1e1e1e')
 
@@ -2470,20 +2474,11 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
         barre_ospite = ax.bar(x, [-v for v in punteggi_ospite], color=color_away, width=0.8, zorder=2, edgecolor='none')
         ax.axhline(0, color=color_muted, linewidth=1, zorder=1)
 
-        # Etichette numeriche sopra/sotto le barre non nulle: senza, il grafico è solo colore
-        # senza un numero da leggere, e sembra un abbozzo invece di un'analisi.
+        # Nessuna etichetta numerica sopra/sotto le barre (tolta su richiesta esplicita): il colore
+        # e l'altezza della barra bastano a leggere l'andamento, senza numerini che affollano il
+        # grafico. Restano solo le etichette dei minuti in basso sull'asse.
         picco = max([abs(v) for v in punteggi_casa + punteggi_ospite] or [1])
-        margine_etichetta = picco * 0.06
-        for rect, val in zip(barre_casa, punteggi_casa):
-            if val > 0:
-                ax.text(rect.get_x() + rect.get_width() / 2, val + margine_etichetta, f"{val:.1f}",
-                        ha='center', va='bottom', fontsize=7, color=color_home, zorder=3)
-        for rect, val in zip(barre_ospite, punteggi_ospite):
-            if val > 0:
-                ax.text(rect.get_x() + rect.get_width() / 2, -val - margine_etichetta, f"{val:.1f}",
-                        ha='center', va='top', fontsize=7, color=color_away, zorder=3)
-
-        ax.set_ylim(-picco * 1.25, picco * 1.25)
+        ax.set_ylim(-picco * 1.1, picco * 1.1)
 
         # Solo i minuti con una barra visibile (pressione > 0 per almeno una delle due squadre):
         # un'etichetta senza barra sopra sembra un "buco"/dato mancante, mentre è solo un
