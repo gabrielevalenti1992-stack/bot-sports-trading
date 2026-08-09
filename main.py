@@ -284,7 +284,7 @@ COPPE_NAZIONALI_ESCLUSE = [
 # ricostruisce da solo nel giro di pochi cicli ad ogni riavvio del bot.
 LEGHE_SENZA_STATISTICHE = {}
 SOGLIA_SENZA_STATISTICHE = 3
-DURATA_ESCLUSIONE_SENZA_STATISTICHE = 6 * 3600  # 6 ore
+DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
 
 
 def registra_esito_statistiche(league_country, league_name, disponibili):
@@ -2108,7 +2108,7 @@ def valuta_qualita(p):
 
 
 STRATEGIE = [
-    ("Assedio", "🟥", valuta_assedio, "match fermi ma con pressione alta"),
+    ("Assedio", "🏰", valuta_assedio, "match fermi ma con pressione alta"),
     ("Fascia calda", "⏰", valuta_fasciacalda, "squadra storicamente pericolosa in questa fascia oraria"),
     ("Rimonta", "🔄", valuta_rimonta, "squadra in svantaggio che spinge più che nel 1° tempo"),
     ("Concretezza", "🎯", valuta_concretezza, "squadra che trasforma bene i tiri in occasioni vere"),
@@ -2246,7 +2246,7 @@ def cmd_setup(chat_id):
             [{"text": "🧪 Test canale preferiti", "callback_data": "cmd:testpreferiti"}],
             [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
             [{"text": "🔍 Scanner strategie", "callback_data": "cmd:scanner"}],
-            [{"text": "🟥 Assedio", "callback_data": "cmd:assedio"},
+            [{"text": "🏰 Assedio", "callback_data": "cmd:assedio"},
              {"text": "⏰ Fascia calda", "callback_data": "cmd:fasciacalda"}],
             [{"text": "🔄 Rimonta", "callback_data": "cmd:rimonta"},
              {"text": "🎯 Concretezza", "callback_data": "cmd:concretezza"}],
