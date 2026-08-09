@@ -2405,9 +2405,15 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
 
         ax.set_ylim(-picco * 1.25, picco * 1.25)
 
-        step = max(1, len(etichette) // 10)
-        ax.set_xticks(list(x)[::step])
-        ax.set_xticklabels(etichette[::step], fontsize=8, color=color_text)
+        # Solo i minuti con una barra visibile (pressione > 0 per almeno una delle due squadre):
+        # un'etichetta senza barra sopra sembra un "buco"/dato mancante, mentre è solo un
+        # intervallo a pressione zero (dato reale, non un errore). Se sono comunque troppe per
+        # stare leggibili, ne mostra una ogni tot invece di tutte.
+        indici_con_barra = [i for i in x if punteggi_casa[i] > 0 or punteggi_ospite[i] > 0]
+        step = max(1, len(indici_con_barra) // 12)
+        indici_mostrati = indici_con_barra[::step]
+        ax.set_xticks(indici_mostrati)
+        ax.set_xticklabels([etichette[i] for i in indici_mostrati], fontsize=8, color=color_text)
         ax.set_yticks([])
         for spine in ['top', 'right', 'bottom', 'left']:
             ax.spines[spine].set_visible(False)
