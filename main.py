@@ -2971,7 +2971,10 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         return False
 
     # Preferiti: molto più reattivi delle altre partite (bypassano le soglie sotto), ma non per il
-    # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio.
+    # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio. Con il
+    # controllo ogni 60s (INTERVALLO_CICLO_MOMENTUM) un singolo tiro isolato non deve più bastare
+    # da solo a generare una notifica ogni minuto: la stessa soglia SOGLIA_MIN_CAMBIO_PREFERITI si
+    # applica in modo uniforme a tiri totali, tiri in porta e corner.
     if str(fixture_id) in FAVORITE_MATCHES:
         if ultima_casa < 0:
             return True  # prima notifica per questa partita preferita: sempre subito
@@ -2981,7 +2984,9 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         if delta_stats:
             d_porta = delta_stats.get("Tiri in porta", (0, 0))
             d_corner = delta_stats.get("Corner", (0, 0))
-            if (d_porta[0] + d_porta[1]) >= 1 or (d_corner[0] + d_corner[1]) >= 1:
+            if (d_porta[0] + d_porta[1]) >= SOGLIA_MIN_CAMBIO_PREFERITI:
+                return True
+            if (d_corner[0] + d_corner[1]) >= SOGLIA_MIN_CAMBIO_PREFERITI:
                 return True
         return False
 
