@@ -623,7 +623,8 @@ def poll_callbacks():
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                                 json={"callback_query_id": cq["id"], "text": "Aggiunta ai preferiti"}, timeout=5)
                             is_sil = fid in SILENCED_MATCHES
-                            keyboard = get_notification_keyboard(int(fid), True, is_sil)
+                            mostra_momentum = len(stato_partite.get(int(fid), {}).get("history", [])) >= MOMENTUM_MIN_STORICO
+                            keyboard = get_notification_keyboard(int(fid), True, is_sil, mostra_momentum)
                             if keyboard:
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
@@ -632,6 +633,13 @@ def poll_callbacks():
                                         "message_id": msg_id,
                                         "reply_markup": json.dumps(keyboard)
                                     }, timeout=5)
+
+                    elif data.startswith("momentum:"):
+                        fid_bottone = int(data.split(":")[1])
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"], "text": "Genero il grafico momentum..."}, timeout=5)
+                        esegui_comando_sicuro(chat_id, cmd_momentum_da_bottone, fid_bottone)
 
                     elif data.startswith("cmd:"):
                         azione = data.split(":", 1)[1]
@@ -1696,6 +1704,40 @@ def spiega_momentum_insufficiente(history):
             "o l'API non aggiorna i dati per questa lega).")
 
 
+def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a):
+    """Genera e invia il grafico momentum per una partita già identificata (fixture_id noto),
+    usata sia da /momentum <squadra> (dopo la ricerca per nome) sia dal bottone "📈 Momentum"
+    nelle notifiche (che conosce già il fixture_id, senza dover ricercare per nome)."""
+    history = stato_partite.get(fid, {}).get("history", [])
+    foto_path = genera_grafico_momentum(fid, home, away, history)
+    msg_text = f"{home} {score_h}-{score_a} {away}\n{league} | {minuto}'{nota_copertura_momentum(history)}"
+
+    if foto_path and os.path.exists(foto_path):
+        try:
+            with open(foto_path, 'rb') as photo:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": msg_text},
+                    files={"photo": photo}, timeout=15)
+        except Exception as e:
+            log(f"Errore invio grafico momentum: {e}")
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+        finally:
+            try:
+                os.remove(foto_path)
+            except Exception:
+                pass
+    else:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": f"{msg_text}\n\nMomentum non disponibile: {spiega_momentum_insufficiente(history)}"
+            }, timeout=5)
+
+
 def cmd_momentum(chat_id, query):
     """/momentum <squadra>: grafico dell'andamento della pressione durante la partita, calcolato
     sullo storico accumulato dal bot per quella partita. A differenza di /status, funziona solo
@@ -1722,35 +1764,25 @@ def cmd_momentum(chat_id, query):
         minuto = f["fixture"]["status"].get("elapsed") or 0
         score_h = f["goals"]["home"] or 0
         score_a = f["goals"]["away"] or 0
+        invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a)
 
-        history = stato_partite.get(fid, {}).get("history", [])
-        foto_path = genera_grafico_momentum(fid, home, away, history)
-        msg_text = f"{home} {score_h}-{score_a} {away}\n{league} | {minuto}'{nota_copertura_momentum(history)}"
 
-        if foto_path and os.path.exists(foto_path):
-            try:
-                with open(foto_path, 'rb') as photo:
-                    requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                        data={"chat_id": chat_id, "caption": msg_text},
-                        files={"photo": photo}, timeout=15)
-            except Exception as e:
-                log(f"Errore invio grafico /momentum: {e}")
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
-            finally:
-                try:
-                    os.remove(foto_path)
-                except Exception:
-                    pass
-        else:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": f"{msg_text}\n\nMomentum non disponibile: {spiega_momentum_insufficiente(history)}"
-                }, timeout=5)
+def cmd_momentum_da_bottone(chat_id, fixture_id):
+    """Come cmd_momentum ma partendo da un fixture_id già noto (bottone nelle notifiche), senza
+    dover ricercare per nome squadra: legge i dati della partita dallo stato già accumulato."""
+    stato = stato_partite.get(fixture_id)
+    if not stato:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Questa partita non è più monitorata (probabilmente è terminata)."}, timeout=5)
+        return
+    invia_momentum_partita(
+        chat_id, fixture_id,
+        stato.get("home", "?"), stato.get("away", "?"),
+        formatta_lega(stato.get("league", "?"), stato.get("league_country", "")),
+        stato.get("last_minute", "?"),
+        stato.get("score_home", "?"), stato.get("score_away", "?"),
+    )
 
 
 def calcola_indice_intensita(delta_stats):
@@ -2455,13 +2487,15 @@ def nota_copertura_momentum(history):
 # =============================================================================
 # TASTIERA INLINE
 # =============================================================================
-def get_notification_keyboard(fixture_id, is_favorite=False, is_silenced=False):
+def get_notification_keyboard(fixture_id, is_favorite=False, is_silenced=False, mostra_momentum=False):
     if is_silenced:
         return None
     buttons = []
     fav_text = "Rimuovi dai preferiti" if is_favorite else "Aggiungi ai preferiti"
     buttons.append([{"text": fav_text, "callback_data": f"fav:{fixture_id}"}])
     buttons.append([{"text": "Silenzia questa partita", "callback_data": f"mute:{fixture_id}"}])
+    if mostra_momentum:
+        buttons.append([{"text": "📈 Momentum", "callback_data": f"momentum:{fixture_id}"}])
     return {"inline_keyboard": buttons}
 
 
@@ -3324,7 +3358,9 @@ def processa_partita(fixture):
         )
 
         is_sil = str(fixture_id) in SILENCED_MATCHES
-        keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil)
+        history_per_bottone = stato_partite.get(fixture_id, {}).get("history", [])
+        mostra_momentum = len(history_per_bottone) >= MOMENTUM_MIN_STORICO
+        keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
         invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
 
