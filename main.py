@@ -3751,6 +3751,11 @@ def processa_partita(fixture):
                 goals, rigori, cartellini_rossi, recupero_1h, recupero_2h)
             if foto_path:
                 nota_momentum = nota_copertura_momentum(history_completo)
+            else:
+                # Il grafico combinato manca solo la parte momentum (le barre da sole si generano
+                # comunque sotto): senza questa nota il momentum spariva senza spiegazione, dando
+                # l'impressione di un bug invece che di storico ancora insufficiente.
+                nota_momentum = f"\n(grafico momentum non disponibile: {spiega_momentum_insufficiente(history_completo)})"
         if not foto_path:
             foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
