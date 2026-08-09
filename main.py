@@ -1278,14 +1278,21 @@ def fetch_fixture_events(fixture_id):
 
 
 def extract_goals(events):
+    """Gol veri e propri dagli eventi della partita. NOTA: API-Football marca un rigore
+    sbagliato/parato con type="Goal" comunque (lo distingue solo nel campo "detail" =
+    "Missed Penalty") - va escluso esplicitamente, altrimenti risulta come un gol mai segnato,
+    con un punteggio "Primo/Ultimo gol" che non corrisponde al risultato reale della partita."""
     goals = []
     for ev in events:
-        if ev.get("type") == "Goal":
-            goals.append({
-                "minute": ev["time"]["elapsed"],
-                "player": (ev.get("player") or {}).get("name") or "Sconosciuto",
-                "team": ev["team"]["name"]
-            })
+        if ev.get("type") != "Goal":
+            continue
+        if (ev.get("detail") or "").lower() == "missed penalty":
+            continue
+        goals.append({
+            "minute": ev["time"]["elapsed"],
+            "player": (ev.get("player") or {}).get("name") or "Sconosciuto",
+            "team": ev["team"]["name"]
+        })
     goals.sort(key=lambda g: g["minute"])
     return goals
 
