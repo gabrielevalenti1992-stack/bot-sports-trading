@@ -2988,16 +2988,12 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         return False
 
     # Goleada: oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto la partita perde valore per il
-    # trading, si smette di notificarla del tutto (preferiti compresi). Il pareggio invece è
-    # sempre rilevante e bypassa le soglie sotto: basta un cambiamento qualsiasi (già filtrato dal
-    # controllo sopra) per far scattare l'invio, a differenza di uno scarto normale di 1-3 gol che
-    # segue le regole standard qui sotto.
+    # trading, si smette di notificarla del tutto (preferiti compresi). Il pareggio NON ha un
+    # trattamento speciale: segue le stesse regole di sempre qui sotto (normali o preferiti).
     if score_home is not None and score_away is not None:
         diff_gol = abs(score_home - score_away)
         if diff_gol > SOGLIA_GOLEADA_STOP_NOTIFICHE:
             return False
-        if diff_gol == 0:
-            return True
 
     # Preferiti: molto più reattivi delle altre partite (bypassano le soglie sotto), ma non per il
     # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio. Con il
