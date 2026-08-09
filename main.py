@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import datetime
 from zoneinfo import ZoneInfo
@@ -219,6 +220,34 @@ LEGHE_CON_STATISTICHE = [
     "Champions League", "Europa League", "Conference League",
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
 ]
+
+# Nomi di campionato IDENTICI usati da paesi diversi nell'API (l'API-Football non li distingue
+# nel nome, solo nel campo "country"): senza un controllo aggiuntivo sul paese, es. il "Premier
+# League" del Kazakistan o il "Segunda División" dell'Uruguay (nessuna statistica reale)
+# passerebbero il filtro pensato per Inghilterra/Spagna, dato lo stesso nome esatto.
+PAESE_ATTESO_LEGA_AMBIGUA = {
+    "premier league": "england",
+    "championship": "england",
+    "league one": "england",
+    "league two": "england",
+    "super league": "switzerland",
+    "super liga": "serbia",
+    "premiership": "scotland",
+    "first division a": "belgium",
+    "pro league": "belgium",
+    "segunda división": "spain",
+    "segunda division": "spain",
+    "nb i": "hungary",
+}
+
+# Competizioni internazionali: richiesto un match ESATTO del nome (non una sottostringa), per non
+# intercettare le versioni continentali di altre confederazioni con nome simile (es. "AFC
+# Champions League", "CAF Champions League" contengono "Champions League" come sottostringa ma
+# non hanno statistiche reali).
+COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
+    "champions league", "europa league", "conference league",
+    "world cup", "euro championship", "copa america", "copa libertadores",
+}
 
 # Cache dinamica delle leghe con statistiche coperte, ricavata dall'API /leagues.
 # Usata al posto di LEGHE_CON_STATISTICHE quando disponibile; quest'ultima resta come fallback
@@ -921,6 +950,29 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
         log(f"Errore invio Telegram: {e}")
 
 
+def _lega_in_whitelist_statica(nome, league_country):
+    """True se 'nome' (già lowercase) corrisponde a una voce della whitelist statica.
+    Match a confine di parola (non sottostringa grezza): "NB I" non deve intercettare "NB III"
+    solo perché ne è un prefisso. Per le competizioni internazionali serve un match esatto (non
+    parziale, per non intercettare le versioni continentali di altre confederazioni). Per i nomi
+    ambigui condivisi da più paesi (es. "Premier League" Inghilterra/Kazakistan) serve anche il
+    paese giusto, altrimenti passerebbero tutte le leghe omonime prive di statistiche reali."""
+    paese = (league_country or "").lower()
+    for lega in LEGHE_CON_STATISTICHE:
+        lega_lower = lega.lower()
+        if lega_lower in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO:
+            if nome == lega_lower:
+                return True
+            continue
+        if not re.search(rf"\b{re.escape(lega_lower)}\b", nome):
+            continue
+        paese_atteso = PAESE_ATTESO_LEGA_AMBIGUA.get(lega_lower)
+        if paese_atteso and paese != paese_atteso:
+            continue
+        return True
+    return False
+
+
 def campionato_valido(league_name, league_type, league_country=""):
     nome = league_name.lower()
     for parola in PAROLE_ESCLUSE:
@@ -936,7 +988,7 @@ def campionato_valido(league_name, league_type, league_country=""):
     if SOLO_LEGHE_CON_STATISTICHE:
         aggiorna_leghe_attive()
         in_cache_dinamica = (league_country.lower(), nome) in LEGHE_ATTIVE_CACHE
-        in_whitelist_statica = any(lega.lower() in nome for lega in LEGHE_CON_STATISTICHE)
+        in_whitelist_statica = _lega_in_whitelist_statica(nome, league_country)
         # Unione, non sostituzione: la whitelist statica resta una rete di sicurezza per i
         # campionati core anche quando l'API non li marca ancora come "coperti" nella stagione
         # corrente (es. a inizio stagione, prima che vengano giocate partite con statistiche reali).
@@ -2347,56 +2399,66 @@ def cmd_setup(chat_id):
 # =============================================================================
 # GRAFICO A BARRE ORIZZONTALI (totali cumulativi)
 # =============================================================================
+def _disegna_grafico_barre(ax, home_name, away_name, stats):
+    """Disegna il grafico a barre proporzionale (totale cumulativo della partita) sull'ax
+    passato, cosi' puo' essere usato sia da solo (genera_grafico_barre) sia impilato insieme
+    al grafico momentum in un'unica immagine (genera_grafico_combinato)."""
+    metrics = list(stats.keys())
+    home_vals = [stats[m][0] for m in metrics]
+    away_vals = [stats[m][1] for m in metrics]
+
+    ax.set_facecolor('#1e1e1e')
+
+    color_home = '#22c55e'
+    color_away = '#ef4444'
+    color_bg = '#2a2a2a'
+    color_text = '#e5e5e5'
+    color_muted = '#888888'
+
+    for i, metric in enumerate(metrics):
+        total = home_vals[i] + away_vals[i]
+        ax.barh(i, 1, height=0.30, color=color_bg, left=0, zorder=1, edgecolor='none')
+
+        if total == 0:
+            ax.text(0.5, i, 'Nessun dato', ha='center', va='center',
+                    fontsize=8, color=color_muted, zorder=3)
+            continue
+
+        home_pct = home_vals[i] / total
+        away_pct = away_vals[i] / total
+
+        ax.barh(i, home_pct, height=0.30, color=color_home, left=0, zorder=2, edgecolor='none')
+        ax.barh(i, away_pct, height=0.30, color=color_away, left=home_pct, zorder=2, edgecolor='none')
+
+        ax.text(-0.04, i, str(home_vals[i]), ha='right', va='center',
+                fontsize=11, fontweight='bold', color=color_home, zorder=3)
+        ax.text(1.04, i, str(away_vals[i]), ha='left', va='center',
+                fontsize=11, fontweight='bold', color=color_away, zorder=3)
+
+    ax.set_yticks(range(len(metrics)))
+    ax.set_yticklabels(metrics, fontsize=10, color=color_text)
+    ax.set_xlim(-0.18, 1.18)
+    ax.set_xticks([])
+    for spine in ['top', 'right', 'bottom', 'left']:
+        ax.spines[spine].set_visible(False)
+    ax.tick_params(left=False, pad=10)
+    ax.invert_yaxis()
+    ax.set_title(f"Totale partita: {home_name} vs {away_name}",
+                 fontsize=9, color=color_text, pad=10)
+
+    home_patch = mpatches.Patch(color=color_home, label=home_name)
+    away_patch = mpatches.Patch(color=color_away, label=away_name)
+    ax.legend(handles=[home_patch, away_patch], loc='lower center',
+              bbox_to_anchor=(0.5, -0.20), ncol=2, frameon=False,
+              fontsize=9, labelcolor=color_text)
+
+
 def genera_grafico_barre(fixture_id, home_name, away_name, stats):
     try:
-        metrics = list(stats.keys())
-        home_vals = [stats[m][0] for m in metrics]
-        away_vals = [stats[m][1] for m in metrics]
-
         fig, ax = plt.subplots(figsize=(5.0, 2.6), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
-        ax.set_facecolor('#1e1e1e')
-
-        color_home = '#22c55e'
-        color_away = '#ef4444'
-        color_bg = '#2a2a2a'
-        color_text = '#e5e5e5'
-        color_muted = '#888888'
-
-        for i, metric in enumerate(metrics):
-            total = home_vals[i] + away_vals[i]
-            ax.barh(i, 1, height=0.30, color=color_bg, left=0, zorder=1, edgecolor='none')
-
-            if total == 0:
-                ax.text(0.5, i, 'Nessun dato', ha='center', va='center',
-                        fontsize=8, color=color_muted, zorder=3)
-                continue
-
-            home_pct = home_vals[i] / total
-            away_pct = away_vals[i] / total
-
-            ax.barh(i, home_pct, height=0.30, color=color_home, left=0, zorder=2, edgecolor='none')
-            ax.barh(i, away_pct, height=0.30, color=color_away, left=home_pct, zorder=2, edgecolor='none')
-
-            ax.text(-0.04, i, str(home_vals[i]), ha='right', va='center',
-                    fontsize=11, fontweight='bold', color=color_home, zorder=3)
-            ax.text(1.04, i, str(away_vals[i]), ha='left', va='center',
-                    fontsize=11, fontweight='bold', color=color_away, zorder=3)
-
-        ax.set_yticks(range(len(metrics)))
-        ax.set_yticklabels(metrics, fontsize=10, color=color_text)
-        ax.set_xlim(-0.18, 1.18)
-        ax.set_xticks([])
-        for spine in ['top', 'right', 'bottom', 'left']:
-            ax.spines[spine].set_visible(False)
-        ax.tick_params(left=False, pad=10)
-        ax.invert_yaxis()
-
-        home_patch = mpatches.Patch(color=color_home, label=home_name)
-        away_patch = mpatches.Patch(color=color_away, label=away_name)
-        ax.legend(handles=[home_patch, away_patch], loc='lower center',
-                  bbox_to_anchor=(0.5, -0.20), ncol=2, frameon=False,
-                  fontsize=9, labelcolor=color_text)
+        _disegna_grafico_barre(ax, home_name, away_name, stats)
+        ax.set_title("")  # titolo ridondante quando il grafico è da solo (già nel testo/legenda)
 
         plt.tight_layout(rect=[0, 0.06, 1, 1])
 
