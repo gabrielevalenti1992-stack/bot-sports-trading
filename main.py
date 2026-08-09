@@ -2621,10 +2621,16 @@ def _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa
         y_marcatori = picco * 1.2
         for idx, marcatori in marcatori_per_barra.items():
             n = len(marcatori)
-            offset_iniziale = -(n - 1) * 0.18 / 2
+            # Con più marcatori sulla stessa barra (raro, es. doppio gol nello stesso intervallo
+            # di ~3-5 min) il carattere si rimpicciolisce e lo spazio tra loro si allarga, altrimenti
+            # con la spaziatura fissa usata per il caso normale (1-2 marcatori) finiscono accavallati
+            # e illeggibili.
+            fontsize = 13 if n <= 2 else max(7, 13 - (n - 2) * 3)
+            passo = 0.5 if n > 2 else 0.22
+            offset_iniziale = -(n - 1) * passo / 2
             for k, (simbolo, colore) in enumerate(marcatori):
-                ax.text(idx + offset_iniziale + k * 0.18, y_marcatori, simbolo,
-                        ha='center', va='center', fontsize=13, fontweight='bold',
+                ax.text(idx + offset_iniziale + k * passo, y_marcatori, simbolo,
+                        ha='center', va='center', fontsize=fontsize, fontweight='bold',
                         color=colore, zorder=4)
 
     # Solo i minuti con una barra visibile (pressione > 0 per almeno una delle due squadre):
