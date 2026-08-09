@@ -10,7 +10,7 @@
   "durata_max_senza_notifica_preferiti": 900,
   "soglia_goleada_stop_notifiche": 3,
   "auto_preferiti_attivo": true,
-  "soglia_minuto_auto_preferiti": 20,
+  "soglia_minuto_auto_preferiti": 12,
   "soglia_tiri_auto_preferiti": 6,
   "soglia_gol_auto_preferiti": 2,
   "peso_intensita_tiri": 1,

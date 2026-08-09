@@ -146,8 +146,12 @@ SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 # tra le tante notifiche normali. Valutata una sola volta per partita (auto_preferito_processato
 # in stato_partite): se non scatta entro la finestra, o se l'utente la rimuove in seguito, non
 # viene più ritentata per la stessa partita.
+# NOTA: la finestra (12') è volutamente molto più stretta di MINUTI_ATTIVA (25', soglia della
+# notifica normale nella Regola 2 di deve_notificare) pur usando la stessa soglia tiri (6):
+# altrimenti le due condizioni si sovrappongono quasi del tutto e finirebbero nei preferiti
+# tantissime partite solo "normalmente attive", non solo quelle davvero esplosive.
 AUTO_PREFERITI_ATTIVO = True
-SOGLIA_MINUTO_AUTO_PREFERITI = 20  # entro questo minuto la partita deve già mostrare ritmo alto
+SOGLIA_MINUTO_AUTO_PREFERITI = 12  # entro questo minuto la partita deve già mostrare ritmo alto
 SOGLIA_TIRI_AUTO_PREFERITI = 6  # tiri totali combinati entro quel minuto
 SOGLIA_GOL_AUTO_PREFERITI = 2  # oppure già questi gol combinati entro quel minuto, a prescindere dai tiri
 
