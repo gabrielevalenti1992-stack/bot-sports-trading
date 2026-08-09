@@ -308,6 +308,7 @@ try:
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
+    print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} (entro il {SOGLIA_MINUTO_AUTO_PREFERITI}' servono {SOGLIA_TIRI_AUTO_PREFERITI} tiri o {SOGLIA_GOL_AUTO_PREFERITI} gol)", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -3631,6 +3632,9 @@ def processa_partita(fixture):
             # riproposta di nuovo entro la stessa finestra di minuti.
             gol_totali = score_home + score_away
             tiri_totali_partita = (tiri_casa + tiri_ospite) if current_stats else 0
+            if minuto is not None and minuto <= SOGLIA_MINUTO_AUTO_PREFERITI:
+                log(f"    ⭐? Valutazione auto-preferiti: {minuto}' tiri={tiri_totali_partita} gol={gol_totali} "
+                    f"(soglie: tiri>={SOGLIA_TIRI_AUTO_PREFERITI} o gol>={SOGLIA_GOL_AUTO_PREFERITI} entro il {SOGLIA_MINUTO_AUTO_PREFERITI}')")
             if deve_aggiungere_automaticamente_ai_preferiti(tiri_totali_partita, minuto, gol_totali):
                 FAVORITE_MATCHES.add(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
@@ -3641,6 +3645,8 @@ def processa_partita(fixture):
                     f"(tiri totali {tiri_totali_partita}, gol {gol_totali}). Rimuovila dai preferiti se non ti interessa seguirla."
                 )
             elif minuto is not None and minuto > SOGLIA_MINUTO_AUTO_PREFERITI:
+                if not stato_partite[fixture_id].get("auto_preferito_processato"):
+                    log(f"    ⭐✖️ Auto-preferiti: finestra chiusa al {minuto}' senza aver mai superato le soglie, non verrà più rivalutata")
                 stato_partite[fixture_id]["auto_preferito_processato"] = True  # finestra chiusa, non ricontrollare più
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
