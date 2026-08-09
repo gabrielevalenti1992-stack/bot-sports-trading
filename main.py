@@ -2472,97 +2472,119 @@ def genera_grafico_barre(fixture_id, home_name, away_name, stats):
         return None
 
 
+def _calcola_punteggi_momentum(history):
+    """Calcola le etichette minuto e i punteggi per barra a partire dallo storico. Punteggio =
+    tiri totali + tiri in porta (pesati) + corner + delta di xG (se disponibile) - la qualità del
+    tiro (xG), non solo la quantità, quindi un singolo tiro pericoloso può pesare quanto una
+    raffica di tiri innocui. NOTA: xGOT (expected goals on target) non è un dato fornito da
+    API-Football, solo xG "semplice" - non è nel calcolo perché non esiste nella fonte dati, non
+    per una scelta di design. Ritorna None se lo storico è troppo corto o completamente piatto."""
+    if len(history) < MOMENTUM_MIN_STORICO:
+        return None
+
+    storico = sorted(history, key=lambda h: h["timestamp"])
+    etichette, punteggi_casa, punteggi_ospite = [], [], []
+    for prec, corr in zip(storico, storico[1:]):
+        s_prec, s_corr = prec["stats"], corr["stats"]
+        d_tiri_h = max(0, s_corr["Tiri totali"][0] - s_prec["Tiri totali"][0])
+        d_tiri_a = max(0, s_corr["Tiri totali"][1] - s_prec["Tiri totali"][1])
+        d_porta_h = max(0, s_corr["Tiri in porta"][0] - s_prec["Tiri in porta"][0])
+        d_porta_a = max(0, s_corr["Tiri in porta"][1] - s_prec["Tiri in porta"][1])
+        d_corner_h = max(0, s_corr["Corner"][0] - s_prec["Corner"][0])
+        d_corner_a = max(0, s_corr["Corner"][1] - s_prec["Corner"][1])
+
+        xg_prec = prec.get("xg") or [None, None]
+        xg_corr = corr.get("xg") or [None, None]
+        d_xg_h = d_xg_a = 0
+        if xg_prec[0] is not None and xg_corr[0] is not None:
+            d_xg_h = max(0, xg_corr[0] - xg_prec[0])
+        if xg_prec[1] is not None and xg_corr[1] is not None:
+            d_xg_a = max(0, xg_corr[1] - xg_prec[1])
+
+        punteggi_casa.append(
+            d_tiri_h * PESO_INTENSITA_TIRI + d_porta_h * PESO_INTENSITA_PORTA
+            + d_corner_h * PESO_INTENSITA_CORNER + d_xg_h * PESO_MOMENTUM_XG
+        )
+        punteggi_ospite.append(
+            d_tiri_a * PESO_INTENSITA_TIRI + d_porta_a * PESO_INTENSITA_PORTA
+            + d_corner_a * PESO_INTENSITA_CORNER + d_xg_a * PESO_MOMENTUM_XG
+        )
+        etichette.append(f"{corr.get('minuto', '?')}'")
+
+    if not any(punteggi_casa) and not any(punteggi_ospite):
+        return None
+    return etichette, punteggi_casa, punteggi_ospite
+
+
+def _larghezza_grafico_momentum(n_barre):
+    # Larghezza proporzionale al numero di barre: con poche barre (partita appena iniziata,
+    # storico ancora corto) il grafico resta compatto invece di allargarsi a vuoto, con tanto
+    # spazio centrale inutilizzato.
+    return max(3.5, min(6.0, 1.2 + 0.25 * n_barre))
+
+
+def _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa, punteggi_ospite):
+    """Disegna il grafico momentum (andamento a intervalli) sull'ax passato, cosi' puo' essere
+    usato sia da solo (genera_grafico_momentum) sia impilato insieme al grafico a barre
+    proporzionale in un'unica immagine (genera_grafico_combinato)."""
+    color_home = '#22c55e'
+    color_away = '#ef4444'
+    color_text = '#e5e5e5'
+    color_muted = '#888888'
+
+    ax.set_facecolor('#1e1e1e')
+    x = range(len(etichette))
+
+    ax.bar(x, punteggi_casa, color=color_home, width=0.8, zorder=2, edgecolor='none')
+    ax.bar(x, [-v for v in punteggi_ospite], color=color_away, width=0.8, zorder=2, edgecolor='none')
+    ax.axhline(0, color=color_muted, linewidth=1, zorder=1)
+
+    # Nessuna etichetta numerica sopra/sotto le barre (tolta su richiesta esplicita): il colore
+    # e l'altezza della barra bastano a leggere l'andamento, senza numerini che affollano il
+    # grafico. Restano solo le etichette dei minuti in basso sull'asse.
+    picco = max([abs(v) for v in punteggi_casa + punteggi_ospite] or [1])
+    ax.set_ylim(-picco * 1.1, picco * 1.1)
+
+    # Solo i minuti con una barra visibile (pressione > 0 per almeno una delle due squadre):
+    # un'etichetta senza barra sopra sembra un "buco"/dato mancante, mentre è solo un
+    # intervallo a pressione zero (dato reale, non un errore). Se sono comunque troppe per
+    # stare leggibili, ne mostra una ogni tot invece di tutte.
+    indici_con_barra = [i for i in x if punteggi_casa[i] > 0 or punteggi_ospite[i] > 0]
+    step = max(1, len(indici_con_barra) // 12)
+    indici_mostrati = indici_con_barra[::step]
+    ax.set_xticks(indici_mostrati)
+    ax.set_xticklabels([etichette[i] for i in indici_mostrati], fontsize=8, color=color_text)
+    ax.set_yticks([])
+    for spine in ['top', 'right', 'bottom', 'left']:
+        ax.spines[spine].set_visible(False)
+
+    ax.set_title(f"Momentum: {home_name} vs {away_name} (tiri, porta, corner, xG)",
+                 fontsize=9, color=color_text, pad=10)
+
+    home_patch = mpatches.Patch(color=color_home, label=home_name)
+    away_patch = mpatches.Patch(color=color_away, label=away_name)
+    ax.legend(handles=[home_patch, away_patch], loc='lower center',
+              bbox_to_anchor=(0.5, -0.22), ncol=2, frameon=False,
+              fontsize=9, labelcolor=color_text)
+
+
 def genera_grafico_momentum(fixture_id, home_name, away_name, history):
-    """Grafico "momentum": una barra per ogni intervallo tra due rilevazioni consecutive,
-    verde verso l'alto quando spinge la casa in quell'intervallo, rossa verso il basso quando
-    spinge la trasferta. Punteggio = tiri totali + tiri in porta (pesati) + corner + delta di xG
-    (se disponibile) - la qualità del tiro (xG), non solo la quantità, quindi un singolo tiro
-    pericoloso può pesare quanto una raffica di tiri innocui. NOTA: xGOT (expected goals on
-    target) non è un dato fornito da API-Football, solo xG "semplice" - non è nel calcolo perché
-    non esiste nella fonte dati, non per una scelta di design.
-    Risoluzione onesta: un punto ogni ciclo (~3 min quando la partita è "attiva"), non al minuto -
-    non è quindi immediato/fluido come i widget con feed dati proprietario, ma usa dati reali."""
+    """Grafico "momentum": una barra per ogni intervallo tra due rilevazioni consecutive, verde
+    verso l'alto quando spinge la casa in quell'intervallo, rossa verso il basso quando spinge la
+    trasferta. Risoluzione onesta: un punto ogni ciclo (~3 min quando la partita è "attiva"), non
+    al minuto - non è quindi immediato/fluido come i widget con feed dati proprietario, ma usa
+    dati reali."""
     try:
-        if len(history) < MOMENTUM_MIN_STORICO:
+        dati = _calcola_punteggi_momentum(history)
+        if not dati:
             return None
+        etichette, punteggi_casa, punteggi_ospite = dati
 
-        storico = sorted(history, key=lambda h: h["timestamp"])
-        etichette, punteggi_casa, punteggi_ospite = [], [], []
-        for prec, corr in zip(storico, storico[1:]):
-            s_prec, s_corr = prec["stats"], corr["stats"]
-            d_tiri_h = max(0, s_corr["Tiri totali"][0] - s_prec["Tiri totali"][0])
-            d_tiri_a = max(0, s_corr["Tiri totali"][1] - s_prec["Tiri totali"][1])
-            d_porta_h = max(0, s_corr["Tiri in porta"][0] - s_prec["Tiri in porta"][0])
-            d_porta_a = max(0, s_corr["Tiri in porta"][1] - s_prec["Tiri in porta"][1])
-            d_corner_h = max(0, s_corr["Corner"][0] - s_prec["Corner"][0])
-            d_corner_a = max(0, s_corr["Corner"][1] - s_prec["Corner"][1])
-
-            xg_prec = prec.get("xg") or [None, None]
-            xg_corr = corr.get("xg") or [None, None]
-            d_xg_h = d_xg_a = 0
-            if xg_prec[0] is not None and xg_corr[0] is not None:
-                d_xg_h = max(0, xg_corr[0] - xg_prec[0])
-            if xg_prec[1] is not None and xg_corr[1] is not None:
-                d_xg_a = max(0, xg_corr[1] - xg_prec[1])
-
-            punteggi_casa.append(
-                d_tiri_h * PESO_INTENSITA_TIRI + d_porta_h * PESO_INTENSITA_PORTA
-                + d_corner_h * PESO_INTENSITA_CORNER + d_xg_h * PESO_MOMENTUM_XG
-            )
-            punteggi_ospite.append(
-                d_tiri_a * PESO_INTENSITA_TIRI + d_porta_a * PESO_INTENSITA_PORTA
-                + d_corner_a * PESO_INTENSITA_CORNER + d_xg_a * PESO_MOMENTUM_XG
-            )
-            etichette.append(f"{corr.get('minuto', '?')}'")
-
-        if not any(punteggi_casa) and not any(punteggi_ospite):
-            return None
-
-        color_home = '#22c55e'
-        color_away = '#ef4444'
-        color_text = '#e5e5e5'
-        color_muted = '#888888'
-
-        x = range(len(etichette))
-        # Larghezza proporzionale al numero di barre: con poche barre (partita appena iniziata,
-        # storico ancora corto) il grafico resta compatto invece di allargarsi a vuoto, con tanto
-        # spazio centrale inutilizzato.
-        larghezza = max(3.5, min(6.0, 1.2 + 0.25 * len(x)))
-        fig, ax = plt.subplots(figsize=(larghezza, 3.2), dpi=150)
+        fig, ax = plt.subplots(figsize=(_larghezza_grafico_momentum(len(etichette)), 3.2), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
-        ax.set_facecolor('#1e1e1e')
-
-        barre_casa = ax.bar(x, punteggi_casa, color=color_home, width=0.8, zorder=2, edgecolor='none')
-        barre_ospite = ax.bar(x, [-v for v in punteggi_ospite], color=color_away, width=0.8, zorder=2, edgecolor='none')
-        ax.axhline(0, color=color_muted, linewidth=1, zorder=1)
-
-        # Nessuna etichetta numerica sopra/sotto le barre (tolta su richiesta esplicita): il colore
-        # e l'altezza della barra bastano a leggere l'andamento, senza numerini che affollano il
-        # grafico. Restano solo le etichette dei minuti in basso sull'asse.
-        picco = max([abs(v) for v in punteggi_casa + punteggi_ospite] or [1])
-        ax.set_ylim(-picco * 1.1, picco * 1.1)
-
-        # Solo i minuti con una barra visibile (pressione > 0 per almeno una delle due squadre):
-        # un'etichetta senza barra sopra sembra un "buco"/dato mancante, mentre è solo un
-        # intervallo a pressione zero (dato reale, non un errore). Se sono comunque troppe per
-        # stare leggibili, ne mostra una ogni tot invece di tutte.
-        indici_con_barra = [i for i in x if punteggi_casa[i] > 0 or punteggi_ospite[i] > 0]
-        step = max(1, len(indici_con_barra) // 12)
-        indici_mostrati = indici_con_barra[::step]
-        ax.set_xticks(indici_mostrati)
-        ax.set_xticklabels([etichette[i] for i in indici_mostrati], fontsize=8, color=color_text)
-        ax.set_yticks([])
-        for spine in ['top', 'right', 'bottom', 'left']:
-            ax.spines[spine].set_visible(False)
-
+        _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa, punteggi_ospite)
         ax.set_title(f"{home_name} vs {away_name} - momentum (tiri, porta, corner, xG)",
-                     fontsize=9, color=color_text, pad=10)
-
-        home_patch = mpatches.Patch(color=color_home, label=home_name)
-        away_patch = mpatches.Patch(color=color_away, label=away_name)
-        ax.legend(handles=[home_patch, away_patch], loc='lower center',
-                  bbox_to_anchor=(0.5, -0.22), ncol=2, frameon=False,
-                  fontsize=9, labelcolor=color_text)
+                     fontsize=9, color='#e5e5e5', pad=10)
 
         plt.tight_layout(rect=[0, 0.08, 1, 1])
 
@@ -2573,6 +2595,39 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history):
         return foto_path
     except Exception as e:
         log(f"Errore grafico momentum: {e}")
+        return None
+
+
+def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, history):
+    """Un'unica immagine con due grafici impilati (uno sopra l'altro): in alto il totale
+    cumulativo di tutta la partita (barre proporzionali, come prima), in basso l'andamento
+    momentum a intervalli. Cosi' i preferiti hanno sia il quadro d'insieme sia il dettaglio
+    temporale in una notifica sola, senza dover scegliere tra i due grafici o mandarne due
+    separati (che su Telegram si aprono uno alla volta, esperienza confusa)."""
+    try:
+        dati = _calcola_punteggi_momentum(history)
+        if not dati:
+            return None
+        etichette, punteggi_casa, punteggi_ospite = dati
+
+        larghezza = max(5.0, _larghezza_grafico_momentum(len(etichette)))
+        fig, (ax_barre, ax_momentum) = plt.subplots(
+            2, 1, figsize=(larghezza, 5.6), dpi=150,
+            gridspec_kw={'height_ratios': [2.6, 3.0]}
+        )
+        fig.patch.set_facecolor('#1e1e1e')
+        _disegna_grafico_barre(ax_barre, home_name, away_name, stats_totali)
+        _disegna_grafico_momentum(ax_momentum, home_name, away_name, etichette, punteggi_casa, punteggi_ospite)
+
+        plt.tight_layout(rect=[0, 0.02, 1, 1], h_pad=3.0)
+
+        foto_path = os.path.join(os.path.dirname(__file__), f'combinato_{fixture_id}.png')
+        plt.savefig(foto_path, format='png', bbox_inches='tight',
+                    facecolor='#1e1e1e', edgecolor='none', pad_inches=0.15)
+        plt.close()
+        return foto_path
+    except Exception as e:
+        log(f"Errore grafico combinato: {e}")
         return None
 
 
@@ -3392,15 +3447,16 @@ def processa_partita(fixture):
             log(f"  -> Skip")
             return
 
-        # Preferiti: grafico momentum (andamento pressione nel tempo) invece del grafico a barre
-        # proporzionale, perché è quello che serve per decidere se entrare - se lo storico non è
-        # ancora abbastanza lungo si usa comunque il grafico a barre, per non restare senza foto.
+        # Preferiti: un'unica immagine con il totale cumulativo (barre proporzionali, come per
+        # tutte le altre partite) impilato sopra il grafico momentum (andamento a intervalli, per
+        # decidere se entrare) - se lo storico non è ancora abbastanza lungo per il momentum si usa
+        # comunque il solo grafico a barre, per non restare senza foto.
         is_fav = str(fixture_id) in FAVORITE_MATCHES
         foto_path = None
         nota_momentum = ""
         if is_fav:
             history_completo = stato_partite.get(fixture_id, {}).get("history", [])
-            foto_path = genera_grafico_momentum(fixture_id, home, away, history_completo)
+            foto_path = genera_grafico_combinato(fixture_id, home, away, current_stats if current_stats else stats_dict, history_completo)
             if foto_path:
                 nota_momentum = nota_copertura_momentum(history_completo)
         if not foto_path:
@@ -3468,25 +3524,9 @@ def processa_partita(fixture):
             else:
                 tempi_text = "\n(1°T/2°T non disponibile: il bot ha iniziato a monitorare questa partita dopo l'intervallo)\n"
 
-        # Totale partita (cumulativo, non il delta ultimi 15 min): prima si vedeva nel grafico a
-        # barre proporzionale, che per i preferiti è stato sostituito dal grafico momentum (che
-        # mostra l'andamento a intervalli, non il cumulativo) - senza questa riga di testo quel
-        # dato sparirebbe del tutto dalla notifica.
-        if current_stats:
-            tot_tiri_h, tot_tiri_a = current_stats["Tiri totali"]
-            tot_porta_h, tot_porta_a = current_stats["Tiri in porta"]
-            tot_corner_h, tot_corner_a = current_stats["Corner"]
-            tot_area_h, tot_area_a = current_stats["Tiri in area"]
-            totale_text = (
-                f"Totale partita:\n"
-                f"- Tiri totali: {tot_tiri_h} - {tot_tiri_a}\n"
-                f"- Tiri in porta: {tot_porta_h} - {tot_porta_a}\n"
-                f"- Corner: {tot_corner_h} - {tot_corner_a}\n"
-                f"- Tiri in area: {tot_area_h} - {tot_area_a}\n\n"
-            )
-        else:
-            totale_text = ""
-
+        # Il totale cumulativo della partita (tiri, porta, corner, area) si vede ora nel grafico
+        # allegato (barre proporzionali, sempre presenti: da sole per le non preferite, impilate
+        # sopra il momentum per i preferiti) - non serve ripeterlo anche in testo.
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
@@ -3496,7 +3536,6 @@ def processa_partita(fixture):
             f"{cartellini_text}"
             f"{rigori_text}"
             f"{recupero_text}\n"
-            f"{totale_text}"
             f"{header_stats}:\n"
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
