@@ -172,6 +172,7 @@ DURATA_STIMATA_PARTITA_MINUTI = 130  # 90' + recupero + intervallo + margine di 
 MARGINE_PRE_KICKOFF_MINUTI = 10  # anticipo con cui il ciclo torna "attivo" prima del kickoff previsto
 INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una finestra attiva (come oggi)
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
+INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
 
 # Minuti di recupero: se superano questa soglia in un tempo (1° o 2°), la partita merita una
 # notifica dedicata anche se le altre soglie (tiri, momentum...) non sono soddisfatte, perché più
@@ -238,9 +239,10 @@ try:
     MARGINE_PRE_KICKOFF_MINUTI = config.get("margine_pre_kickoff_minuti", MARGINE_PRE_KICKOFF_MINUTI)
     INTERVALLO_CICLO_ATTIVO = config.get("intervallo_ciclo_attivo", INTERVALLO_CICLO_ATTIVO)
     INTERVALLO_CICLO_MORTO = config.get("intervallo_ciclo_morto", INTERVALLO_CICLO_MORTO)
+    INTERVALLO_CICLO_MOMENTUM = config.get("intervallo_ciclo_momentum", INTERVALLO_CICLO_MOMENTUM)
     SOGLIA_RECUPERO_LUNGO_MINUTI = config.get("soglia_recupero_lungo_minuti", SOGLIA_RECUPERO_LUNGO_MINUTI)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
-    print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s", flush=True)
+    print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
@@ -3517,8 +3519,24 @@ if __name__ == "__main__":
         fixture_ids_live = {
             f["fixture"]["id"] for f in partite_valide if f.get("fixture", {}).get("id")
         }
+        # I preferiti vengono ricontrollati ogni INTERVALLO_CICLO_MOMENTUM (60s) invece che ogni
+        # INTERVALLO_CICLO_ATTIVO (180s): più punti storici in meno tempo = grafico momentum più
+        # denso. Le altre partite valide restano al ritmo normale. Il ciclo esterno (sleep finale)
+        # viene comunque accorciato quando c'è almeno un preferito live, altrimenti il gate qui
+        # sotto non verrebbe mai ricontrollato abbastanza spesso da avere effetto.
+        preferito_live = False
         for fixture in partite_valide:
+            fid = fixture.get("fixture", {}).get("id")
+            e_preferita = fid is not None and str(fid) in FAVORITE_MATCHES
+            if e_preferita:
+                preferito_live = True
+            intervallo_minimo = INTERVALLO_CICLO_MOMENTUM if e_preferita else INTERVALLO_CICLO_ATTIVO
+            ultimo_controllo = stato_partite.get(fid, {}).get("ultimo_controllo", 0) if fid is not None else 0
+            if time.time() - ultimo_controllo < intervallo_minimo:
+                continue
             processa_partita(fixture)
+            if fid is not None:
+                stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
             time.sleep(1)
 
         pulisci_partite_terminate(fixture_ids_live)
@@ -3535,5 +3553,7 @@ if __name__ == "__main__":
         in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
         ciclo_attivo = in_finestra_attiva or bool(partite_valide)
         prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
-        log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'})...")
+        if preferito_live:
+            prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
+        log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''})...")
         time.sleep(prossimo_intervallo)
