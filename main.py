@@ -2581,14 +2581,37 @@ def _indici_barre_per_minuti(storico, minuti_eventi):
     return indici
 
 
+def _disegna_marcatori_evento(ax, indici_gol, indici_rigori_sbagliati, y_riga):
+    """Disegna, su una singola riga orizzontale fissa (y_riga: positiva sopra per la casa,
+    negativa sotto per la trasferta), un marcatore '+' dorato per ogni gol e 'X' rossa per ogni
+    rigore sbagliato/parato, nella barra giusta. Più marcatori sulla stessa barra (raro) vengono
+    distanziati e rimpiccioliti per restare leggibili."""
+    marcatori_per_barra = {}
+    for i in (indici_gol or []):
+        marcatori_per_barra.setdefault(i, []).append(('+', '#facc15'))
+    for i in (indici_rigori_sbagliati or []):
+        marcatori_per_barra.setdefault(i, []).append(('X', '#ef4444'))
+    for idx, marcatori in marcatori_per_barra.items():
+        n = len(marcatori)
+        fontsize = 13 if n <= 2 else max(7, 13 - (n - 2) * 3)
+        passo = 0.5 if n > 2 else 0.22
+        offset_iniziale = -(n - 1) * passo / 2
+        for k, (simbolo, colore) in enumerate(marcatori):
+            ax.text(idx + offset_iniziale + k * passo, y_riga, simbolo,
+                    ha='center', va='center', fontsize=fontsize, fontweight='bold',
+                    color=colore, zorder=4)
+
+
 def _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa, punteggi_ospite,
-                               indici_gol=None, indici_rigori_sbagliati=None):
+                               indici_gol_casa=None, indici_gol_ospite=None,
+                               indici_rigori_sbagliati_casa=None, indici_rigori_sbagliati_ospite=None):
     """Disegna il grafico momentum (andamento a intervalli) sull'ax passato, cosi' puo' essere
     usato sia da solo (genera_grafico_momentum) sia impilato insieme al grafico a barre
-    proporzionale in un'unica immagine (genera_grafico_combinato). indici_gol/indici_rigori_sbagliati
-    sono liste di indici di barra (da _indici_barre_per_minuti) dove disegnare un marcatore: '+'
-    dorato per un gol, 'X' rossa per un rigore sbagliato/parato. Niente emoji (⚽/❌): il font
-    di sistema usato da matplotlib in produzione non ha i glifi e mostrerebbe un quadratino vuoto."""
+    proporzionale in un'unica immagine (genera_grafico_combinato). I marcatori seguono la stessa
+    convenzione delle barre: gol/rigori della casa sopra la linea dello zero, della trasferta
+    sotto - non tutti ammucchiati in alto a prescindere da chi ha segnato. Niente emoji (⚽/❌):
+    il font di sistema usato da matplotlib in produzione non ha i glifi e mostrerebbe un
+    quadratino vuoto, quindi '+' per un gol e 'X' per un rigore sbagliato/parato."""
     color_home = '#22c55e'
     color_away = '#ef4444'
     color_text = '#e5e5e5'
@@ -2605,33 +2628,15 @@ def _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa
     # e l'altezza della barra bastano a leggere l'andamento, senza numerini che affollano il
     # grafico. Restano solo le etichette dei minuti in basso sull'asse.
     picco = max([abs(v) for v in punteggi_casa + punteggi_ospite] or [1])
-    ha_eventi = bool(indici_gol) or bool(indici_rigori_sbagliati)
-    top = picco * 1.35 if ha_eventi else picco * 1.1
-    ax.set_ylim(-picco * 1.1, top)
+    ha_eventi = any([indici_gol_casa, indici_gol_ospite, indici_rigori_sbagliati_casa, indici_rigori_sbagliati_ospite])
+    margine = picco * 1.35 if ha_eventi else picco * 1.1
+    ax.set_ylim(-margine, margine)
 
     if ha_eventi:
-        # Marcatori su una riga fissa in alto, indipendente dall'altezza delle barre: cosi' sono
-        # sempre visibili anche quando la barra dell'intervallo è bassa o assente. Più marcatori
-        # sulla stessa barra (raro) vengono distanziati leggermente in orizzontale.
-        marcatori_per_barra = {}
-        for i in (indici_gol or []):
-            marcatori_per_barra.setdefault(i, []).append(('+', '#facc15'))
-        for i in (indici_rigori_sbagliati or []):
-            marcatori_per_barra.setdefault(i, []).append(('X', '#ef4444'))
-        y_marcatori = picco * 1.2
-        for idx, marcatori in marcatori_per_barra.items():
-            n = len(marcatori)
-            # Con più marcatori sulla stessa barra (raro, es. doppio gol nello stesso intervallo
-            # di ~3-5 min) il carattere si rimpicciolisce e lo spazio tra loro si allarga, altrimenti
-            # con la spaziatura fissa usata per il caso normale (1-2 marcatori) finiscono accavallati
-            # e illeggibili.
-            fontsize = 13 if n <= 2 else max(7, 13 - (n - 2) * 3)
-            passo = 0.5 if n > 2 else 0.22
-            offset_iniziale = -(n - 1) * passo / 2
-            for k, (simbolo, colore) in enumerate(marcatori):
-                ax.text(idx + offset_iniziale + k * passo, y_marcatori, simbolo,
-                        ha='center', va='center', fontsize=fontsize, fontweight='bold',
-                        color=colore, zorder=4)
+        # Riga fissa sopra/sotto lo zero, indipendente dall'altezza delle barre: cosi' i
+        # marcatori sono sempre visibili anche quando la barra dell'intervallo è bassa o assente.
+        _disegna_marcatori_evento(ax, indici_gol_casa, indici_rigori_sbagliati_casa, picco * 1.2)
+        _disegna_marcatori_evento(ax, indici_gol_ospite, indici_rigori_sbagliati_ospite, -picco * 1.2)
 
     # Solo i minuti con una barra visibile (pressione > 0 per almeno una delle due squadre):
     # un'etichetta senza barra sopra sembra un "buco"/dato mancante, mentre è solo un
@@ -2656,26 +2661,43 @@ def _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa
               fontsize=9, labelcolor=color_text)
 
 
+def _indici_marcatori_per_squadra(storico, home_name, away_name, goals, rigori):
+    """Divide gol e rigori sbagliati/parati per squadra (casa/trasferta) e li converte in indici
+    di barra, cosi' i marcatori possono seguire la stessa convenzione delle barre: casa sopra lo
+    zero, trasferta sotto."""
+    goals = goals or []
+    rigori = rigori or []
+    indici_gol_casa = _indici_barre_per_minuti(
+        storico, [g["minute"] for g in goals if g.get("team") == home_name])
+    indici_gol_ospite = _indici_barre_per_minuti(
+        storico, [g["minute"] for g in goals if g.get("team") == away_name])
+    indici_rig_casa = _indici_barre_per_minuti(
+        storico, [r["minute"] for r in rigori if r.get("esito") == "sbagliato" and r.get("team") == home_name])
+    indici_rig_ospite = _indici_barre_per_minuti(
+        storico, [r["minute"] for r in rigori if r.get("esito") == "sbagliato" and r.get("team") == away_name])
+    return indici_gol_casa, indici_gol_ospite, indici_rig_casa, indici_rig_ospite
+
+
 def genera_grafico_momentum(fixture_id, home_name, away_name, history, goals=None, rigori=None):
     """Grafico "momentum": una barra per ogni intervallo tra due rilevazioni consecutive, verde
     verso l'alto quando spinge la casa in quell'intervallo, rossa verso il basso quando spinge la
     trasferta. Risoluzione onesta: un punto ogni ciclo (~3 min quando la partita è "attiva"), non
     al minuto - non è quindi immediato/fluido come i widget con feed dati proprietario, ma usa
     dati reali. goals/rigori (liste opzionali, formato extract_goals/extract_rigori) aggiungono un
-    marcatore '+' dorato sui gol e 'X' rossa sui rigori sbagliati/parati, nel punto giusto."""
+    marcatore '+' dorato sui gol e 'X' rossa sui rigori sbagliati/parati, sopra lo zero per la casa
+    e sotto per la trasferta (stessa convenzione delle barre)."""
     try:
         dati = _calcola_punteggi_momentum(history)
         if not dati:
             return None
         storico, etichette, punteggi_casa, punteggi_ospite = dati
-        indici_gol = _indici_barre_per_minuti(storico, [g["minute"] for g in (goals or [])])
-        indici_rigori_sbagliati = _indici_barre_per_minuti(
-            storico, [r["minute"] for r in (rigori or []) if r.get("esito") == "sbagliato"])
+        idx_gol_c, idx_gol_o, idx_rig_c, idx_rig_o = _indici_marcatori_per_squadra(
+            storico, home_name, away_name, goals, rigori)
 
         fig, ax = plt.subplots(figsize=(_larghezza_grafico_momentum(len(etichette)), 3.2), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
         _disegna_grafico_momentum(ax, home_name, away_name, etichette, punteggi_casa, punteggi_ospite,
-                                   indici_gol, indici_rigori_sbagliati)
+                                   idx_gol_c, idx_gol_o, idx_rig_c, idx_rig_o)
         ax.set_title(f"{home_name} vs {away_name} - momentum (tiri, porta, corner, xG)",
                      fontsize=9, color='#e5e5e5', pad=10)
 
@@ -2703,9 +2725,8 @@ def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, his
         if not dati:
             return None
         storico, etichette, punteggi_casa, punteggi_ospite = dati
-        indici_gol = _indici_barre_per_minuti(storico, [g["minute"] for g in (goals or [])])
-        indici_rigori_sbagliati = _indici_barre_per_minuti(
-            storico, [r["minute"] for r in (rigori or []) if r.get("esito") == "sbagliato"])
+        idx_gol_c, idx_gol_o, idx_rig_c, idx_rig_o = _indici_marcatori_per_squadra(
+            storico, home_name, away_name, goals, rigori)
 
         larghezza = max(5.0, _larghezza_grafico_momentum(len(etichette)))
         fig, (ax_barre, ax_momentum) = plt.subplots(
@@ -2715,7 +2736,7 @@ def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, his
         fig.patch.set_facecolor('#1e1e1e')
         _disegna_grafico_barre(ax_barre, home_name, away_name, stats_totali)
         _disegna_grafico_momentum(ax_momentum, home_name, away_name, etichette, punteggi_casa, punteggi_ospite,
-                                   indici_gol, indici_rigori_sbagliati)
+                                   idx_gol_c, idx_gol_o, idx_rig_c, idx_rig_o)
 
         plt.tight_layout(rect=[0, 0.02, 1, 1], h_pad=3.0)
 
