@@ -342,15 +342,37 @@ COPPE_NAZIONALI_ESCLUSE = [
 ]
 
 # Leghe che, empiricamente, non restituiscono mai statistiche reali dall'API pur superando il
-# filtro whitelist per nome (tipicamente competizioni minori di un paese omonime a un campionato
+# filtro whitelist (tipicamente perché l'API le marca "coperte" a livello di stagione ma poi
+# questa specifica partita non ha dati, o competizioni minori di un paese omonime a un campionato
 # whitelist: es. "League Two" scozzese, stesso nome della quarta serie inglese che è in whitelist).
 # Dopo SOGLIA_SENZA_STATISTICHE controlli consecutivi senza dati, la lega viene esclusa per
 # DURATA_ESCLUSIONE_SENZA_STATISTICHE secondi, per non continuare a pagare 2 chiamate a vuoto ad
-# ogni ciclo su partite che non produrranno mai una notifica utile. Non persistito su disco: si
-# ricostruisce da solo nel giro di pochi cicli ad ogni riavvio del bot.
-LEGHE_SENZA_STATISTICHE = {}
+# ogni ciclo su partite che non produrranno mai una notifica utile. Persistito su disco: senza,
+# ogni riavvio del bot (frequente in fase di sviluppo, con un redeploy per ogni modifica) azzerava
+# il contatore prima che arrivasse mai a 3, rendendo l'esclusione di fatto inefficace.
+LEGHE_SENZA_STATISTICHE_FILE = data_path("leghe_senza_statistiche.json")
 SOGLIA_SENZA_STATISTICHE = 3
 DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
+
+
+def carica_leghe_senza_statistiche():
+    if os.path.exists(LEGHE_SENZA_STATISTICHE_FILE):
+        try:
+            with open(LEGHE_SENZA_STATISTICHE_FILE, 'r') as f:
+                voci = json.load(f)
+            return {(v["country"], v["name"]): v["stato"] for v in voci}
+        except Exception as e:
+            print(f"Errore lettura {LEGHE_SENZA_STATISTICHE_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_leghe_senza_statistiche(dati):
+    voci = [{"country": paese, "name": nome, "stato": stato} for (paese, nome), stato in dati.items()]
+    salva_json_atomico(LEGHE_SENZA_STATISTICHE_FILE, voci)
+
+
+LEGHE_SENZA_STATISTICHE = carica_leghe_senza_statistiche()
+print(f"leghe_senza_statistiche recuperate da disco: {len(LEGHE_SENZA_STATISTICHE)}", flush=True)
 
 
 def registra_esito_statistiche(league_country, league_name, disponibili):
@@ -365,6 +387,7 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
             log(f"  Lega '{league_name}' ({league_country}) esclusa per {DURATA_ESCLUSIONE_SENZA_STATISTICHE // 3600}h: "
                 f"nessuna statistica in {stato['senza_stats_consecutive']} controlli consecutivi")
     LEGHE_SENZA_STATISTICHE[chiave] = stato
+    salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
 
 
 def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
