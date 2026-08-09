@@ -1454,7 +1454,7 @@ def cmd_help(chat_id):
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
-        "/live - Mostra tutte le partite live (✅✅ = statistiche disponibili)\n"
+        "/live - Mostra tutte le partite live (con conteggio di quante hanno statistiche disponibili)\n"
         "/piano - Piano giornata: partite whitelist previste oggi e finestre orarie attive\n"
         "/stop - Metti il bot in pausa (nessuna chiamata API, nessuna notifica)\n"
         "/riprendi - Riattiva il bot dopo /stop\n"
@@ -1549,19 +1549,18 @@ def cmd_live(chat_id):
 
         stats_live = get_statistiche_partita(fid)
         dati_ok = ha_statistiche_disponibili(stats_live)
-        segnale = " ✅✅" if dati_ok else ""
         if dati_ok:
             n_con_dati += 1
         log(f"  /live check: {home} vs {away} (id {fid}) - statistiche {'DISPONIBILI' if dati_ok else 'assenti'}")
 
-        match_lines.append(f"- {home} {score_h}-{score_a} {away} ({league}, {minute}'){segnale}")
+        match_lines.append(f"- {home} {score_h}-{score_a} {away} ({league}, {minute}')")
         time.sleep(0.3)
 
     n_mostrate = len(match_lines)
     lines = [header] + match_lines
     if len(partite_cmd) > n_mostrate:
         lines.append(f"\n... e altre {len(partite_cmd) - n_mostrate} partite non mostrate")
-    lines.append(f"\n✅✅ = statistiche disponibili ({n_con_dati}/{n_mostrate} mostrate)")
+    lines.append(f"\nStatistiche disponibili: {n_con_dati}/{n_mostrate} mostrate")
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
