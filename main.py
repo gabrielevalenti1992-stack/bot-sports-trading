@@ -3439,11 +3439,9 @@ def processa_partita(fixture):
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
             f"- Corner: {corner_line}\n"
-            f"{tempi_text}\n"
-            f"Verde = {home}\n"
-            f"Rosso = {away}"
+            f"{tempi_text}"
             f"{nota_momentum}"
-        )
+        ).rstrip()
 
         is_sil = str(fixture_id) in SILENCED_MATCHES
         history_per_bottone = stato_partite.get(fixture_id, {}).get("history", [])
