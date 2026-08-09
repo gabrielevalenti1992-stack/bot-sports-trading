@@ -128,6 +128,18 @@ MOMENTUM_CORNER = 4
 # porta o 1 corner in più negli ultimi 15 min.
 SOGLIA_MIN_CAMBIO_PREFERITI = 2
 
+# Preferiti "raffreddati": se passano questi secondi senza che parta nessuna notifica (nessun
+# evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove automaticamente
+# dai preferiti e torna alle regole normali, invece di restare agganciata per sempre a soglie più
+# permissive senza motivo.
+DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 900  # 15 minuti
+
+# Goleada: oltre questo scarto gol la partita perde valore per il trading e si smette di
+# notificarla del tutto (preferiti compresi). Il pareggio invece (scarto 0) è sempre rilevante e
+# bypassa qualunque soglia sotto - a differenza di uno scarto "normale" di 1-3 gol, che segue le
+# regole standard.
+SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
+
 # Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
 # barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
@@ -225,6 +237,8 @@ try:
     MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
     SOGLIA_MIN_CAMBIO_PREFERITI = config.get("soglia_min_cambio_preferiti", SOGLIA_MIN_CAMBIO_PREFERITI)
+    DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
+    SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -2582,6 +2596,8 @@ def invia_report_intensita_automatico(partite_valide):
         fixture_id = f.get("fixture", {}).get("id")
         if not fixture_id:
             continue
+        if str(fixture_id) in FAVORITE_MATCHES:
+            continue  # già seguite con notifiche dedicate più frequenti, non serve duplicarle qui
         stato = stato_partite.get(fixture_id, {})
         history = stato.get("history", [])
         if not history:
@@ -2950,10 +2966,11 @@ def cmd_aggiornastorico(chat_id):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
-def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False):
+def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
-    # passare).
+    # passare). Un gol resta notificato anche se porta la partita in goleada (regola sotto): è
+    # l'evento che ha creato la goleada, non uno dei tanti aggiornamenti successivi ormai inutili.
     if gol_appena_segnato or recupero_lungo:
         return True
 
@@ -2969,6 +2986,18 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
 
     if tiri_casa == ultima_casa and tiri_ospite == ultima_ospite:
         return False
+
+    # Goleada: oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto la partita perde valore per il
+    # trading, si smette di notificarla del tutto (preferiti compresi). Il pareggio invece è
+    # sempre rilevante e bypassa le soglie sotto: basta un cambiamento qualsiasi (già filtrato dal
+    # controllo sopra) per far scattare l'invio, a differenza di uno scarto normale di 1-3 gol che
+    # segue le regole standard qui sotto.
+    if score_home is not None and score_away is not None:
+        diff_gol = abs(score_home - score_away)
+        if diff_gol > SOGLIA_GOLEADA_STOP_NOTIFICHE:
+            return False
+        if diff_gol == 0:
+            return True
 
     # Preferiti: molto più reattivi delle altre partite (bypassano le soglie sotto), ma non per il
     # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio. Con il
@@ -3278,8 +3307,23 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
+        # Preferito "raffreddato": se sono passati troppi minuti dall'ultima notifica inviata,
+        # la partita si è spenta - si rimuove dai preferiti PRIMA di valutare deve_notificare(),
+        # cosi' questo stesso ciclo segue già le regole normali invece di restare agganciato a
+        # soglie più permissive per sempre.
+        if str(fixture_id) in FAVORITE_MATCHES:
+            ultimo_invio_fav = stato_partite.get(fixture_id, {}).get("timestamp_notifica", 0)
+            if ultimo_invio_fav and (time.time() - ultimo_invio_fav) > DURATA_MAX_SENZA_NOTIFICA_PREFERITI:
+                FAVORITE_MATCHES.discard(str(fixture_id))
+                save_favorites(FAVORITE_MATCHES)
+                minuti_senza_notifica = DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
+                log(f"    ⭐➡️ Preferito rimosso automaticamente: nessuna notifica da oltre {minuti_senza_notifica} min")
+                invia_messaggio_telegram(
+                    f"⭐➡️ {home} vs {away} rimossa automaticamente dai preferiti: nessuna notifica rilevante da {minuti_senza_notifica} minuti. Torna alle notifiche/soglie normali."
+                )
+
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=evento_forzato, recupero_lungo=recupero_da_segnalare is not None):
+        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=evento_forzato, recupero_lungo=recupero_da_segnalare is not None, score_home=score_home, score_away=score_away):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
