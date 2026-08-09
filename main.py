@@ -155,6 +155,12 @@ SOGLIA_MINUTO_AUTO_PREFERITI = 12  # entro questo minuto la partita deve già mo
 SOGLIA_TIRI_AUTO_PREFERITI = 6  # tiri totali combinati entro quel minuto
 SOGLIA_GOL_AUTO_PREFERITI = 2  # oppure già questi gol combinati entro quel minuto, a prescindere dai tiri
 
+# Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
+# della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
+# scattare), senza cambiare alcun comportamento. Serve a raccogliere dati reali per calibrare le
+# soglie sopra con percentili veri invece che a occhio, una volta accumulate abbastanza partite.
+SHADOW_LOG_AUTO_PREFERITI_FILE = data_path("shadow_log_auto_preferiti.jsonl")
+
 # Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
 # barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
@@ -3273,6 +3279,36 @@ def deve_aggiungere_automaticamente_ai_preferiti(tiri_totali, minuto, gol_totali
     return False
 
 
+def registra_shadow_log_auto_preferiti(fixture_id, home, away, league_name, league_country, minuto,
+                                        tiri_totali, tiri_porta, corner, tiri_area, xg_casa, xg_ospite,
+                                        gol_totali, scattato):
+    """Appende una riga JSON con le statistiche reali osservate al momento della valutazione
+    auto-preferiti (scattata o finestra chiusa senza scattare), senza influire sul comportamento
+    del bot. Puramente per analisi offline successiva."""
+    try:
+        riga = {
+            "timestamp": time.time(),
+            "fixture_id": fixture_id,
+            "home": home,
+            "away": away,
+            "league": league_name,
+            "league_country": league_country,
+            "minuto": minuto,
+            "tiri_totali": tiri_totali,
+            "tiri_porta": tiri_porta,
+            "corner": corner,
+            "tiri_area": tiri_area,
+            "xg_casa": xg_casa,
+            "xg_ospite": xg_ospite,
+            "gol_totali": gol_totali,
+            "auto_preferiti_scattato": scattato,
+        }
+        with open(SHADOW_LOG_AUTO_PREFERITI_FILE, "a") as f:
+            f.write(json.dumps(riga) + "\n")
+    except Exception as e:
+        print(f"Errore scrittura shadow log auto-preferiti: {e}", flush=True)
+
+
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
@@ -3464,6 +3500,7 @@ def processa_partita(fixture):
             tiri_p_casa, tiri_p_ospite = current_stats["Tiri in porta"]
             corner_casa, corner_ospite = current_stats["Corner"]
             tiri_area_casa, tiri_area_ospite = current_stats["Tiri in area"]
+            xg_casa, xg_ospite = estrai_xg(stats_home), estrai_xg(stats_away)
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
             # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
@@ -3484,6 +3521,8 @@ def processa_partita(fixture):
         else:
             current_stats = None
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
+            tiri_area_casa = tiri_area_ospite = 0
+            xg_casa = xg_ospite = None
             log(f"    ⚠️ Statistiche non disponibili da API (lega potrebbe non supportare stats)")
             registra_esito_statistiche(league_country, league_name, False)
 
@@ -3644,9 +3683,23 @@ def processa_partita(fixture):
                     f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti: ritmo alto già al {minuto}' "
                     f"(tiri totali {tiri_totali_partita}, gol {gol_totali}). Rimuovila dai preferiti se non ti interessa seguirla."
                 )
+                registra_shadow_log_auto_preferiti(
+                    fixture_id, home, away, league_name, league_country, minuto,
+                    tiri_totali_partita, (tiri_p_casa + tiri_p_ospite) if current_stats else 0,
+                    (corner_casa + corner_ospite) if current_stats else 0,
+                    (tiri_area_casa + tiri_area_ospite) if current_stats else 0,
+                    xg_casa, xg_ospite, gol_totali, True,
+                )
             elif minuto is not None and minuto > SOGLIA_MINUTO_AUTO_PREFERITI:
                 if not stato_partite[fixture_id].get("auto_preferito_processato"):
                     log(f"    ⭐✖️ Auto-preferiti: finestra chiusa al {minuto}' senza aver mai superato le soglie, non verrà più rivalutata")
+                    registra_shadow_log_auto_preferiti(
+                        fixture_id, home, away, league_name, league_country, minuto,
+                        tiri_totali_partita, (tiri_p_casa + tiri_p_ospite) if current_stats else 0,
+                        (corner_casa + corner_ospite) if current_stats else 0,
+                        (tiri_area_casa + tiri_area_ospite) if current_stats else 0,
+                        xg_casa, xg_ospite, gol_totali, False,
+                    )
                 stato_partite[fixture_id]["auto_preferito_processato"] = True  # finestra chiusa, non ricontrollare più
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
