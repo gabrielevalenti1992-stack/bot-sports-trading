@@ -3881,7 +3881,7 @@ if __name__ == "__main__":
             else:
                 invia_messaggio_telegram(
                     f"Bot attivo - Ciclo #{ciclo_numero}\n"
-                    f"Partite live: {len(partite)} totali, {len(partite_valide)} monitorate"
+                    f"Partite live monitorate: {len(partite_valide)}"
                 )
 
         # Si itera solo sulle partite valide (non su tutte le partite live del mondo): lo sleep(1)
