@@ -141,6 +141,16 @@ DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 900  # 15 minuti
 # regole standard.
 SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 
+# Auto-preferiti: una partita che parte già "a razzo" (tanti tiri o gol nei primissimi minuti)
+# vale la pena seguirla dai preferiti da subito, senza aspettare che l'utente la clicchi a mano
+# tra le tante notifiche normali. Valutata una sola volta per partita (auto_preferito_processato
+# in stato_partite): se non scatta entro la finestra, o se l'utente la rimuove in seguito, non
+# viene più ritentata per la stessa partita.
+AUTO_PREFERITI_ATTIVO = True
+SOGLIA_MINUTO_AUTO_PREFERITI = 20  # entro questo minuto la partita deve già mostrare ritmo alto
+SOGLIA_TIRI_AUTO_PREFERITI = 6  # tiri totali combinati entro quel minuto
+SOGLIA_GOL_AUTO_PREFERITI = 2  # oppure già questi gol combinati entro quel minuto, a prescindere dai tiri
+
 # Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
 # barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
@@ -270,6 +280,10 @@ try:
     SOGLIA_MIN_CAMBIO_PREFERITI = config.get("soglia_min_cambio_preferiti", SOGLIA_MIN_CAMBIO_PREFERITI)
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
+    AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
+    SOGLIA_MINUTO_AUTO_PREFERITI = config.get("soglia_minuto_auto_preferiti", SOGLIA_MINUTO_AUTO_PREFERITI)
+    SOGLIA_TIRI_AUTO_PREFERITI = config.get("soglia_tiri_auto_preferiti", SOGLIA_TIRI_AUTO_PREFERITI)
+    SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -3083,6 +3097,21 @@ def cmd_aggiornastorico(chat_id):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
+def deve_aggiungere_automaticamente_ai_preferiti(tiri_totali, minuto, gol_totali):
+    """Partita che parte già 'a razzo': tanti tiri o gol nei primissimi minuti, segnale che vale
+    la pena seguirla dai preferiti da subito invece di aspettare che l'utente la clicchi a mano
+    tra le tante notifiche normali."""
+    if not AUTO_PREFERITI_ATTIVO:
+        return False
+    if minuto is None or minuto > SOGLIA_MINUTO_AUTO_PREFERITI:
+        return False
+    if tiri_totali >= SOGLIA_TIRI_AUTO_PREFERITI:
+        return True
+    if gol_totali >= SOGLIA_GOL_AUTO_PREFERITI:
+        return True
+    return False
+
+
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
@@ -3434,6 +3463,23 @@ def processa_partita(fixture):
                 invia_messaggio_telegram(
                     f"⭐➡️ {home} vs {away} rimossa automaticamente dai preferiti: nessuna notifica rilevante da {minuti_senza_notifica} minuti. Torna alle notifiche/soglie normali."
                 )
+        elif not stato_partite.get(fixture_id, {}).get("auto_preferito_processato"):
+            # Partita che parte già "a razzo" (tanti tiri o gol nei primissimi minuti): valutata
+            # una sola volta per partita, cosi' se l'utente la rimuove in seguito non viene
+            # riproposta di nuovo entro la stessa finestra di minuti.
+            gol_totali = score_home + score_away
+            tiri_totali_partita = (tiri_casa + tiri_ospite) if current_stats else 0
+            if deve_aggiungere_automaticamente_ai_preferiti(tiri_totali_partita, minuto, gol_totali):
+                FAVORITE_MATCHES.add(str(fixture_id))
+                save_favorites(FAVORITE_MATCHES)
+                stato_partite[fixture_id]["auto_preferito_processato"] = True
+                log(f"    ⭐ Aggiunta automaticamente ai preferiti: ritmo alto al {minuto}' (tiri {tiri_totali_partita}, gol {gol_totali})")
+                invia_messaggio_telegram(
+                    f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti: ritmo alto già al {minuto}' "
+                    f"(tiri totali {tiri_totali_partita}, gol {gol_totali}). Rimuovila dai preferiti se non ti interessa seguirla."
+                )
+            elif minuto is not None and minuto > SOGLIA_MINUTO_AUTO_PREFERITI:
+                stato_partite[fixture_id]["auto_preferito_processato"] = True  # finestra chiusa, non ricontrollare più
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
         if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=evento_forzato, recupero_lungo=recupero_da_segnalare is not None, score_home=score_home, score_away=score_away):
