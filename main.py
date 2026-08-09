@@ -2672,8 +2672,10 @@ def _disegna_grafico_momentum(ax, home_name, away_name, storico, punteggi_casa, 
 
     home_patch = mpatches.Patch(color=color_home, label=home_name)
     away_patch = mpatches.Patch(color=color_away, label=away_name)
+    # -0.32 (non -0.22): con l'asse a minuti reali le etichette "30'"/"HT" cadono spesso proprio
+    # sopra la legenda, e a -0.22 le due righe erano quasi a contatto.
     ax.legend(handles=[home_patch, away_patch], loc='lower center',
-              bbox_to_anchor=(0.5, -0.22), ncol=2, frameon=False,
+              bbox_to_anchor=(0.5, -0.32), ncol=2, frameon=False,
               fontsize=9, labelcolor=color_text)
 
 
@@ -2727,7 +2729,7 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history, goals=Non
         ax.set_title(f"{home_name} vs {away_name} - momentum (tiri, porta, corner, xG)",
                      fontsize=9, color='#e5e5e5', pad=10)
 
-        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.tight_layout(rect=[0, 0.12, 1, 1])
 
         foto_path = os.path.join(os.path.dirname(__file__), f'momentum_{fixture_id}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight',
@@ -2769,7 +2771,7 @@ def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, his
         _disegna_grafico_momentum(ax_momentum, home_name, away_name, storico, punteggi_casa, punteggi_ospite,
                                    eventi_casa, eventi_ospite, recupero_1h, recupero_2h)
 
-        plt.tight_layout(rect=[0, 0.02, 1, 1], h_pad=3.0)
+        plt.tight_layout(rect=[0, 0.05, 1, 1], h_pad=3.0)
 
         foto_path = os.path.join(os.path.dirname(__file__), f'combinato_{fixture_id}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight',
