@@ -1285,7 +1285,26 @@ def aggiorna_leghe_attive(force=False):
     return raw
 
 
+# Statistiche ed eventi non supportano un fetch "bulk" su più partite (a differenza di /fixtures,
+# solo /fixtures/statistics e /fixtures/events restano per-singola-partita), quindi non si può
+# ridurre il numero di chiamate raggruppandole. Quello che invece si può evitare è la chiamata
+# DUPLICATA quando la stessa partita viene richiesta più volte a distanza di pochi secondi: il
+# loop principale la interroga già ogni 60-180s, ma /live, /intensita, /status, /scanner e le 6
+# strategie (tutte comandi manuali) rifacevano la stessa identica chiamata da capo ogni volta che
+# l'utente le lanciava, anche a pochi secondi da un ciclo del loop o da un altro comando. Una
+# cache condivisa (per fixture) con TTL breve rende gratuite queste richieste duplicate senza
+# cambiare la frequenza/freschezza dei dati usati dal loop principale (i suoi cicli sono comunque
+# distanziati almeno 60s, oltre il TTL della cache, quindi per lui è sempre un cache-miss).
+CACHE_TTL_STATS_EVENTI = 50  # secondi, appena sotto il ciclo più stretto (60s dei preferiti)
+_CACHE_STATISTICHE_PARTITA = {}  # fixture_id -> (timestamp, risposta)
+_CACHE_EVENTI_PARTITA = {}  # fixture_id -> (timestamp, risposta)
+
+
 def get_statistiche_partita(fixture_id, debug=False):
+    now = time.time()
+    voce_cache = _CACHE_STATISTICHE_PARTITA.get(fixture_id)
+    if voce_cache and (now - voce_cache[0]) < CACHE_TTL_STATS_EVENTI:
+        return voce_cache[1]
     if not API_FOOTBALL_KEY:
         return None
     url = "https://v3.football.api-sports.io/fixtures/statistics"
@@ -1296,19 +1315,23 @@ def get_statistiche_partita(fixture_id, debug=False):
             log(f"    [DEBUG stats {fixture_id}] risposta OK - {json.dumps(data)[:1500]}")
         else:
             log(f"    [DEBUG stats {fixture_id}] errore: {tipo_errore} - {dettaglio}")
-    if data is None:
-        return None
-    return data.get("response", [])
+    risultato = None if data is None else data.get("response", [])
+    _CACHE_STATISTICHE_PARTITA[fixture_id] = (now, risultato)
+    return risultato
 
 
 def fetch_fixture_events(fixture_id):
+    now = time.time()
+    voce_cache = _CACHE_EVENTI_PARTITA.get(fixture_id)
+    if voce_cache and (now - voce_cache[0]) < CACHE_TTL_STATS_EVENTI:
+        return voce_cache[1]
     if not API_FOOTBALL_KEY:
         return []
     url = "https://v3.football.api-sports.io/fixtures/events"
     data, _, _ = get_api_football(url, {"fixture": fixture_id}, timeout=10, contesto=f"fetch_fixture_events({fixture_id})")
-    if data is None:
-        return []
-    return data.get("response", [])
+    risultato = [] if data is None else data.get("response", [])
+    _CACHE_EVENTI_PARTITA[fixture_id] = (now, risultato)
+    return risultato
 
 
 def extract_goals(events):
@@ -3849,6 +3872,13 @@ def pulisci_partite_terminate(fixture_ids_live):
     if ids_da_rimuovere:
         save_silenced(SILENCED_MATCHES)
         log(f"Partite terminate rimosse: {len(ids_da_rimuovere)}")
+
+    # La cache statistiche/eventi copre anche partite mai entrate in stato_partite (es. richieste
+    # da /status su una partita fuori whitelist, o da un comando prima che il loop la processi):
+    # va ripulita controllando fixture_ids_live direttamente, non solo le chiavi di stato_partite.
+    for cache in (_CACHE_STATISTICHE_PARTITA, _CACHE_EVENTI_PARTITA):
+        for fid in [f for f in cache if f not in fixture_ids_live]:
+            del cache[fid]
 
 
 # =============================================================================
