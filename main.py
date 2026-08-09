@@ -1205,6 +1205,35 @@ def extract_goals(events):
     return goals
 
 
+def calcola_punteggio_ai_gol(goals, home, away):
+    """Per ogni gol (in ordine cronologico) il risultato ESATTO subito dopo quel gol, non il
+    punteggio finale - serve a mostrare "chi ha fatto il 2-1" invece di dover risalire alle
+    notifiche precedenti per capirlo."""
+    risultati = []
+    h = a = 0
+    for g in goals:
+        if g["team"] == home:
+            h += 1
+        elif g["team"] == away:
+            a += 1
+        risultati.append((h, a))
+    return risultati
+
+
+def testo_primo_ultimo_gol(goals, home, away):
+    """Riga "Primo gol"/"Ultimo gol" con squadra e risultato a quel punto. Se c'è un solo gol,
+    "Ultimo gol" non compare (sarebbe ridondante col "Primo gol")."""
+    if not goals:
+        return ""
+    punteggi = calcola_punteggio_ai_gol(goals, home, away)
+    h0, a0 = punteggi[0]
+    testo = f"\nPrimo gol: {goals[0]['minute']}' ({goals[0]['player']}, {goals[0]['team']}) → {h0}-{a0}\n"
+    if len(goals) > 1:
+        h1, a1 = punteggi[-1]
+        testo += f"Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']}, {goals[-1]['team']}) → {h1}-{a1}\n"
+    return testo
+
+
 def extract_cartellini_rossi(events):
     """Cartellini rossi (diretti o secondo giallo) dagli eventi della partita."""
     rossi = []
@@ -3155,11 +3184,7 @@ def processa_partita(fixture):
                     else:
                         foto_path = None
 
-                    goals_text = ""
-                    if goals:
-                        goals_text += f"\nPrimo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
-                        if len(goals) > 1:
-                            goals_text += f"Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
+                    goals_text = testo_primo_ultimo_gol(goals, home, away)
 
                     recupero_parti = []
                     if recupero_1h:
@@ -3301,11 +3326,7 @@ def processa_partita(fixture):
             corner_line = "N/D - N/D"
             freccia = ""
 
-        goals_text = ""
-        if goals:
-            goals_text += f"\nPrimo gol: {goals[0]['minute']}' ({goals[0]['player']})\n"
-            if len(goals) > 1:
-                goals_text += f"Ultimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})\n"
+        goals_text = testo_primo_ultimo_gol(goals, home, away)
 
         recupero_text = ""
         if recupero_da_segnalare:
