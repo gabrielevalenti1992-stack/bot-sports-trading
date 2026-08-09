@@ -3751,6 +3751,13 @@ def processa_partita(fixture):
                 goals, rigori, cartellini_rossi, recupero_1h, recupero_2h)
             if foto_path:
                 nota_momentum = nota_copertura_momentum(history_completo)
+            else:
+                # Storico ancora troppo corto (appena aggiunta ai preferiti: servono
+                # MOMENTUM_MIN_STORICO rilevazioni, una ogni 60s da quando è preferita). Senza
+                # questa nota il grafico momentum sembra "sparito"/rotto invece che semplicemente
+                # non ancora pronto.
+                mancanti = max(0, MOMENTUM_MIN_STORICO - len(history_completo))
+                nota_momentum = f"\n(grafico momentum tra ~{mancanti}': servono ancora {mancanti} rilevazioni)"
         if not foto_path:
             foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
