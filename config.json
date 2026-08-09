@@ -12,6 +12,7 @@
   "peso_intensita_tiri": 1,
   "peso_intensita_porta": 2,
   "peso_intensita_corner": 1,
+  "report_intensita_automatico_attivo": false,
   "intervallo_report_intensita": 900,
   "intervallo_aggiornamento_storico": 604800,
   "storico_max_fixtures_per_run": 30,

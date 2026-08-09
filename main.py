@@ -158,7 +158,9 @@ PESO_INTENSITA_CORNER = 1
 # metrica di qualità del tiro che possiamo usare, non xGOT.
 PESO_MOMENTUM_XG = 10
 
-# Report automatico di intensità: ogni quanto (secondi) inviarlo, una volta che i dati sono pronti
+# Report automatico di intensità: ogni quanto (secondi) inviarlo, una volta che i dati sono pronti.
+# Disattivato di default su richiesta esplicita: resta comunque disponibile a mano con /intensita.
+REPORT_INTENSITA_AUTOMATICO_ATTIVO = False
 INTERVALLO_REPORT_INTENSITA = 900  # 15 minuti
 ULTIMO_REPORT_INTENSITA = 0
 
@@ -244,6 +246,7 @@ try:
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
     PESO_INTENSITA_PORTA = config.get("peso_intensita_porta", PESO_INTENSITA_PORTA)
     PESO_INTENSITA_CORNER = config.get("peso_intensita_corner", PESO_INTENSITA_CORNER)
+    REPORT_INTENSITA_AUTOMATICO_ATTIVO = config.get("report_intensita_automatico_attivo", REPORT_INTENSITA_AUTOMATICO_ATTIVO)
     INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
     INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
     STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
@@ -2587,6 +2590,8 @@ def invia_report_intensita_automatico(partite_valide):
     la classifica di intensità ogni INTERVALLO_REPORT_INTENSITA secondi, riusando i dati già
     scaricati in questo ciclo (nessuna chiamata API aggiuntiva)."""
     global ULTIMO_REPORT_INTENSITA
+    if not REPORT_INTENSITA_AUTOMATICO_ATTIVO:
+        return
     now = time.time()
     if now - ULTIMO_REPORT_INTENSITA < INTERVALLO_REPORT_INTENSITA:
         return
