@@ -1535,7 +1535,7 @@ def cmd_live(chat_id):
             json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento.", "parse_mode": "Markdown"}, timeout=5)
         return
     MAX_PARTITE_MOSTRATE = 20
-    header = f"Partite live monitorate: {len(partite_cmd)} (su {len(partite_cmd_raw)} totali)"
+    header = f"Partite live monitorate: {len(partite_cmd)}"
     match_lines = []
     n_con_dati = 0
     for f in partite_cmd[:MAX_PARTITE_MOSTRATE]:
