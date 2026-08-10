@@ -161,6 +161,13 @@ SOGLIA_GOL_AUTO_PREFERITI = 2  # oppure già questi gol combinati entro quel min
 # soglie sopra con percentili veri invece che a occhio, una volta accumulate abbastanza partite.
 SHADOW_LOG_AUTO_PREFERITI_FILE = data_path("shadow_log_auto_preferiti.jsonl")
 
+# Shadow-log valore: stesso principio (silenzioso, nessun comportamento visibile) ma per validare
+# in futuro se la probabilità no-vig del mercato pre-match, incrociata con le statistiche live,
+# avrebbe previsto meglio l'esito reale - una riga "snapshot" ad ogni notifica live e una riga
+# "risultato_finale" a fine partita, da incrociare offline per fixture_id. Nessuna soglia o
+# semaforo finché non ci sono abbastanza partite reali per calibrarli (vedi Fase 2).
+SHADOW_LOG_VALORE_FILE = data_path("shadow_log_valore.jsonl")
+
 # Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
 # barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
@@ -1441,13 +1448,40 @@ def quote_1x2_per_fixture(fixture_id):
     return None
 
 
+def calcola_probabilita_no_vig(quote):
+    """Toglie il margine del bookmaker (l'overround: 1/quota_casa + 1/quota_pareggio +
+    1/quota_ospite somma sempre più di 100%) dalle 3 quote, normalizzando alla probabilità "vera"
+    secondo il mercato. Pura aritmetica sui dati già scaricati, nessuna stima: a differenza di
+    qualunque punteggio "momentum", questo numero è sempre corretto per definizione."""
+    if not quote:
+        return None
+    try:
+        implicite = {
+            "casa": 1 / quote["casa"],
+            "pareggio": 1 / quote["pareggio"],
+            "ospite": 1 / quote["ospite"],
+        }
+    except (KeyError, ZeroDivisionError, TypeError):
+        return None
+    overround = sum(implicite.values())
+    if overround <= 0:
+        return None
+    return {chiave: valore / overround for chiave, valore in implicite.items()}
+
+
 def testo_quote_1x2(quote):
     if quote is False:
         return "\nQuote 1X2 iniziali: non pubblicate\n"
     if not quote:
         return ""
-    return (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
-            f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
+    riga_quote = (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
+                  f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
+    no_vig = calcola_probabilita_no_vig(quote)
+    if not no_vig:
+        return riga_quote
+    riga_no_vig = (f"Probabilità di mercato (no-vig): "
+                   f"1 {no_vig['casa']:.0%} - X {no_vig['pareggio']:.0%} - 2 {no_vig['ospite']:.0%}\n")
+    return riga_quote + riga_no_vig
 
 
 def get_leghe_con_copertura_statistiche_raw():
@@ -3509,34 +3543,75 @@ def deve_aggiungere_automaticamente_ai_preferiti(tiri_totali, minuto, gol_totali
     return False
 
 
+def _appendi_shadow_log(percorso_file, riga):
+    """Appende una riga JSON a un file di shadow-log (raccolta dati per analisi offline, nessun
+    effetto sul comportamento del bot). Helper condiviso da tutti gli shadow-log del bot, per non
+    duplicare lo stesso apri-scrivi-gestisci-errore in ognuno."""
+    try:
+        with open(percorso_file, "a") as f:
+            f.write(json.dumps(riga) + "\n")
+    except Exception as e:
+        print(f"Errore scrittura shadow log ({percorso_file}): {e}", flush=True)
+
+
 def registra_shadow_log_auto_preferiti(fixture_id, home, away, league_name, league_country, minuto,
                                         tiri_totali, tiri_porta, corner, tiri_area, xg_casa, xg_ospite,
                                         gol_totali, scattato):
-    """Appende una riga JSON con le statistiche reali osservate al momento della valutazione
-    auto-preferiti (scattata o finestra chiusa senza scattare), senza influire sul comportamento
-    del bot. Puramente per analisi offline successiva."""
-    try:
-        riga = {
-            "timestamp": time.time(),
-            "fixture_id": fixture_id,
-            "home": home,
-            "away": away,
-            "league": league_name,
-            "league_country": league_country,
-            "minuto": minuto,
-            "tiri_totali": tiri_totali,
-            "tiri_porta": tiri_porta,
-            "corner": corner,
-            "tiri_area": tiri_area,
-            "xg_casa": xg_casa,
-            "xg_ospite": xg_ospite,
-            "gol_totali": gol_totali,
-            "auto_preferiti_scattato": scattato,
-        }
-        with open(SHADOW_LOG_AUTO_PREFERITI_FILE, "a") as f:
-            f.write(json.dumps(riga) + "\n")
-    except Exception as e:
-        print(f"Errore scrittura shadow log auto-preferiti: {e}", flush=True)
+    """Registra le statistiche reali osservate al momento della valutazione auto-preferiti
+    (scattata o finestra chiusa senza scattare). Puramente per analisi offline successiva."""
+    _appendi_shadow_log(SHADOW_LOG_AUTO_PREFERITI_FILE, {
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "home": home,
+        "away": away,
+        "league": league_name,
+        "league_country": league_country,
+        "minuto": minuto,
+        "tiri_totali": tiri_totali,
+        "tiri_porta": tiri_porta,
+        "corner": corner,
+        "tiri_area": tiri_area,
+        "xg_casa": xg_casa,
+        "xg_ospite": xg_ospite,
+        "gol_totali": gol_totali,
+        "auto_preferiti_scattato": scattato,
+    })
+
+
+def registra_shadow_log_valore_snapshot(fixture_id, home, away, minuto, score_home, score_away,
+                                         probabilita_no_vig, stats_15min):
+    """Snapshot ad una notifica live: probabilità no-vig del mercato pre-match + statistiche
+    ultimi 15 min già calcolate altrove (nessun ricalcolo). Da incrociare offline col risultato
+    finale (registra_shadow_log_valore_risultato) per capire, con dati reali, se le statistiche
+    live aggiungono potere predittivo alla sola quota pre-match - prima di costruire qualunque
+    soglia o semaforo su questo (vedi Fase 2)."""
+    _appendi_shadow_log(SHADOW_LOG_VALORE_FILE, {
+        "tipo": "snapshot",
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "home": home,
+        "away": away,
+        "minuto": minuto,
+        "score_home": score_home,
+        "score_away": score_away,
+        "probabilita_no_vig": probabilita_no_vig,
+        "stats_15min": stats_15min,
+    })
+
+
+def registra_shadow_log_valore_risultato(fixture_id, score_home, score_away):
+    """Riga "risultato_finale" per lo stesso fixture_id degli snapshot sopra, scritta una sola
+    volta quando la partita termina (stesso punto in cui il bot manda già la notifica di
+    risultato finale)."""
+    esito = "1" if score_home > score_away else ("2" if score_away > score_home else "X")
+    _appendi_shadow_log(SHADOW_LOG_VALORE_FILE, {
+        "tipo": "risultato_finale",
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "score_home": score_home,
+        "score_away": score_away,
+        "esito": esito,
+    })
 
 
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
@@ -3842,6 +3917,7 @@ def processa_partita(fixture):
 
                 chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
                 invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
+                registra_shadow_log_valore_risultato(fixture_id, score_home, score_away)
 
                 SILENCED_MATCHES.pop(str(fixture_id), None)
                 save_silenced(SILENCED_MATCHES)
@@ -4031,7 +4107,12 @@ def processa_partita(fixture):
         # Il totale cumulativo della partita (tiri, porta, corner, area) si vede ora nel grafico
         # allegato (barre proporzionali, sempre presenti: da sole per le non preferite, impilate
         # sopra il momentum per i preferiti) - non serve ripeterlo anche in testo.
-        quote_text = testo_quote_1x2(quote_1x2_per_fixture(fixture_id))
+        quote_iniziali = quote_1x2_per_fixture(fixture_id)
+        quote_text = testo_quote_1x2(quote_iniziali)
+        probabilita_no_vig = calcola_probabilita_no_vig(quote_iniziali) if quote_iniziali else None
+        if probabilita_no_vig:
+            registra_shadow_log_valore_snapshot(
+                fixture_id, home, away, minuto, score_home, score_away, probabilita_no_vig, stats_dict)
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
