@@ -2205,10 +2205,11 @@ def cmd_momentum(chat_id, query):
 
 def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
     """Bottone "📈 Momentum" cliccato su una notifica: invece di mandare un grafico come messaggio
-    a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con la versione
-    combinata barre+momentum in un'unica immagine - così il grafico compare esattamente nel
-    messaggio su cui si è cliccato, non altrove in chat. Se lo storico non basta ancora, lascia
-    la notifica invariata (niente da mostrare di meglio) e risponde solo con la spiegazione."""
+    a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con il solo grafico
+    momentum (non combinato con le barre: più leggero, un'immagine sola, nessuna chiamata
+    statistiche in più) - così il grafico compare esattamente nel messaggio su cui si è cliccato,
+    non altrove in chat. Se lo storico non basta ancora, lascia la notifica invariata (niente da
+    mostrare di meglio) e risponde solo con la spiegazione."""
     stato = stato_partite.get(fixture_id)
     if not stato:
         requests.post(
@@ -2218,16 +2219,10 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
 
     history = stato.get("history", [])
     home, away = stato.get("home", "?"), stato.get("away", "?")
-    stats_raw = get_statistiche_partita(fixture_id)
-    if stats_raw and len(stats_raw) >= 2:
-        current_stats = estrai_current_stats(stats_raw[0].get("statistics", []), stats_raw[1].get("statistics", []))
-    else:
-        current_stats = {"Tiri totali": (0, 0), "Tiri in porta": (0, 0), "Corner": (0, 0), "Tiri in area": (0, 0)}
 
-    foto_path = genera_grafico_combinato(
-        fixture_id, home, away, current_stats, history,
-        stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"),
-        stato.get("recupero_1h"), stato.get("recupero_2h"))
+    foto_path = genera_grafico_momentum(
+        fixture_id, home, away, history,
+        stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"))
 
     if not foto_path:
         requests.post(
