@@ -1474,18 +1474,15 @@ def calcola_probabilita_no_vig(quote):
 
 
 def testo_quote_1x2(quote):
+    """Solo la quota grezza nel messaggio: la probabilità no-vig si continua a calcolare e
+    registrare nello shadow-log (vedi registra_shadow_log_valore_snapshot) per la validazione
+    futura, ma non si mostra ancora in chat finché non è stata verificata su dati reali (Fase 2)."""
     if quote is False:
         return "\nQuote 1X2 iniziali: non pubblicate\n"
     if not quote:
         return ""
-    riga_quote = (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
-                  f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
-    no_vig = calcola_probabilita_no_vig(quote)
-    if not no_vig:
-        return riga_quote
-    riga_no_vig = (f"Probabilità di mercato (no-vig): "
-                   f"1 {no_vig['casa']:.0%} - X {no_vig['pareggio']:.0%} - 2 {no_vig['ospite']:.0%}\n")
-    return riga_quote + riga_no_vig
+    return (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
+            f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
 
 
 def get_leghe_con_copertura_statistiche_raw():
