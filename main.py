@@ -1005,9 +1005,13 @@ def invia_messaggio_telegram(testo, chat_id=None):
 
 
 def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=None):
+    """Ritorna il message_id del messaggio inviato (o None se non disponibile/fallito) - usato
+    dal chiamante per ricordare quale didascalia è stata mandata a quale messaggio, così il
+    bottone "📈 Momentum" può in seguito sostituire solo la foto senza perdere il testo con tutti
+    i dati (quote, statistiche, gol...) già inviato in quella notifica."""
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {messaggio[:50]}")
-        return
+        return None
     destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         if foto_path and os.path.exists(foto_path):
@@ -1025,11 +1029,16 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
                 log(f"Telegram foto -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
             if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
                 if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
-                    invia_notifica_telegram(foto_path, messaggio, reply_markup=reply_markup, chat_id=TELEGRAM_CHAT_ID)
+                    return invia_notifica_telegram(foto_path, messaggio, reply_markup=reply_markup, chat_id=TELEGRAM_CHAT_ID)
+            if response.status_code == 200:
+                return response.json().get("result", {}).get("message_id")
+            return None
         else:
             invia_messaggio_telegram(messaggio, chat_id=destinatario)
+            return None
     except Exception as e:
         log(f"Errore invio Telegram: {e}")
+        return None
 
 
 def _lega_in_whitelist_statica(nome, league_country):
@@ -2236,9 +2245,15 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
 
     try:
         with open(foto_path, 'rb') as photo:
-            caption = (f"{home} {stato.get('score_home', '?')}-{stato.get('score_away', '?')} {away}\n"
-                       f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
-                       f"{stato.get('last_minute', '?')}'{nota_copertura_momentum(history)}")
+            # Riusa la didascalia esatta già mandata con questa notifica (quote, statistiche,
+            # gol, tutto quello che c'era) - si perde solo se il bot è stato riavviato tra
+            # l'invio e il click (stato in memoria perso), nel qual caso si ricostruisce una
+            # versione minima piuttosto che lasciare senza didascalia.
+            caption = stato.get("didascalie_notifiche", {}).get(message_id)
+            if not caption:
+                caption = (f"{home} {stato.get('score_home', '?')}-{stato.get('score_away', '?')} {away}\n"
+                           f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
+                           f"{stato.get('last_minute', '?')}'{nota_copertura_momentum(history)}")
             media = {"type": "photo", "media": "attach://photo", "caption": caption}
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageMedia",
@@ -4187,7 +4202,12 @@ def processa_partita(fixture):
         mostra_momentum = len(history_per_bottone) >= MOMENTUM_MIN_STORICO
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
-        invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
+        message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
+        if message_id_inviato and mostra_momentum:
+            # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
+            # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
+            # resta quello originale, invece di essere rimpiazzato da un testo minimo.
+            stato_partite[fixture_id].setdefault("didascalie_notifiche", {})[message_id_inviato] = messaggio
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
         stato_partite[fixture_id].update({
