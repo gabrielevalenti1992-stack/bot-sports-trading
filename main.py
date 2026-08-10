@@ -1292,6 +1292,7 @@ def aggiorna_piano_giornata_se_serve():
 # dell'API (/odds/bookmakers, /odds/bets) invece di un ID hardcoded indovinato.
 # =============================================================================
 RIFERIMENTI_ODDS_TTL = 86400  # 24 ore: bookmaker/mercati non cambiano ID durante la giornata
+RIFERIMENTI_ODDS_RETRY_FALLIMENTO = 900  # 15 minuti prima di ritentare dopo un fallimento (vedi sotto)
 _RIFERIMENTI_ODDS_CACHE = {"bookmaker_id": None, "bet_id": None, "timestamp": 0}
 
 
@@ -1304,14 +1305,20 @@ def _trova_id_per_nome(elementi, nome_cercato):
 
 
 def risolvi_riferimenti_odds():
-    """Risolve una sola volta al giorno (cache 24h) l'ID del bookmaker e del mercato configurati
-    per nome, interrogando /odds/bookmakers e /odds/bets. Se l'API non risponde mantiene i
-    riferimenti già trovati in precedenza (fallback, stesso criterio di aggiorna_leghe_attive),
-    così un singolo errore di rete non blocca tutte le quote per il resto della giornata."""
+    """Risolve l'ID del bookmaker e del mercato configurati per nome, interrogando
+    /odds/bookmakers e /odds/bets. Cache 24h in caso di successo; in caso di fallimento (nome non
+    trovato, errore di rete, rate-limit) mette comunque in "raffreddamento" il tentativo per
+    RIFERIMENTI_ODDS_RETRY_FALLIMENTO secondi invece di ritentare subito - altrimenti, chiamata da
+    dentro il ciclo di recupero quote (una volta per ogni partita del piano), un singolo fallimento
+    scatenerebbe 2 chiamate extra ad ogni partita del batch invece di una sola in tutto il giorno,
+    rischiando di far scattare proprio il rate-limit per-minuto che si vuole evitare."""
     now = time.time()
     if _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and _RIFERIMENTI_ODDS_CACHE["bet_id"] and \
             (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_TTL:
         return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
+    if not _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and \
+            (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_RETRY_FALLIMENTO:
+        return None, None
 
     data_bm, _, _ = get_api_football(
         "https://v3.football.api-sports.io/odds/bookmakers", {}, timeout=15, contesto="risolvi_riferimenti_odds(bookmakers)")
@@ -1327,8 +1334,9 @@ def risolvi_riferimenti_odds():
         _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
         log(f"Riferimenti quote risolti: bookmaker '{ODDS_BOOKMAKER_NOME}'={bookmaker_id}, mercato '{ODDS_BET_NOME}'={bet_id}")
     else:
+        _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
         log(f"Riferimenti quote non risolti (bookmaker={bookmaker_id}, bet={bet_id}) - "
-            f"mantengo eventuali riferimenti precedenti, verificare i nomi in config.json")
+            f"ritento tra {RIFERIMENTI_ODDS_RETRY_FALLIMENTO // 60} min, verificare i nomi in config.json")
 
     return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
 
@@ -1379,8 +1387,12 @@ def recupera_quote_1x2(fixture_id):
 
 def _recupero_quote_iniziali_worker(piano):
     """Thread separato (non blocca la generazione del piano né il loop live): primo tentativo di
-    quota per ogni partita del giorno, con un piccolo sleep tra una chiamata e l'altra per
-    restare ben sotto il rate-limit per-minuto anche con piani da decine di partite."""
+    quota per ogni partita del giorno, con uno sleep tra una chiamata e l'altra per restare ben
+    sotto il rate-limit per-minuto anche con piani da decine di partite. Stesso ritmo (1s) usato
+    dal loop live tra una partita e l'altra: questo thread gira in parallelo a quel loop, quindi
+    le loro chiamate si sommano nella stessa finestra di tempo - un ritmo più aggressivo qui
+    rischierebbe di far scattare il rate-limit anche quando il loop live da solo resterebbe sotto
+    soglia."""
     trovate = 0
     partite = piano.get("partite", [])
     for partita in partite:
@@ -1388,7 +1400,7 @@ def _recupero_quote_iniziali_worker(piano):
         if quote:
             partita["quote_1x2"] = quote
             trovate += 1
-        time.sleep(0.3)
+        time.sleep(1)
     salva_piano_giornata(piano)
     log(f"Quote 1X2 iniziali: {trovate}/{len(partite)} partite con quota trovata al primo tentativo")
 
