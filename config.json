@@ -28,6 +28,9 @@
   "intervallo_ciclo_morto": 1800,
   "intervallo_ciclo_momentum": 60,
   "soglia_recupero_lungo_minuti": 3,
+  "odds_bookmaker_nome": "Bet365",
+  "odds_bet_nome": "Match Winner",
+  "odds_refresh_minuti_prima_kickoff": 90,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",

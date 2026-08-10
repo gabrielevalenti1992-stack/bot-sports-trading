@@ -209,6 +209,13 @@ INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una fines
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
 
+# Quote 1X2 pre-partita: un solo bookmaker fisso (non "il primo che risponde", altrimenti il
+# numero mostrato non è confrontabile da una partita all'altra) e un solo mercato (Match Winner),
+# risolti per nome sui riferimenti reali dell'API invece di un ID hardcoded indovinato.
+ODDS_BOOKMAKER_NOME = "Bet365"
+ODDS_BET_NOME = "Match Winner"
+ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca meno di così al kickoff
+
 # Minuti di recupero: se superano questa soglia in un tempo (1° o 2°), la partita merita una
 # notifica dedicata anche se le altre soglie (tiri, momentum...) non sono soddisfatte, perché più
 # recupero significa più tempo utile per operare su una squadra in attacco. Per i preferiti la
@@ -311,6 +318,9 @@ try:
     INTERVALLO_CICLO_MORTO = config.get("intervallo_ciclo_morto", INTERVALLO_CICLO_MORTO)
     INTERVALLO_CICLO_MOMENTUM = config.get("intervallo_ciclo_momentum", INTERVALLO_CICLO_MOMENTUM)
     SOGLIA_RECUPERO_LUNGO_MINUTI = config.get("soglia_recupero_lungo_minuti", SOGLIA_RECUPERO_LUNGO_MINUTI)
+    ODDS_BOOKMAKER_NOME = config.get("odds_bookmaker_nome", ODDS_BOOKMAKER_NOME)
+    ODDS_BET_NOME = config.get("odds_bet_nome", ODDS_BET_NOME)
+    ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = config.get("odds_refresh_minuti_prima_kickoff", ODDS_REFRESH_MINUTI_PRIMA_KICKOFF)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
@@ -1239,8 +1249,169 @@ def aggiorna_piano_giornata_se_serve():
     if nuovo_piano is not None:
         PIANO_GIORNATA = nuovo_piano
         salva_piano_giornata(PIANO_GIORNATA)
+        avvia_recupero_quote_iniziali(PIANO_GIORNATA)
     else:
         log("Generazione piano giornata fallita (errore API), riprovo al prossimo ciclo")
+
+
+# =============================================================================
+# QUOTE 1X2 PRE-PARTITA: valore testuale (non un grafico) delle quote di apertura, per farsi
+# un'idea di come il mercato valuta la partita prima che inizi. Recuperate in due passaggi
+# separati dal loop live (mai dentro il ciclo di monitoraggio a 60-180s):
+#   1) al momento del piano giornata (una volta al giorno) - un primo tentativo, in un thread a
+#      parte per non bloccare la generazione del piano stesso;
+#   2) un refresh mirato quando manca meno di ODDS_REFRESH_MINUTI_PRIMA_KICKOFF al calcio
+#      d'inizio, così la quota mostrata è quella più vicina al closing (il riferimento più
+#      indicativo per il "valore") invece di quella di ore/giorni prima.
+# Bookmaker e mercato sono fissi (un solo bookmaker sempre uguale, altrimenti il numero mostrato
+# non è confrontabile da una partita all'altra) ma risolti per NOME sui riferimenti reali
+# dell'API (/odds/bookmakers, /odds/bets) invece di un ID hardcoded indovinato.
+# =============================================================================
+RIFERIMENTI_ODDS_TTL = 86400  # 24 ore: bookmaker/mercati non cambiano ID durante la giornata
+_RIFERIMENTI_ODDS_CACHE = {"bookmaker_id": None, "bet_id": None, "timestamp": 0}
+
+
+def _trova_id_per_nome(elementi, nome_cercato):
+    nome_cercato = nome_cercato.strip().lower()
+    for el in elementi:
+        if (el.get("name") or "").strip().lower() == nome_cercato:
+            return el.get("id")
+    return None
+
+
+def risolvi_riferimenti_odds():
+    """Risolve una sola volta al giorno (cache 24h) l'ID del bookmaker e del mercato configurati
+    per nome, interrogando /odds/bookmakers e /odds/bets. Se l'API non risponde mantiene i
+    riferimenti già trovati in precedenza (fallback, stesso criterio di aggiorna_leghe_attive),
+    così un singolo errore di rete non blocca tutte le quote per il resto della giornata."""
+    now = time.time()
+    if _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and _RIFERIMENTI_ODDS_CACHE["bet_id"] and \
+            (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_TTL:
+        return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
+
+    data_bm, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/odds/bookmakers", {}, timeout=15, contesto="risolvi_riferimenti_odds(bookmakers)")
+    data_bet, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/odds/bets", {}, timeout=15, contesto="risolvi_riferimenti_odds(bets)")
+
+    bookmaker_id = _trova_id_per_nome(data_bm.get("response", []), ODDS_BOOKMAKER_NOME) if data_bm else None
+    bet_id = _trova_id_per_nome(data_bet.get("response", []), ODDS_BET_NOME) if data_bet else None
+
+    if bookmaker_id and bet_id:
+        _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] = bookmaker_id
+        _RIFERIMENTI_ODDS_CACHE["bet_id"] = bet_id
+        _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
+        log(f"Riferimenti quote risolti: bookmaker '{ODDS_BOOKMAKER_NOME}'={bookmaker_id}, mercato '{ODDS_BET_NOME}'={bet_id}")
+    else:
+        log(f"Riferimenti quote non risolti (bookmaker={bookmaker_id}, bet={bet_id}) - "
+            f"mantengo eventuali riferimenti precedenti, verificare i nomi in config.json")
+
+    return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
+
+
+def recupera_quote_1x2(fixture_id):
+    """Quote 1X2 pre-match per una singola fixture dal bookmaker/mercato configurati. Ritorna un
+    dict {'casa','pareggio','ospite','bookmaker'} se trovate, altrimenti None (nessuna quota
+    pubblicata per ora, oppure errore/lega non coperta): non distingue i due casi qui, ci pensa
+    il chiamante (Passo A le lascia "da ritentare", Passo B le marca definitive)."""
+    bookmaker_id, bet_id = risolvi_riferimenti_odds()
+    if not bookmaker_id or not bet_id:
+        return None
+
+    data, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/odds",
+        {"fixture": fixture_id, "bookmaker": bookmaker_id, "bet": bet_id},
+        timeout=15, contesto=f"recupera_quote_1x2({fixture_id})")
+    if not data:
+        return None
+
+    response = data.get("response") or []
+    if not response:
+        return None
+    bookmakers = response[0].get("bookmakers") or []
+    if not bookmakers:
+        return None
+    bets = bookmakers[0].get("bets") or []
+    if not bets:
+        return None
+    valori = bets[0].get("values") or []
+
+    quote = {}
+    etichette = {"home": "casa", "draw": "pareggio", "away": "ospite"}
+    for v in valori:
+        chiave = etichette.get((v.get("value") or "").strip().lower())
+        if not chiave:
+            continue
+        try:
+            quote[chiave] = float(v.get("odd"))
+        except (TypeError, ValueError):
+            continue
+
+    if not all(k in quote for k in ("casa", "pareggio", "ospite")):
+        return None
+    quote["bookmaker"] = bookmakers[0].get("name") or ODDS_BOOKMAKER_NOME
+    return quote
+
+
+def _recupero_quote_iniziali_worker(piano):
+    """Thread separato (non blocca la generazione del piano né il loop live): primo tentativo di
+    quota per ogni partita del giorno, con un piccolo sleep tra una chiamata e l'altra per
+    restare ben sotto il rate-limit per-minuto anche con piani da decine di partite."""
+    trovate = 0
+    partite = piano.get("partite", [])
+    for partita in partite:
+        quote = recupera_quote_1x2(partita["fixture_id"])
+        if quote:
+            partita["quote_1x2"] = quote
+            trovate += 1
+        time.sleep(0.3)
+    salva_piano_giornata(piano)
+    log(f"Quote 1X2 iniziali: {trovate}/{len(partite)} partite con quota trovata al primo tentativo")
+
+
+def avvia_recupero_quote_iniziali(piano):
+    threading.Thread(target=_recupero_quote_iniziali_worker, args=(piano,), daemon=True).start()
+
+
+def aggiorna_quote_prepartita_imminenti():
+    """Chiamata ad ogni ciclo del loop principale (nessuna chiamata API se nessuna partita è
+    vicina al kickoff): quando manca meno di ODDS_REFRESH_MINUTI_PRIMA_KICKOFF minuti, rifà la
+    quota una seconda volta (più vicina al closing) e la marca definitiva - se anche qui non
+    c'è nulla, smette di ritentare e lo mostra esplicitamente come "non pubblicate" invece di
+    lasciare un campo vuoto senza spiegazione."""
+    now_ts = time.time()
+    finestra_sec = ODDS_REFRESH_MINUTI_PRIMA_KICKOFF * 60
+    modificato = False
+    for partita in PIANO_GIORNATA.get("partite", []):
+        kickoff_ts = partita.get("kickoff_ts")
+        if not kickoff_ts or partita.get("quote_refresh_fatto"):
+            continue
+        if not (0 <= kickoff_ts - now_ts <= finestra_sec):
+            continue
+        quote = recupera_quote_1x2(partita["fixture_id"])
+        partita["quote_1x2"] = quote if quote else False
+        partita["quote_refresh_fatto"] = True
+        modificato = True
+        log(f"Quote 1X2 refresh pre-kickoff: {partita.get('home', '?')} vs {partita.get('away', '?')} "
+            f"-> {'trovate' if quote else 'non disponibili'}")
+    if modificato:
+        salva_piano_giornata(PIANO_GIORNATA)
+
+
+def quote_1x2_per_fixture(fixture_id):
+    for partita in PIANO_GIORNATA.get("partite", []):
+        if partita.get("fixture_id") == fixture_id:
+            return partita.get("quote_1x2")
+    return None
+
+
+def testo_quote_1x2(quote):
+    if quote is False:
+        return "\nQuote 1X2 iniziali: non pubblicate\n"
+    if not quote:
+        return ""
+    return (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
+            f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
 
 
 def get_leghe_con_copertura_statistiche_raw():
@@ -3824,11 +3995,13 @@ def processa_partita(fixture):
         # Il totale cumulativo della partita (tiri, porta, corner, area) si vede ora nel grafico
         # allegato (barre proporzionali, sempre presenti: da sole per le non preferite, impilate
         # sopra il momentum per i preferiti) - non serve ripeterlo anche in testo.
+        quote_text = testo_quote_1x2(quote_1x2_per_fixture(fixture_id))
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
             f"Risultato: {score_home} - {score_away}\n"
+            f"{quote_text}"
             f"{goals_text}"
             f"{cartellini_text}"
             f"{rigori_text}"
@@ -3950,6 +4123,7 @@ if __name__ == "__main__":
             continue
 
         aggiorna_piano_giornata_se_serve()
+        aggiorna_quote_prepartita_imminenti()
 
         ciclo_numero += 1
         log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
