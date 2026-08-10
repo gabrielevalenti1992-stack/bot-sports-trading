@@ -161,6 +161,13 @@ SOGLIA_GOL_AUTO_PREFERITI = 2  # oppure già questi gol combinati entro quel min
 # soglie sopra con percentili veri invece che a occhio, una volta accumulate abbastanza partite.
 SHADOW_LOG_AUTO_PREFERITI_FILE = data_path("shadow_log_auto_preferiti.jsonl")
 
+# Shadow-log valore: stesso principio (silenzioso, nessun comportamento visibile) ma per validare
+# in futuro se la probabilità no-vig del mercato pre-match, incrociata con le statistiche live,
+# avrebbe previsto meglio l'esito reale - una riga "snapshot" ad ogni notifica live e una riga
+# "risultato_finale" a fine partita, da incrociare offline per fixture_id. Nessuna soglia o
+# semaforo finché non ci sono abbastanza partite reali per calibrarli (vedi Fase 2).
+SHADOW_LOG_VALORE_FILE = data_path("shadow_log_valore.jsonl")
+
 # Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
 # barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
@@ -208,6 +215,23 @@ MARGINE_PRE_KICKOFF_MINUTI = 10  # anticipo con cui il ciclo torna "attivo" prim
 INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una finestra attiva (come oggi)
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
+
+# Quote 1X2 pre-partita: un solo bookmaker fisso (non "il primo che risponde", altrimenti il
+# numero mostrato non è confrontabile da una partita all'altra) e un solo mercato (Match Winner),
+# risolti per nome sui riferimenti reali dell'API invece di un ID hardcoded indovinato.
+ODDS_BOOKMAKER_NOME = "Bet365"
+ODDS_BET_NOME = "Match Winner"
+ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca meno di così al kickoff
+
+# Pausa automatica notturna: fuori da questa fascia (ora locale Italia) il loop principale non fa
+# nessuna chiamata API e non manda notifiche, esattamente come /stop manuale - ma è un meccanismo
+# indipendente (nessuno stato salvato su disco, nessuna interazione con /stop o /riprendi): si
+# ricalcola ogni ciclo dall'orologio, quindi non rischia di confondersi con una pausa manuale
+# dell'utente (es. un /stop per un weekend intero non viene "riattivato" da questo alle 12).
+ORARIO_ATTIVO_INIZIO_ORA = 12
+ORARIO_ATTIVO_INIZIO_MINUTO = 0
+ORARIO_ATTIVO_FINE_ORA = 23
+ORARIO_ATTIVO_FINE_MINUTO = 30
 
 # Minuti di recupero: se superano questa soglia in un tempo (1° o 2°), la partita merita una
 # notifica dedicata anche se le altre soglie (tiri, momentum...) non sono soddisfatte, perché più
@@ -311,6 +335,13 @@ try:
     INTERVALLO_CICLO_MORTO = config.get("intervallo_ciclo_morto", INTERVALLO_CICLO_MORTO)
     INTERVALLO_CICLO_MOMENTUM = config.get("intervallo_ciclo_momentum", INTERVALLO_CICLO_MOMENTUM)
     SOGLIA_RECUPERO_LUNGO_MINUTI = config.get("soglia_recupero_lungo_minuti", SOGLIA_RECUPERO_LUNGO_MINUTI)
+    ODDS_BOOKMAKER_NOME = config.get("odds_bookmaker_nome", ODDS_BOOKMAKER_NOME)
+    ODDS_BET_NOME = config.get("odds_bet_nome", ODDS_BET_NOME)
+    ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = config.get("odds_refresh_minuti_prima_kickoff", ODDS_REFRESH_MINUTI_PRIMA_KICKOFF)
+    ORARIO_ATTIVO_INIZIO_ORA = config.get("orario_attivo_inizio_ora", ORARIO_ATTIVO_INIZIO_ORA)
+    ORARIO_ATTIVO_INIZIO_MINUTO = config.get("orario_attivo_inizio_minuto", ORARIO_ATTIVO_INIZIO_MINUTO)
+    ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
+    ORARIO_ATTIVO_FINE_MINUTO = config.get("orario_attivo_fine_minuto", ORARIO_ATTIVO_FINE_MINUTO)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
@@ -1217,21 +1248,35 @@ def dentro_finestra_attiva(piano, now_ts=None):
     return False
 
 
+def dentro_orario_attivo(now_it=None):
+    """True se l'ora locale italiana corrente cade nella fascia ORARIO_ATTIVO_* (default
+    12:00-23:30). Nessuna eccezione per partite già in corso a cavallo del limite: fuori fascia
+    il bot si ferma comunque, come richiesto."""
+    now_it = now_it if now_it is not None else datetime.datetime.now(ZoneInfo("Europe/Rome"))
+    inizio = now_it.replace(hour=ORARIO_ATTIVO_INIZIO_ORA, minute=ORARIO_ATTIVO_INIZIO_MINUTO, second=0, microsecond=0)
+    fine = now_it.replace(hour=ORARIO_ATTIVO_FINE_ORA, minute=ORARIO_ATTIVO_FINE_MINUTO, second=0, microsecond=0)
+    return inizio <= now_it < fine
+
+
 def aggiorna_piano_giornata_se_serve():
     """Chiamata ad ogni ciclo del loop principale (nessun costo se non serve rigenerare). Rigenera
-    il piano una volta al giorno, solo durante l'ora esatta configurata (ora locale Italia).
-    Non genera piu' anche al primo avvio a qualunque ora: il filesystem di Render non e'
-    persistente tra un riavvio e l'altro, quindi dopo un riavvio il piano risulta sempre "mai
-    generato" e senza questo limite ogni riavvio (a qualsiasi ora) provocava una chiamata
-    /fixtures?date= immediata. In attesa del piano il ciclo principale tratta comunque ogni
-    momento come finestra attiva (fail-safe), quindi non si perde nessuna partita."""
+    il piano una volta al giorno, alla prima occasione utile da quando è scattata l'ora
+    configurata (ora locale Italia) in poi - non solo durante quell'ora esatta: se il bot è in
+    pausa (manuale o per la fascia oraria notturna) proprio durante l'ora di generazione, la
+    finestra non va "persa" fino al giorno dopo, ma recuperata al primo ciclo utile dopo la
+    ripresa, qualunque sia l'ora nel frattempo. Prima dell'ora configurata non genera comunque
+    nulla: un riavvio mattutino (il filesystem di Render non e' persistente tra un riavvio e
+    l'altro, quindi il piano risulta sempre "mai generato" dopo un riavvio) non deve scatenare
+    una chiamata /fixtures?date= prima che serva davvero. In attesa del piano il ciclo principale
+    tratta comunque ogni momento come finestra attiva (fail-safe), quindi non si perde nessuna
+    partita nel frattempo - solo l'ottimizzazione del ritmo dei cicli resta meno efficiente."""
     global PIANO_GIORNATA
     now_it = datetime.datetime.now(ZoneInfo("Europe/Rome"))
     oggi_str = now_it.strftime("%Y-%m-%d")
 
     if PIANO_GIORNATA.get("data") == oggi_str:
         return
-    if now_it.hour != ORA_GENERAZIONE_PIANO_GIORNATA:
+    if now_it.hour < ORA_GENERAZIONE_PIANO_GIORNATA:
         return
 
     log(f"Generazione piano partite per {oggi_str} (ore {now_it.strftime('%H:%M')} orario italiano)...")
@@ -1239,8 +1284,208 @@ def aggiorna_piano_giornata_se_serve():
     if nuovo_piano is not None:
         PIANO_GIORNATA = nuovo_piano
         salva_piano_giornata(PIANO_GIORNATA)
+        avvia_recupero_quote_iniziali(PIANO_GIORNATA)
     else:
         log("Generazione piano giornata fallita (errore API), riprovo al prossimo ciclo")
+
+
+# =============================================================================
+# QUOTE 1X2 PRE-PARTITA: valore testuale (non un grafico) delle quote di apertura, per farsi
+# un'idea di come il mercato valuta la partita prima che inizi. Recuperate in due passaggi
+# separati dal loop live (mai dentro il ciclo di monitoraggio a 60-180s):
+#   1) al momento del piano giornata (una volta al giorno) - un primo tentativo, in un thread a
+#      parte per non bloccare la generazione del piano stesso;
+#   2) un refresh mirato quando manca meno di ODDS_REFRESH_MINUTI_PRIMA_KICKOFF al calcio
+#      d'inizio, così la quota mostrata è quella più vicina al closing (il riferimento più
+#      indicativo per il "valore") invece di quella di ore/giorni prima.
+# Bookmaker e mercato sono fissi (un solo bookmaker sempre uguale, altrimenti il numero mostrato
+# non è confrontabile da una partita all'altra) ma risolti per NOME sui riferimenti reali
+# dell'API (/odds/bookmakers, /odds/bets) invece di un ID hardcoded indovinato.
+# =============================================================================
+RIFERIMENTI_ODDS_TTL = 86400  # 24 ore: bookmaker/mercati non cambiano ID durante la giornata
+RIFERIMENTI_ODDS_RETRY_FALLIMENTO = 900  # 15 minuti prima di ritentare dopo un fallimento (vedi sotto)
+_RIFERIMENTI_ODDS_CACHE = {"bookmaker_id": None, "bet_id": None, "timestamp": 0}
+
+
+def _trova_id_per_nome(elementi, nome_cercato):
+    nome_cercato = nome_cercato.strip().lower()
+    for el in elementi:
+        if (el.get("name") or "").strip().lower() == nome_cercato:
+            return el.get("id")
+    return None
+
+
+def risolvi_riferimenti_odds():
+    """Risolve l'ID del bookmaker e del mercato configurati per nome, interrogando
+    /odds/bookmakers e /odds/bets. Cache 24h in caso di successo; in caso di fallimento (nome non
+    trovato, errore di rete, rate-limit) mette comunque in "raffreddamento" il tentativo per
+    RIFERIMENTI_ODDS_RETRY_FALLIMENTO secondi invece di ritentare subito - altrimenti, chiamata da
+    dentro il ciclo di recupero quote (una volta per ogni partita del piano), un singolo fallimento
+    scatenerebbe 2 chiamate extra ad ogni partita del batch invece di una sola in tutto il giorno,
+    rischiando di far scattare proprio il rate-limit per-minuto che si vuole evitare."""
+    now = time.time()
+    if _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and _RIFERIMENTI_ODDS_CACHE["bet_id"] and \
+            (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_TTL:
+        return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
+    if not _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and \
+            (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_RETRY_FALLIMENTO:
+        return None, None
+
+    data_bm, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/odds/bookmakers", {}, timeout=15, contesto="risolvi_riferimenti_odds(bookmakers)")
+    data_bet, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/odds/bets", {}, timeout=15, contesto="risolvi_riferimenti_odds(bets)")
+
+    bookmaker_id = _trova_id_per_nome(data_bm.get("response", []), ODDS_BOOKMAKER_NOME) if data_bm else None
+    bet_id = _trova_id_per_nome(data_bet.get("response", []), ODDS_BET_NOME) if data_bet else None
+
+    if bookmaker_id and bet_id:
+        _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] = bookmaker_id
+        _RIFERIMENTI_ODDS_CACHE["bet_id"] = bet_id
+        _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
+        log(f"Riferimenti quote risolti: bookmaker '{ODDS_BOOKMAKER_NOME}'={bookmaker_id}, mercato '{ODDS_BET_NOME}'={bet_id}")
+    else:
+        _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
+        log(f"Riferimenti quote non risolti (bookmaker={bookmaker_id}, bet={bet_id}) - "
+            f"ritento tra {RIFERIMENTI_ODDS_RETRY_FALLIMENTO // 60} min, verificare i nomi in config.json")
+
+    return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
+
+
+def recupera_quote_1x2(fixture_id):
+    """Quote 1X2 pre-match per una singola fixture dal bookmaker/mercato configurati. Ritorna un
+    dict {'casa','pareggio','ospite','bookmaker'} se trovate, altrimenti None (nessuna quota
+    pubblicata per ora, oppure errore/lega non coperta): non distingue i due casi qui, ci pensa
+    il chiamante (Passo A le lascia "da ritentare", Passo B le marca definitive)."""
+    bookmaker_id, bet_id = risolvi_riferimenti_odds()
+    if not bookmaker_id or not bet_id:
+        return None
+
+    data, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/odds",
+        {"fixture": fixture_id, "bookmaker": bookmaker_id, "bet": bet_id},
+        timeout=15, contesto=f"recupera_quote_1x2({fixture_id})")
+    if not data:
+        return None
+
+    response = data.get("response") or []
+    if not response:
+        return None
+    bookmakers = response[0].get("bookmakers") or []
+    if not bookmakers:
+        return None
+    bets = bookmakers[0].get("bets") or []
+    if not bets:
+        return None
+    valori = bets[0].get("values") or []
+
+    quote = {}
+    etichette = {"home": "casa", "draw": "pareggio", "away": "ospite"}
+    for v in valori:
+        chiave = etichette.get((v.get("value") or "").strip().lower())
+        if not chiave:
+            continue
+        try:
+            quote[chiave] = float(v.get("odd"))
+        except (TypeError, ValueError):
+            continue
+
+    if not all(k in quote for k in ("casa", "pareggio", "ospite")):
+        return None
+    quote["bookmaker"] = bookmakers[0].get("name") or ODDS_BOOKMAKER_NOME
+    return quote
+
+
+def _recupero_quote_iniziali_worker(piano):
+    """Thread separato (non blocca la generazione del piano né il loop live): primo tentativo di
+    quota per ogni partita del giorno, con uno sleep tra una chiamata e l'altra per restare ben
+    sotto il rate-limit per-minuto anche con piani da decine di partite. Stesso ritmo (1s) usato
+    dal loop live tra una partita e l'altra: questo thread gira in parallelo a quel loop, quindi
+    le loro chiamate si sommano nella stessa finestra di tempo - un ritmo più aggressivo qui
+    rischierebbe di far scattare il rate-limit anche quando il loop live da solo resterebbe sotto
+    soglia."""
+    trovate = 0
+    partite = piano.get("partite", [])
+    for partita in partite:
+        quote = recupera_quote_1x2(partita["fixture_id"])
+        if quote:
+            partita["quote_1x2"] = quote
+            trovate += 1
+        time.sleep(1)
+    salva_piano_giornata(piano)
+    log(f"Quote 1X2 iniziali: {trovate}/{len(partite)} partite con quota trovata al primo tentativo")
+
+
+def avvia_recupero_quote_iniziali(piano):
+    threading.Thread(target=_recupero_quote_iniziali_worker, args=(piano,), daemon=True).start()
+
+
+def aggiorna_quote_prepartita_imminenti():
+    """Chiamata ad ogni ciclo del loop principale (nessuna chiamata API se nessuna partita è
+    vicina al kickoff): quando manca meno di ODDS_REFRESH_MINUTI_PRIMA_KICKOFF minuti, rifà la
+    quota una seconda volta (più vicina al closing) e la marca definitiva - se anche qui non
+    c'è nulla, smette di ritentare e lo mostra esplicitamente come "non pubblicate" invece di
+    lasciare un campo vuoto senza spiegazione."""
+    now_ts = time.time()
+    finestra_sec = ODDS_REFRESH_MINUTI_PRIMA_KICKOFF * 60
+    modificato = False
+    for partita in PIANO_GIORNATA.get("partite", []):
+        kickoff_ts = partita.get("kickoff_ts")
+        if not kickoff_ts or partita.get("quote_refresh_fatto"):
+            continue
+        if not (0 <= kickoff_ts - now_ts <= finestra_sec):
+            continue
+        quote = recupera_quote_1x2(partita["fixture_id"])
+        partita["quote_1x2"] = quote if quote else False
+        partita["quote_refresh_fatto"] = True
+        modificato = True
+        log(f"Quote 1X2 refresh pre-kickoff: {partita.get('home', '?')} vs {partita.get('away', '?')} "
+            f"-> {'trovate' if quote else 'non disponibili'}")
+    if modificato:
+        salva_piano_giornata(PIANO_GIORNATA)
+
+
+def quote_1x2_per_fixture(fixture_id):
+    for partita in PIANO_GIORNATA.get("partite", []):
+        if partita.get("fixture_id") == fixture_id:
+            return partita.get("quote_1x2")
+    return None
+
+
+def calcola_probabilita_no_vig(quote):
+    """Toglie il margine del bookmaker (l'overround: 1/quota_casa + 1/quota_pareggio +
+    1/quota_ospite somma sempre più di 100%) dalle 3 quote, normalizzando alla probabilità "vera"
+    secondo il mercato. Pura aritmetica sui dati già scaricati, nessuna stima: a differenza di
+    qualunque punteggio "momentum", questo numero è sempre corretto per definizione."""
+    if not quote:
+        return None
+    try:
+        implicite = {
+            "casa": 1 / quote["casa"],
+            "pareggio": 1 / quote["pareggio"],
+            "ospite": 1 / quote["ospite"],
+        }
+    except (KeyError, ZeroDivisionError, TypeError):
+        return None
+    overround = sum(implicite.values())
+    if overround <= 0:
+        return None
+    return {chiave: valore / overround for chiave, valore in implicite.items()}
+
+
+def testo_quote_1x2(quote):
+    if quote is False:
+        return "\nQuote 1X2 iniziali: non pubblicate\n"
+    if not quote:
+        return ""
+    riga_quote = (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
+                  f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
+    no_vig = calcola_probabilita_no_vig(quote)
+    if not no_vig:
+        return riga_quote
+    riga_no_vig = (f"Probabilità di mercato (no-vig): "
+                   f"1 {no_vig['casa']:.0%} - X {no_vig['pareggio']:.0%} - 2 {no_vig['ospite']:.0%}\n")
+    return riga_quote + riga_no_vig
 
 
 def get_leghe_con_copertura_statistiche_raw():
@@ -3302,34 +3547,75 @@ def deve_aggiungere_automaticamente_ai_preferiti(tiri_totali, minuto, gol_totali
     return False
 
 
+def _appendi_shadow_log(percorso_file, riga):
+    """Appende una riga JSON a un file di shadow-log (raccolta dati per analisi offline, nessun
+    effetto sul comportamento del bot). Helper condiviso da tutti gli shadow-log del bot, per non
+    duplicare lo stesso apri-scrivi-gestisci-errore in ognuno."""
+    try:
+        with open(percorso_file, "a") as f:
+            f.write(json.dumps(riga) + "\n")
+    except Exception as e:
+        print(f"Errore scrittura shadow log ({percorso_file}): {e}", flush=True)
+
+
 def registra_shadow_log_auto_preferiti(fixture_id, home, away, league_name, league_country, minuto,
                                         tiri_totali, tiri_porta, corner, tiri_area, xg_casa, xg_ospite,
                                         gol_totali, scattato):
-    """Appende una riga JSON con le statistiche reali osservate al momento della valutazione
-    auto-preferiti (scattata o finestra chiusa senza scattare), senza influire sul comportamento
-    del bot. Puramente per analisi offline successiva."""
-    try:
-        riga = {
-            "timestamp": time.time(),
-            "fixture_id": fixture_id,
-            "home": home,
-            "away": away,
-            "league": league_name,
-            "league_country": league_country,
-            "minuto": minuto,
-            "tiri_totali": tiri_totali,
-            "tiri_porta": tiri_porta,
-            "corner": corner,
-            "tiri_area": tiri_area,
-            "xg_casa": xg_casa,
-            "xg_ospite": xg_ospite,
-            "gol_totali": gol_totali,
-            "auto_preferiti_scattato": scattato,
-        }
-        with open(SHADOW_LOG_AUTO_PREFERITI_FILE, "a") as f:
-            f.write(json.dumps(riga) + "\n")
-    except Exception as e:
-        print(f"Errore scrittura shadow log auto-preferiti: {e}", flush=True)
+    """Registra le statistiche reali osservate al momento della valutazione auto-preferiti
+    (scattata o finestra chiusa senza scattare). Puramente per analisi offline successiva."""
+    _appendi_shadow_log(SHADOW_LOG_AUTO_PREFERITI_FILE, {
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "home": home,
+        "away": away,
+        "league": league_name,
+        "league_country": league_country,
+        "minuto": minuto,
+        "tiri_totali": tiri_totali,
+        "tiri_porta": tiri_porta,
+        "corner": corner,
+        "tiri_area": tiri_area,
+        "xg_casa": xg_casa,
+        "xg_ospite": xg_ospite,
+        "gol_totali": gol_totali,
+        "auto_preferiti_scattato": scattato,
+    })
+
+
+def registra_shadow_log_valore_snapshot(fixture_id, home, away, minuto, score_home, score_away,
+                                         probabilita_no_vig, stats_15min):
+    """Snapshot ad una notifica live: probabilità no-vig del mercato pre-match + statistiche
+    ultimi 15 min già calcolate altrove (nessun ricalcolo). Da incrociare offline col risultato
+    finale (registra_shadow_log_valore_risultato) per capire, con dati reali, se le statistiche
+    live aggiungono potere predittivo alla sola quota pre-match - prima di costruire qualunque
+    soglia o semaforo su questo (vedi Fase 2)."""
+    _appendi_shadow_log(SHADOW_LOG_VALORE_FILE, {
+        "tipo": "snapshot",
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "home": home,
+        "away": away,
+        "minuto": minuto,
+        "score_home": score_home,
+        "score_away": score_away,
+        "probabilita_no_vig": probabilita_no_vig,
+        "stats_15min": stats_15min,
+    })
+
+
+def registra_shadow_log_valore_risultato(fixture_id, score_home, score_away):
+    """Riga "risultato_finale" per lo stesso fixture_id degli snapshot sopra, scritta una sola
+    volta quando la partita termina (stesso punto in cui il bot manda già la notifica di
+    risultato finale)."""
+    esito = "1" if score_home > score_away else ("2" if score_away > score_home else "X")
+    _appendi_shadow_log(SHADOW_LOG_VALORE_FILE, {
+        "tipo": "risultato_finale",
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "score_home": score_home,
+        "score_away": score_away,
+        "esito": esito,
+    })
 
 
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
@@ -3635,6 +3921,7 @@ def processa_partita(fixture):
 
                 chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
                 invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
+                registra_shadow_log_valore_risultato(fixture_id, score_home, score_away)
 
                 SILENCED_MATCHES.pop(str(fixture_id), None)
                 save_silenced(SILENCED_MATCHES)
@@ -3752,12 +4039,10 @@ def processa_partita(fixture):
             if foto_path:
                 nota_momentum = nota_copertura_momentum(history_completo)
             else:
-                # Storico ancora troppo corto (appena aggiunta ai preferiti: servono
-                # MOMENTUM_MIN_STORICO rilevazioni, una ogni 60s da quando è preferita). Senza
-                # questa nota il grafico momentum sembra "sparito"/rotto invece che semplicemente
-                # non ancora pronto.
-                mancanti = max(0, MOMENTUM_MIN_STORICO - len(history_completo))
-                nota_momentum = f"\n(grafico momentum tra ~{mancanti}': servono ancora {mancanti} rilevazioni)"
+                # Il grafico combinato manca solo la parte momentum (le barre da sole si generano
+                # comunque sotto): senza questa nota il momentum spariva senza spiegazione, dando
+                # l'impressione di un bug invece che di storico ancora insufficiente.
+                nota_momentum = f"\n(grafico momentum non disponibile: {spiega_momentum_insufficiente(history_completo)})"
         if not foto_path:
             foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
@@ -3826,11 +4111,18 @@ def processa_partita(fixture):
         # Il totale cumulativo della partita (tiri, porta, corner, area) si vede ora nel grafico
         # allegato (barre proporzionali, sempre presenti: da sole per le non preferite, impilate
         # sopra il momentum per i preferiti) - non serve ripeterlo anche in testo.
+        quote_iniziali = quote_1x2_per_fixture(fixture_id)
+        quote_text = testo_quote_1x2(quote_iniziali)
+        probabilita_no_vig = calcola_probabilita_no_vig(quote_iniziali) if quote_iniziali else None
+        if probabilita_no_vig:
+            registra_shadow_log_valore_snapshot(
+                fixture_id, home, away, minuto, score_home, score_away, probabilita_no_vig, stats_dict)
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
             f"Risultato: {score_home} - {score_away}\n"
+            f"{quote_text}"
             f"{goals_text}"
             f"{cartellini_text}"
             f"{rigori_text}"
@@ -3951,7 +4243,15 @@ if __name__ == "__main__":
             time.sleep(INTERVALLO_CICLO_MORTO)
             continue
 
+        if not dentro_orario_attivo():
+            log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
+                f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}), nessuna chiamata API. "
+                f"Attesa {INTERVALLO_CICLO_MORTO}s...")
+            time.sleep(INTERVALLO_CICLO_MORTO)
+            continue
+
         aggiorna_piano_giornata_se_serve()
+        aggiorna_quote_prepartita_imminenti()
 
         ciclo_numero += 1
         log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
