@@ -766,7 +766,10 @@ def poll_callbacks():
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                             json={"callback_query_id": cq["id"], "text": "Genero il grafico momentum..."}, timeout=5)
-                        esegui_comando_sicuro(chat_id, cmd_momentum_da_bottone, fid_bottone)
+                        # In risposta al messaggio con il bottone (msg_id), non come messaggio
+                        # nuovo e slegato in fondo alla chat: con più partite live il grafico
+                        # altrimenti finisce lontano dalla notifica a cui si riferisce.
+                        esegui_comando_sicuro(chat_id, cmd_momentum_da_bottone, fid_bottone, msg_id)
 
                     elif data.startswith("cmd:"):
                         azione = data.split(":", 1)[1]
@@ -2135,10 +2138,15 @@ def spiega_momentum_insufficiente(history):
             "o l'API non aggiorna i dati per questa lega).")
 
 
-def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a):
+def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a, reply_to_message_id=None):
     """Genera e invia il grafico momentum per una partita già identificata (fixture_id noto),
     usata sia da /momentum <squadra> (dopo la ricerca per nome) sia dal bottone "📈 Momentum"
-    nelle notifiche (che conosce già il fixture_id, senza dover ricercare per nome)."""
+    nelle notifiche (che conosce già il fixture_id, senza dover ricercare per nome).
+
+    reply_to_message_id: se passato (bottone cliccato su una notifica specifica), il grafico
+    viene inviato in risposta a quel messaggio - resta visivamente agganciato alla notifica
+    invece di comparire come messaggio nuovo in fondo alla chat, lontano da dove si è cliccato
+    (specialmente con più partite live, dove nel frattempo arrivano altre notifiche in mezzo)."""
     stato = stato_partite.get(fid, {})
     history = stato.get("history", [])
     foto_path = genera_grafico_momentum(fid, home, away, history, stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"))
@@ -2147,27 +2155,32 @@ def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, sc
     if foto_path and os.path.exists(foto_path):
         try:
             with open(foto_path, 'rb') as photo:
+                dati_invio = {"chat_id": chat_id, "caption": msg_text}
+                if reply_to_message_id:
+                    dati_invio["reply_parameters"] = json.dumps({"message_id": reply_to_message_id})
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                    data={"chat_id": chat_id, "caption": msg_text},
+                    data=dati_invio,
                     files={"photo": photo}, timeout=15)
         except Exception as e:
             log(f"Errore invio grafico momentum: {e}")
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+            payload = {"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}
+            if reply_to_message_id:
+                payload["reply_parameters"] = {"message_id": reply_to_message_id}
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload, timeout=5)
         finally:
             try:
                 os.remove(foto_path)
             except Exception:
                 pass
     else:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": f"{msg_text}\n\nMomentum non disponibile: {spiega_momentum_insufficiente(history)}"
-            }, timeout=5)
+        payload = {
+            "chat_id": chat_id,
+            "text": f"{msg_text}\n\nMomentum non disponibile: {spiega_momentum_insufficiente(history)}"
+        }
+        if reply_to_message_id:
+            payload["reply_parameters"] = {"message_id": reply_to_message_id}
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload, timeout=5)
 
 
 def cmd_momentum(chat_id, query):
@@ -2199,7 +2212,7 @@ def cmd_momentum(chat_id, query):
         invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a)
 
 
-def cmd_momentum_da_bottone(chat_id, fixture_id):
+def cmd_momentum_da_bottone(chat_id, fixture_id, reply_to_message_id=None):
     """Come cmd_momentum ma partendo da un fixture_id già noto (bottone nelle notifiche), senza
     dover ricercare per nome squadra: legge i dati della partita dallo stato già accumulato."""
     stato = stato_partite.get(fixture_id)
@@ -2214,6 +2227,7 @@ def cmd_momentum_da_bottone(chat_id, fixture_id):
         formatta_lega(stato.get("league", "?"), stato.get("league_country", "")),
         stato.get("last_minute", "?"),
         stato.get("score_home", "?"), stato.get("score_away", "?"),
+        reply_to_message_id=reply_to_message_id,
     )
 
 
