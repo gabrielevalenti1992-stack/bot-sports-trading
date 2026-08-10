@@ -1260,19 +1260,23 @@ def dentro_orario_attivo(now_it=None):
 
 def aggiorna_piano_giornata_se_serve():
     """Chiamata ad ogni ciclo del loop principale (nessun costo se non serve rigenerare). Rigenera
-    il piano una volta al giorno, solo durante l'ora esatta configurata (ora locale Italia).
-    Non genera piu' anche al primo avvio a qualunque ora: il filesystem di Render non e'
-    persistente tra un riavvio e l'altro, quindi dopo un riavvio il piano risulta sempre "mai
-    generato" e senza questo limite ogni riavvio (a qualsiasi ora) provocava una chiamata
-    /fixtures?date= immediata. In attesa del piano il ciclo principale tratta comunque ogni
-    momento come finestra attiva (fail-safe), quindi non si perde nessuna partita."""
+    il piano una volta al giorno, alla prima occasione utile da quando è scattata l'ora
+    configurata (ora locale Italia) in poi - non solo durante quell'ora esatta: se il bot è in
+    pausa (manuale o per la fascia oraria notturna) proprio durante l'ora di generazione, la
+    finestra non va "persa" fino al giorno dopo, ma recuperata al primo ciclo utile dopo la
+    ripresa, qualunque sia l'ora nel frattempo. Prima dell'ora configurata non genera comunque
+    nulla: un riavvio mattutino (il filesystem di Render non e' persistente tra un riavvio e
+    l'altro, quindi il piano risulta sempre "mai generato" dopo un riavvio) non deve scatenare
+    una chiamata /fixtures?date= prima che serva davvero. In attesa del piano il ciclo principale
+    tratta comunque ogni momento come finestra attiva (fail-safe), quindi non si perde nessuna
+    partita nel frattempo - solo l'ottimizzazione del ritmo dei cicli resta meno efficiente."""
     global PIANO_GIORNATA
     now_it = datetime.datetime.now(ZoneInfo("Europe/Rome"))
     oggi_str = now_it.strftime("%Y-%m-%d")
 
     if PIANO_GIORNATA.get("data") == oggi_str:
         return
-    if now_it.hour != ORA_GENERAZIONE_PIANO_GIORNATA:
+    if now_it.hour < ORA_GENERAZIONE_PIANO_GIORNATA:
         return
 
     log(f"Generazione piano partite per {oggi_str} (ore {now_it.strftime('%H:%M')} orario italiano)...")
