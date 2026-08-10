@@ -216,6 +216,16 @@ ODDS_BOOKMAKER_NOME = "Bet365"
 ODDS_BET_NOME = "Match Winner"
 ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca meno di così al kickoff
 
+# Pausa automatica notturna: fuori da questa fascia (ora locale Italia) il loop principale non fa
+# nessuna chiamata API e non manda notifiche, esattamente come /stop manuale - ma è un meccanismo
+# indipendente (nessuno stato salvato su disco, nessuna interazione con /stop o /riprendi): si
+# ricalcola ogni ciclo dall'orologio, quindi non rischia di confondersi con una pausa manuale
+# dell'utente (es. un /stop per un weekend intero non viene "riattivato" da questo alle 12).
+ORARIO_ATTIVO_INIZIO_ORA = 12
+ORARIO_ATTIVO_INIZIO_MINUTO = 0
+ORARIO_ATTIVO_FINE_ORA = 23
+ORARIO_ATTIVO_FINE_MINUTO = 30
+
 # Minuti di recupero: se superano questa soglia in un tempo (1° o 2°), la partita merita una
 # notifica dedicata anche se le altre soglie (tiri, momentum...) non sono soddisfatte, perché più
 # recupero significa più tempo utile per operare su una squadra in attacco. Per i preferiti la
@@ -321,6 +331,10 @@ try:
     ODDS_BOOKMAKER_NOME = config.get("odds_bookmaker_nome", ODDS_BOOKMAKER_NOME)
     ODDS_BET_NOME = config.get("odds_bet_nome", ODDS_BET_NOME)
     ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = config.get("odds_refresh_minuti_prima_kickoff", ODDS_REFRESH_MINUTI_PRIMA_KICKOFF)
+    ORARIO_ATTIVO_INIZIO_ORA = config.get("orario_attivo_inizio_ora", ORARIO_ATTIVO_INIZIO_ORA)
+    ORARIO_ATTIVO_INIZIO_MINUTO = config.get("orario_attivo_inizio_minuto", ORARIO_ATTIVO_INIZIO_MINUTO)
+    ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
+    ORARIO_ATTIVO_FINE_MINUTO = config.get("orario_attivo_fine_minuto", ORARIO_ATTIVO_FINE_MINUTO)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
@@ -1225,6 +1239,16 @@ def dentro_finestra_attiva(piano, now_ts=None):
         if inizio - margine_sec <= now_ts <= fine:
             return True
     return False
+
+
+def dentro_orario_attivo(now_it=None):
+    """True se l'ora locale italiana corrente cade nella fascia ORARIO_ATTIVO_* (default
+    12:00-23:30). Nessuna eccezione per partite già in corso a cavallo del limite: fuori fascia
+    il bot si ferma comunque, come richiesto."""
+    now_it = now_it if now_it is not None else datetime.datetime.now(ZoneInfo("Europe/Rome"))
+    inizio = now_it.replace(hour=ORARIO_ATTIVO_INIZIO_ORA, minute=ORARIO_ATTIVO_INIZIO_MINUTO, second=0, microsecond=0)
+    fine = now_it.replace(hour=ORARIO_ATTIVO_FINE_ORA, minute=ORARIO_ATTIVO_FINE_MINUTO, second=0, microsecond=0)
+    return inizio <= now_it < fine
 
 
 def aggiorna_piano_giornata_se_serve():
@@ -4119,6 +4143,13 @@ if __name__ == "__main__":
                 STATO_PAUSA["ultimo_promemoria"] = ora
                 salva_pausa(STATO_PAUSA)
             log(f"In pausa manuale da {round(da_quanto / 60)} min, nessuna chiamata API. Attesa {INTERVALLO_CICLO_MORTO}s...")
+            time.sleep(INTERVALLO_CICLO_MORTO)
+            continue
+
+        if not dentro_orario_attivo():
+            log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
+                f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}), nessuna chiamata API. "
+                f"Attesa {INTERVALLO_CICLO_MORTO}s...")
             time.sleep(INTERVALLO_CICLO_MORTO)
             continue
 
