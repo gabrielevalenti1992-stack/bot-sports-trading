@@ -2724,7 +2724,12 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
     momentum (non combinato con le barre: più leggero, un'immagine sola, nessuna chiamata
     statistiche in più) - così il grafico compare esattamente nel messaggio su cui si è cliccato,
     non altrove in chat. Se lo storico non basta ancora, lascia la notifica invariata (niente da
-    mostrare di meglio) e risponde solo con la spiegazione."""
+    mostrare di meglio) e risponde solo con la spiegazione.
+
+    Su una partita con tante notifiche ravvicinate (preferiti, partite movimentate) l'edit da solo
+    è facile da perdere in mezzo a messaggi quasi identici: in coda si manda anche una piccola
+    conferma IN RISPOSTA (reply_parameters) a questa stessa notifica, cosi' Telegram mostra la
+    citazione/collegamento e un tap ci salta dritto sopra, anche se è più in alto nella chat."""
     stato = stato_partite.get(fixture_id)
     if not stato:
         requests.post(
@@ -2761,7 +2766,7 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
                            f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
                            f"{stato.get('last_minute', '?')}'{nota_copertura_momentum(history)}")
             media = {"type": "photo", "media": "attach://photo", "caption": caption}
-            requests.post(
+            risposta_edit = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageMedia",
                 data={"chat_id": chat_id, "message_id": message_id, "media": json.dumps(media)},
                 files={"photo": photo}, timeout=15)
@@ -2777,6 +2782,19 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         except Exception:
             pass
 
+    if risposta_edit.status_code != 200:
+        # Non si tocca il bottone se l'edit non è davvero riuscito (es. notifica troppo vecchia,
+        # rate-limit): altrimenti il bottone sparirebbe senza che il grafico sia mai comparso.
+        log(f"editMessageMedia fallita per la notifica momentum: HTTP {risposta_edit.status_code} - {risposta_edit.text[:300]}")
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "Errore nell'aggiornare la notifica con il grafico momentum, riprova.",
+                "reply_parameters": {"message_id": message_id},
+            }, timeout=5)
+        return
+
     # Il bottone non serve più: il grafico è già agganciato alla notifica, ricliccarlo
     # rigenererebbe la stessa immagine inutilmente.
     is_fav = str(fixture_id) in FAVORITE_MATCHES
@@ -2786,6 +2804,17 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
             json={"chat_id": chat_id, "message_id": message_id, "reply_markup": json.dumps(nuova_keyboard)}, timeout=5)
+
+    # Collegamento visibile: su una partita con tante notifiche simili impilate, questa citazione
+    # (Telegram mostra un'anteprima della notifica originale, tap per saltarci sopra) è l'unico
+    # modo per far capire subito QUALE messaggio è stato appena aggiornato con il grafico.
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": "📈 Grafico momentum aggiornato qui sopra ⬆️",
+            "reply_parameters": {"message_id": message_id},
+        }, timeout=5)
 
 
 def calcola_indice_intensita(delta_stats):
