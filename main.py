@@ -2990,6 +2990,17 @@ SOGLIA_XGTIRO_MIN = 0.15
 SOGLIA_QUALITA_DIFF_TIRI_MAX = 2
 SOGLIA_QUALITA_DIFF_INDICE_MIN = 0.25
 
+# Squadre escluse dalle sei strategie (e da /scanner, che le usa tutte): su richiesta esplicita,
+# non compaiono mai tra i risultati anche se soddisferebbero le soglie. Non tocca le notifiche
+# normali/momentum/preferiti - solo la valutazione delle strategie. Confronto case-insensitive e
+# senza distinguere l'accento (l'API a volte restituisce "Cadiz", a volte "Cádiz").
+SQUADRE_ESCLUSE_STRATEGIE = ["cadiz", "cádiz"]
+
+
+def _squadra_esclusa_dalle_strategie(nome_squadra):
+    nome = (nome_squadra or "").lower()
+    return any(esclusa in nome for esclusa in SQUADRE_ESCLUSE_STRATEGIE)
+
 
 def estrai_xg(stats_team):
     """xG (expected_goals) della squadra, o None se il campo non è presente/valorizzato
@@ -3022,6 +3033,10 @@ def _scansiona_partite_valide(max_partite=40):
     da_scandire = partite_valide[:max_partite]
     risultati = []
     for f in da_scandire:
+        home_nome = f["teams"]["home"]["name"]
+        away_nome = f["teams"]["away"]["name"]
+        if _squadra_esclusa_dalle_strategie(home_nome) or _squadra_esclusa_dalle_strategie(away_nome):
+            continue
         fid = f["fixture"]["id"]
         stats = get_statistiche_partita(fid)
         if not (stats and len(stats) >= 2):
