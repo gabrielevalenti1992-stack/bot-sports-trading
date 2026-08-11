@@ -1250,6 +1250,13 @@ def get_partite_live():
 # =============================================================================
 STATUS_NON_LIVE_FUTURI = {"PST", "CANC", "ABD", "AWD", "WO"}  # rinviata/annullata/a tavolino: mai live
 
+# Tempi regolamentari (90') finiti in parità, partita di coppa proseguita a supplementari/rigori:
+# BT = pausa tra 2°T e supplementari (o tra i due tempi supplementari), ET = supplementari in
+# corso, P = rigori in corso. Su richiesta esplicita: da qui in poi nessuna notifica per quella
+# partita (vedi processa_partita) - una partita di campionato non passa mai da questi stati,
+# finisce direttamente in FT, quindi in pratica questo riguarda solo le coppe.
+STATUS_OLTRE_TEMPI_REGOLAMENTARI = {"BT", "ET", "P"}
+
 
 def costruisci_finestre_attive(partite):
     """Unisce gli intervalli [kickoff, kickoff+durata_stimata] delle partite whitelist in finestre
@@ -4642,6 +4649,16 @@ def processa_partita(fixture, notifiche_attive=True):
         stato_partite[fixture_id]["rigori"] = rigori
         stato_partite[fixture_id]["goals"] = goals
 
+        if status_short in STATUS_OLTRE_TEMPI_REGOLAMENTARI:
+            # Tempi regolamentari finiti in parità: supplementari/rigori in corso. Su richiesta,
+            # da qui in poi nessuna notifica per questa partita - niente statistiche da recuperare
+            # (nessuna notifica le userebbe), e quando finirà davvero (AET/PEN, più sotto) non
+            # partirà nemmeno il recap finale. I gol restano comunque tracciati sopra (stessa
+            # chiamata "events" di sempre, nessun costo aggiuntivo), così un gol ai supplementari
+            # non manca allo shadow-log quando la partita si chiude per davvero.
+            log(f"  -> Tempi regolamentari finiti ({status_short}, {minuto}'): supplementari/rigori in corso, notifiche sospese")
+            return
+
         # Tre esiti diversi, che prima finivano tutti e tre in due soli rami:
         #  - stats is None            -> la CHIAMATA è fallita (rate-limit, timeout, rete)
         #  - risposta senza dati veri -> l'API ha risposto, ma per questa partita non pubblica stats
@@ -4735,10 +4752,11 @@ def processa_partita(fixture, notifiche_attive=True):
                     foto_path = None
                 else:
                     # Il grafico serve solo per l'invio Telegram più sotto: se le notifiche sono
-                    # spente (fuori orario) generarlo comunque sarebbe lavoro sprecato (rendering
-                    # matplotlib + scrittura file) per un'immagine che verrebbe subito cancellata
-                    # senza mai essere usata.
-                    if current_stats and notifiche_attive:
+                    # spente (fuori orario), o se questa partita è finita ai supplementari/rigori
+                    # (status AET/PEN, niente notifica - vedi il gate più sotto), generarlo
+                    # comunque sarebbe lavoro sprecato (rendering matplotlib + scrittura file) per
+                    # un'immagine che verrebbe subito cancellata senza mai essere usata.
+                    if current_stats and notifiche_attive and status_short == "FT":
                         foto_path = genera_grafico_barre(fixture_id, home, away, current_stats)
                     else:
                         foto_path = None
@@ -4794,7 +4812,10 @@ def processa_partita(fixture, notifiche_attive=True):
                 # bug scoperto proprio perché prima la pausa fermava tutto, notifica inclusa).
                 registra_shadow_log_valore_risultato(fixture_id, score_home, score_away)
                 registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, goals)
-                if notifiche_attive:
+                # AET/PEN = partita finita ai supplementari o ai rigori: su richiesta, stesso
+                # trattamento di STATUS_OLTRE_TEMPI_REGOLAMENTARI più sopra, nessuna notifica
+                # nemmeno per il recap finale. Solo FT (decisa nei 90' regolamentari) la manda.
+                if notifiche_attive and status_short == "FT":
                     chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
                     invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
 
