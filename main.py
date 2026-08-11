@@ -3152,6 +3152,16 @@ def _disegna_grafico_barre(ax, home_name, away_name, stats):
 
 
 def genera_grafico_barre(fixture_id, home_name, away_name, stats):
+    # fig chiusa in un finally (non solo sul percorso di successo, prima del return): un'eccezione
+    # tra plt.subplots() e plt.close() - rendering, savefig, disco pieno - lasciava altrimenti la
+    # figura per sempre nel registro globale di matplotlib, mai liberata. Con un grafico generato
+    # ad ogni notifica su ogni partita monitorata, bastava un'eccezione occasionale per accumulare
+    # lentamente memoria fino a far sforare il limite del processo (causa più probabile dei riavvii
+    # per out-of-memory segnalati da Render). plt.close(fig) invece di plt.close() bare: il bot è
+    # multi-thread (ogni comando manuale gira nel suo thread), e pyplot tiene uno stato globale
+    # "figura corrente" non thread-safe - chiudere per riferimento esplicito evita di chiudere la
+    # figura sbagliata se un altro thread ne ha creata una nel frattempo.
+    fig = None
     try:
         fig, ax = plt.subplots(figsize=(5.0, 2.6), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
@@ -3163,11 +3173,13 @@ def genera_grafico_barre(fixture_id, home_name, away_name, stats):
         foto_path = os.path.join(os.path.dirname(__file__), f'chart_{fixture_id}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight',
                     facecolor='#1e1e1e', edgecolor='none', pad_inches=0.1)
-        plt.close()
         return foto_path
     except Exception as e:
         log(f"Errore grafico barre: {e}")
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def _calcola_punteggi_momentum(history):
@@ -3368,6 +3380,7 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history, goals=Non
     extract_rigori/extract_cartellini_rossi) aggiungono un marcatore '+' dorato sui gol, 'X' rossa
     sui rigori sbagliati/parati e '▮' rossa sulle espulsioni, sopra lo zero per la casa e sotto
     per la trasferta (stessa convenzione delle barre)."""
+    fig = None  # chiusa in finally, vedi commento in genera_grafico_barre
     try:
         dati = _calcola_punteggi_momentum(history)
         if not dati:
@@ -3389,11 +3402,13 @@ def genera_grafico_momentum(fixture_id, home_name, away_name, history, goals=Non
         foto_path = os.path.join(os.path.dirname(__file__), f'momentum_{fixture_id}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight',
                     facecolor='#1e1e1e', edgecolor='none', pad_inches=0.1)
-        plt.close()
         return foto_path
     except Exception as e:
         log(f"Errore grafico momentum: {e}")
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, history, goals=None, rigori=None,
@@ -3407,6 +3422,7 @@ def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, his
     Cosi' i preferiti hanno il quadro d'insieme, il dettaglio temporale e gli eventi chiave in
     una notifica sola, senza dover scegliere tra due grafici o mandarne due separati (che su
     Telegram si aprono uno alla volta, esperienza confusa)."""
+    fig = None  # chiusa in finally, vedi commento in genera_grafico_barre
     try:
         dati = _calcola_punteggi_momentum(history)
         if not dati:
@@ -3431,11 +3447,13 @@ def genera_grafico_combinato(fixture_id, home_name, away_name, stats_totali, his
         foto_path = os.path.join(os.path.dirname(__file__), f'combinato_{fixture_id}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight',
                     facecolor='#1e1e1e', edgecolor='none', pad_inches=0.15)
-        plt.close()
         return foto_path
     except Exception as e:
         log(f"Errore grafico combinato: {e}")
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def nota_copertura_momentum(history):
@@ -3970,6 +3988,7 @@ def trova_squadra_in_storico(nome_query):
 def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasferta):
     """Grafico con 2 pannelli: distribuzione gol fatti/subiti per fascia di 15 minuti,
     squadra di casa nelle sue partite in casa, squadra ospite nelle sue partite in trasferta."""
+    fig = None  # chiusa in finally, vedi commento in genera_grafico_barre
     try:
         fig, axes = plt.subplots(2, 1, figsize=(6.5, 6.5), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
@@ -4007,11 +4026,13 @@ def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasfert
         plt.tight_layout()
         foto_path = os.path.join(os.path.dirname(__file__), f'minutaggi_{int(time.time())}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight', facecolor='#1e1e1e', edgecolor='none', pad_inches=0.15)
-        plt.close()
         return foto_path
     except Exception as e:
         log(f"Errore grafico minutaggi: {e}")
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def cmd_analisi(chat_id, testo_richiesta):
