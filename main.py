@@ -2127,51 +2127,70 @@ def cmd_shadowlog(chat_id):
 
 
 def cmd_funzioni(chat_id):
-    """Panoramica delle funzioni del bot per livello di maturità, sullo stesso schema che le
-    aziende software usano per comunicare lo stato di una feature (Alpha/Beta/GA - vedi
-    es. Google Cloud, Kong, ecc.): non tutto quello che il bot fa è "pronto all'uso" allo stesso
-    modo, e va detto esplicitamente invece di lasciarlo intuire. Testo statico aggiornato a mano
-    ad ogni funzione nuova rilevante - non generato dinamicamente dal codice, quindi va tenuto
-    sincronizzato quando cambia qualcosa di importante."""
-    testo = (
-        "🟢 STABILI (in uso quotidiano)\n\n"
+    """Panoramica del bot, ma spiegata (non solo un elenco di nomi con un'etichetta
+    stabile/in validazione): per ogni voce, cosa fa concretamente e perché. Mandata in 2
+    messaggi separati per stare comodamente sotto il limite di 4096 caratteri di Telegram.
+    Testo statico, da aggiornare a mano quando cambia qualcosa di rilevante."""
+    parte1 = (
+        "🟢 COSA FA IL BOT OGGI, DAVVERO ATTIVO\n\n"
         "Monitoraggio live\n"
-        "- Notifiche automatiche su soglie tiri/momentum/gol/cartellini rossi/rigori/recupero lungo\n"
-        "- Grafico momentum (bottone \"📈 Momentum\", sostituisce la foto della notifica sul posto)\n"
-        "- Quote 1X2 pre-partita (Bet365, aggiornate ~90 min prima del kickoff)\n"
-        "- Piano giornata con ciclo veloce/rallentato adattivo\n\n"
+        "Segue le partite dei campionati che segui e ti avvisa quando succede qualcosa che "
+        "conta (tanti tiri, pressione in aumento, un gol, un cartellino rosso, un rigore, un "
+        "recupero lungo) - così non devi controllare tu ogni partita a mano.\n\n"
+        "Grafico momentum\n"
+        "Il bottone \"📈 Momentum\" sotto ogni notifica ti fa vedere come sta andando la "
+        "pressione della partita minuto per minuto (tiri, tiri in porta, corner, xG) - utile "
+        "per capire se una squadra sta davvero spingendo adesso o se il momento buono è già "
+        "passato.\n\n"
+        "Quote 1X2\n"
+        "Ogni notifica include la quota di apertura (1-X-2) di Bet365, presa prima dell'inizio "
+        "della partita - vedi subito come il mercato valutava la partita, senza cercarla altrove.\n\n"
         "Preferiti\n"
-        "- Aggiunta manuale o automatica (ritmo alto nei primi minuti)\n"
-        "- Canale Telegram dedicato (/testpreferiti per verificarlo)\n"
-        "- Grafico combinato barre + momentum in un'unica immagine\n\n"
+        "Puoi seguire una partita con più attenzione (notifiche più frequenti, grafico più "
+        "ricco) aggiungendola ai preferiti a mano, oppure ci pensa da solo il bot se la "
+        "partita parte già con un ritmo alto. Le notifiche dei preferiti arrivano in un "
+        "canale Telegram separato, se lo hai configurato.\n\n"
         "Controllo del bot\n"
-        "- /stop, /riprendi (pausa manuale completa)\n"
-        "- Pausa automatica fuori orario 12:00-23:30 (solo notifiche - il monitoraggio dati resta attivo 24/7)\n"
-        "- /piano, /live, /favorites, /silenced, /clearfavorites\n\n"
-        "Analisi manuale\n"
-        "- 6 strategie: /assedio /fasciacalda /rimonta /concretezza /xgtiro /qualita\n"
-        "- /scanner, /analisi, /intensita, /status <squadra>, /momentum <squadra>\n\n"
-        "🟡 IN VALIDAZIONE (attive, ma non ancora affidabili per decisioni)\n\n"
-        "- Shadow-log valore: raccolta silenziosa di probabilità no-vig + statistiche live, "
-        "uno snapshot ogni 15 min per partita monitorata\n"
-        "- /shadowlog: riepilogo e file grezzo dei dati raccolti finora\n"
-        "- Checkpoint: 21 agosto (controllo intermedio, solo diagnostico), 31 agosto "
-        "(decisione, con criteri statistici fissati in anticipo)\n"
-        "- Non genera ancora nessun segnale visibile in chat: solo raccolta dati\n\n"
-        "📋 ULTIME NOVITÀ\n\n"
-        "- Quote 1X2 pre-partita nelle notifiche\n"
-        "- Pausa automatica per fascia oraria\n"
-        "- Monitoraggio 24/7 anche fuori orario (solo raccolta dati, niente notifiche)\n"
-        "- Bottone Momentum aggiorna la notifica esistente invece di mandarne una nuova\n"
-        "- Corretto un bug che perdeva il risultato finale delle partite terminate in pausa\n\n"
-        "💡 IDEE VALUTATE, NON ANCORA AVVIATE\n\n"
-        "- Confronto multi-bookmaker, rilevamento \"steam move\", modelli xG/machine learning "
-        "e altre 10+ alternative discusse ma non implementate - dipendono dall'esito della "
-        "validazione del 31 agosto"
+        "/stop ferma tutto (nessuna chiamata, nessuna notifica) quando sai che non stai "
+        "seguendo il trading, /riprendi lo riattiva. C'è anche una pausa automatica nelle ore "
+        "in cui hai detto di non essere operativo (12:00-23:30 di default): in quelle ore il "
+        "bot continua a raccogliere dati dietro le quinte ma non ti manda notifiche.\n\n"
+        "Comandi di analisi manuale\n"
+        "/live (partite live), /piano (programma di oggi), /status <squadra> e "
+        "/momentum <squadra> (info su una partita specifica), più 6 comandi che classificano "
+        "le partite più interessanti in questo momento (/assedio /fasciacalda /rimonta "
+        "/concretezza /xgtiro /qualita) e /scanner."
+    )
+    parte2 = (
+        "🟡 COSA STA SUCCEDENDO DIETRO LE QUINTE (non lo vedi ancora in chat)\n\n"
+        "Il bot sta silenziosamente raccogliendo dati per rispondere a una domanda precisa: "
+        "\"le statistiche in diretta di una partita (tiri, pressione) dicono qualcosa di "
+        "utile che la quota del bookmaker già non dica da sola?\" Per ogni partita seguita, "
+        "ogni 15 minuti salva la quota (già ripulita dal margine del bookmaker) insieme alle "
+        "statistiche del momento, e a fine partita salva anche il risultato vero. Zero "
+        "output visibile per te oggi: è solo raccolta prove.\n\n"
+        "Cosa succede dopo:\n"
+        "- 21 agosto: controllo quanti dati si sono accumulati finora, solo per vedere se "
+        "siamo in linea con i tempi - nessuna decisione presa in quel momento.\n"
+        "- 31 agosto: se ci sono abbastanza partite raccolte, faccio un test statistico vero "
+        "per rispondere alla domanda sopra. Se il test conferma che le statistiche live "
+        "aggiungono davvero qualcosa, si passa a costruire un indicatore visibile in chat. "
+        "Se il test dice che non aggiungono nulla, si scarta questa idea specifica e si "
+        "guarda tra le altre già valutate (arbitraggio, confronto multi-bookmaker, modelli "
+        "xG, e più di dieci altre).\n\n"
+        "/shadowlog ti fa vedere in ogni momento a che punto è la raccolta.\n\n"
+        "📋 ULTIME NOVITÀ (ultimi giorni)\n"
+        "Quote 1X2 nelle notifiche, pausa automatica per fascia oraria, monitoraggio 24/7 "
+        "anche fuori orario, il bottone Momentum ora aggiorna la notifica esistente invece "
+        "di mandarne una nuova, corretto un bug che perdeva il risultato di partite finite "
+        "durante la pausa."
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": testo}, timeout=5)
+        json={"chat_id": chat_id, "text": parte1}, timeout=5)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": parte2}, timeout=5)
 
 
 def cmd_status(chat_id, query):
