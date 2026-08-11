@@ -184,7 +184,7 @@ SHADOW_LOG_STRATEGIE_FILE = data_path("shadow_log_strategie.jsonl")
 # non mandare nessun grafico piuttosto che mandarne uno inutile/fuorviante.
 MOMENTUM_MIN_STORICO = 6
 
-# Pesi per l'indice di intensità (usato dal comando /intensita e dal report automatico)
+# Pesi per l'indice di intensità (usato dal report automatico e dalle strategie che guardano il ritmo)
 PESO_INTENSITA_TIRI = 1
 PESO_INTENSITA_PORTA = 2
 PESO_INTENSITA_CORNER = 1
@@ -197,7 +197,8 @@ PESO_INTENSITA_CORNER = 1
 PESO_MOMENTUM_XG = 10
 
 # Report automatico di intensità: ogni quanto (secondi) inviarlo, una volta che i dati sono pronti.
-# Disattivato di default su richiesta esplicita: resta comunque disponibile a mano con /intensita.
+# Disattivato di default su richiesta esplicita. Ora che anche il comando /intensita è stato
+# rimosso, questo flag (da config.json) è l'unico modo per rivedere la classifica di intensità.
 REPORT_INTENSITA_AUTOMATICO_ATTIVO = False
 INTERVALLO_REPORT_INTENSITA = 900  # 15 minuti
 ULTIMO_REPORT_INTENSITA = 0
@@ -677,7 +678,7 @@ def _esegui_comando(chat_id, funzione, args):
 
 def esegui_comando_sicuro(chat_id, funzione, *args):
     """Lancia il comando in un thread separato invece di eseguirlo nel thread che fa polling di
-    Telegram: alcuni comandi (es. /intensita) possono girare per decine di secondi o
+    Telegram: alcuni comandi (es. /live, /analisi) possono girare per decine di secondi o
     più se ci sono molte partite live, e senza questo il polling di /stop e di qualsiasi altro
     comando resterebbe bloccato fino al termine di quello in corso."""
     threading.Thread(target=_esegui_comando, args=(chat_id, funzione, args), daemon=True).start()
@@ -829,24 +830,18 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_modalitacompleta)
                         elif azione == "testpreferiti":
                             esegui_comando_sicuro(chat_id, cmd_testpreferiti)
-                        elif azione == "intensita":
-                            esegui_comando_sicuro(chat_id, cmd_intensita)
-                        elif azione == "scanner":
-                            esegui_comando_sicuro(chat_id, cmd_scanner)
-                        elif azione == "assedio":
-                            esegui_comando_sicuro(chat_id, cmd_assedio)
-                        elif azione == "fasciacalda":
-                            esegui_comando_sicuro(chat_id, cmd_fasciacalda)
-                        elif azione == "rimonta":
-                            esegui_comando_sicuro(chat_id, cmd_rimonta)
-                        elif azione == "concretezza":
-                            esegui_comando_sicuro(chat_id, cmd_concretezza)
-                        elif azione == "xgtiro":
-                            esegui_comando_sicuro(chat_id, cmd_xgtiro)
-                        elif azione == "qualita":
-                            esegui_comando_sicuro(chat_id, cmd_qualita)
                         elif azione == "help":
                             esegui_comando_sicuro(chat_id, cmd_help)
+                        else:
+                            # Menu /setup vecchi, rimasti in chat, hanno ancora i bottoni delle
+                            # strategie: senza questa risposta il click non farebbe niente e
+                            # sembrerebbe il bot bloccato.
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={
+                                    "chat_id": chat_id,
+                                    "text": "Questo bottone non è più disponibile (scansione strategie a mano rimossa). Usa /setup per il menu aggiornato.",
+                                }, timeout=5)
 
                 msg = upd.get("message")
                 if msg and msg.get("text"):
@@ -878,29 +873,10 @@ def poll_callbacks():
                             continue
                         esegui_comando_sicuro(chat_id, cmd_momentum, " ".join(args).lower().strip("<>").strip())
 
-                    elif cmd == "/intensita":
-                        esegui_comando_sicuro(chat_id, cmd_intensita)
-
-                    elif cmd == "/assedio":
-                        esegui_comando_sicuro(chat_id, cmd_assedio)
-
-                    elif cmd == "/fasciacalda":
-                        esegui_comando_sicuro(chat_id, cmd_fasciacalda)
-
-                    elif cmd == "/rimonta":
-                        esegui_comando_sicuro(chat_id, cmd_rimonta)
-
-                    elif cmd == "/concretezza":
-                        esegui_comando_sicuro(chat_id, cmd_concretezza)
-
-                    elif cmd == "/xgtiro":
-                        esegui_comando_sicuro(chat_id, cmd_xgtiro)
-
-                    elif cmd == "/qualita":
-                        esegui_comando_sicuro(chat_id, cmd_qualita)
-
-                    elif cmd == "/scanner":
-                        esegui_comando_sicuro(chat_id, cmd_scanner)
+                    # I comandi di scansione a mano delle strategie (/intensita, /scanner e le sei
+                    # singole /assedio /fasciacalda /rimonta /concretezza /xgtiro /qualita) sono
+                    # stati rimossi: restano solo le notifiche automatiche. Le strategie continuano
+                    # a essere valutate in background per lo shadow-log (vedi STRATEGIE).
 
                     elif cmd == "/analisi":
                         if not args:
@@ -1590,9 +1566,9 @@ def aggiorna_leghe_attive(force=False):
 # solo /fixtures/statistics e /fixtures/events restano per-singola-partita), quindi non si può
 # ridurre il numero di chiamate raggruppandole. Quello che invece si può evitare è la chiamata
 # DUPLICATA quando la stessa partita viene richiesta più volte a distanza di pochi secondi: il
-# loop principale la interroga già ogni 60-180s, ma /live, /intensita, /status, /scanner e le 6
-# strategie (tutte comandi manuali) rifacevano la stessa identica chiamata da capo ogni volta che
-# l'utente le lanciava, anche a pochi secondi da un ciclo del loop o da un altro comando. Una
+# loop principale la interroga già ogni 60-180s, ma /live, /status, /momentum e la valutazione
+# automatica delle strategie rifacevano la stessa identica chiamata da capo ogni volta, anche a
+# pochi secondi da un ciclo del loop o da un altro comando. Una
 # cache condivisa (per fixture) con TTL breve rende gratuite queste richieste duplicate senza
 # cambiare la frequenza/freschezza dei dati usati dal loop principale (i suoi cicli sono comunque
 # distanziati almeno 60s, oltre il TTL della cache, quindi per lui è sempre un cache-miss).
@@ -1795,14 +1771,6 @@ def cmd_help(chat_id):
         "/help - Mostra questo messaggio\n"
         "/status <squadra> - Info live su una partita\n"
         "/momentum <squadra> - Grafico dell'andamento pressione durante la partita (solo partite monitorate)\n"
-        "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
-        "/assedio - Partite bloccate ma con pressione alta, probabile sblocco\n"
-        "/fasciacalda - Squadra storicamente pericolosa in questa fascia oraria\n"
-        "/rimonta - Squadra in svantaggio che spinge più che nel 1° tempo\n"
-        "/concretezza - Chi trasforma meglio i tiri in occasioni vere\n"
-        "/xgtiro - Poche occasioni ma di alta qualità (xG per tiro)\n"
-        "/qualita - Tiri quasi pari ma una squadra molto più concreta\n"
-        "/scanner - Applica tutte le strategie insieme, top 7 con i simboli\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
         "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
         "/favorites - Lista partite preferite\n"
@@ -2406,9 +2374,10 @@ def cmd_funzioni(chat_id):
         "bot continua a raccogliere dati dietro le quinte ma non ti manda notifiche.\n\n"
         "Comandi di analisi manuale\n"
         "/live (partite live), /piano (programma di oggi), /status <squadra> e "
-        "/momentum <squadra> (info su una partita specifica), più 6 comandi che classificano "
-        "le partite più interessanti in questo momento (/assedio /fasciacalda /rimonta "
-        "/concretezza /xgtiro /qualita) e /scanner."
+        "/momentum <squadra> (info su una partita specifica). I comandi che scandivano le "
+        "partite con le strategie (/scanner, /intensita e le sei singole) sono stati rimossi: "
+        "le strategie restano valutate in automatico dietro le quinte per la raccolta dati, "
+        "vedi /strategie e /shadowlogstrategie."
     )
     parte2 = (
         "🟡 COSA STA SUCCEDENDO DIETRO LE QUINTE (non lo vedi ancora in chat)\n\n"
@@ -2443,7 +2412,9 @@ def cmd_funzioni(chat_id):
         "anche fuori orario, il bottone Momentum ora manda il grafico in risposta sotto la "
         "notifica senza cancellare il grafico a barre (tiri, tiri in porta, corner) che c'era "
         "già ed è stato tolto dal canale preferiti dove il momentum arriva già aggiornato da "
-        "solo, corretto un bug che perdeva il risultato di partite finite "
+        "solo, tolti i comandi di scansione a mano delle strategie (/scanner, /intensita e le "
+        "sei singole: restano valutate in automatico per la raccolta dati), corretto un bug "
+        "che perdeva il risultato di partite finite "
         "durante la pausa, /strategie per capire le soglie attuali, raccolta dati automatica "
         "sull'efficacia delle 6 strategie, controllo automatico della pipeline dati con avviso "
         "in chat se qualcosa si inceppa."
@@ -2499,10 +2470,11 @@ def cmd_strategie(chat_id):
         "Confronta le due squadre quando tirano un numero simile di volte, ma una delle due è "
         "nettamente più concreta dell'altra (stesso indice della Concretezza qui sopra, usato "
         "per confrontarle tra loro invece che una sola per volta).\n\n"
-        "🔍 /scanner\n"
-        "Le applica tutte e sei insieme sulla stessa scansione (zero chiamate in più) e mostra "
-        "solo le partite che superano almeno una strategia, con i simboli di quali - il modo più "
-        "comodo per non lanciare 6 comandi uno per uno."
+        "ℹ️ Come vengono usate oggi\n"
+        "Non ci sono più comandi per lanciare le strategie a mano su tutte le partite live: le "
+        "sei vengono valutate in automatico dal bot su ogni partita seguita e i risultati "
+        "finiscono nella raccolta dati (/shadowlogstrategie), che serve a capire con numeri "
+        "veri quali funzionano davvero prima di trasformarle in notifiche."
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -2803,83 +2775,10 @@ def simbolo_fiamma_per_posizione(posizione):
     return ""
 
 
-def cmd_intensita(chat_id):
-    """Classifica le partite live (nei campionati con statistiche note) per indice di intensità,
-    calcolato sul ritmo recente (ultimi 15 min) invece che sui totali cumulativi di partita."""
-    partite_raw = get_partite_live()
-    partite_cmd = [
-        f for f in partite_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
-    ]
-    if not partite_cmd:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
-        return
-
-    MAX_PARTITE_SCANDITE = 40
-    da_scandire = partite_cmd[:MAX_PARTITE_SCANDITE]
-    avviso_limite = f" (limitata alle prime {MAX_PARTITE_SCANDITE} su {len(partite_cmd)})" if len(partite_cmd) > MAX_PARTITE_SCANDITE else ""
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Calcolo indice di intensità su {len(da_scandire)} partite{avviso_limite}, attendi..."}, timeout=5)
-
-    risultati = []
-    for f in da_scandire:
-        fid = f["fixture"]["id"]
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-        league = f["league"]["name"]
-        minute = f["fixture"]["status"].get("elapsed", "?")
-        score_h = f["goals"]["home"] or 0
-        score_a = f["goals"]["away"] or 0
-        stats = get_statistiche_partita(fid)
-        if stats and len(stats) >= 2:
-            sh = stats[0].get("statistics", [])
-            sa = stats[1].get("statistics", [])
-            current_stats = estrai_current_stats(sh, sa)
-            delta_stats, is_real = calcola_delta_15min(fid, current_stats, f["fixture"]["status"].get("elapsed") or 0)
-            punteggio = calcola_indice_intensita(delta_stats)
-            risultati.append((punteggio, home, away, league, minute, score_h, score_a, delta_stats, is_real))
-        time.sleep(0.3)
-
-    if not risultati:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna delle partite monitorate ha statistiche disponibili in questo momento."}, timeout=5)
-        return
-
-    risultati.sort(key=lambda r: -r[0])
-    top = risultati[:7]
-    righe = [f"Top {len(top)} partite più \"calde\" (ritmo ultimi 15 min):\n"]
-    for i, (punteggio, home, away, league, minute, score_h, score_a, delta_stats, is_real) in enumerate(top, start=1):
-        nota = " (primo rilevamento, dato non ancora affidabile)" if not is_real else ""
-        fiamme = simbolo_fiamma_per_posizione(i)
-        prefisso = f"{fiamme} " if fiamme else ""
-        motivazioni = descrivi_motivazioni_intensita(delta_stats)
-        righe.append(
-            f"{prefisso}{home} {score_h}-{score_a} {away} ({league}, {minute}'){nota}\n"
-            f"   {motivazioni}"
-        )
-    if len(risultati) > 7:
-        righe.append(f"\n... e altre {len(risultati) - 7} partite con ritmo più basso")
-
-    testo = "\n".join(righe)
-    for i in range(0, len(testo), 3800):
-        pezzo = testo[i:i + 3800]
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
-        if risposta.status_code != 200:
-            log(f"Errore invio /intensita: HTTP {risposta.status_code} - {risposta.text[:300]}")
-
-
 # =============================================================================
-# SEI STRATEGIE + /scanner
+# SEI STRATEGIE (solo valutazione automatica per lo shadow-log: i comandi per lanciarle a mano
+# - /assedio /fasciacalda /rimonta /concretezza /xgtiro /qualita /scanner /intensita - sono stati
+# rimossi, le funzioni valuta_* qui sotto restano perché servono alla raccolta dati in background)
 # =============================================================================
 # Soglie di partenza per le sei strategie: numeri ragionevoli scelti da zero (le soglie esatte
 # discusse in sessioni precedenti non sono state salvate nel codice), pensati per essere
@@ -2919,53 +2818,6 @@ def estrai_xg(stats_team):
             except (TypeError, ValueError):
                 return None
     return None
-
-
-def _scansiona_partite_valide(max_partite=40):
-    """Raccoglie partite live valide con statistiche correnti, delta 15 min e xG: usata da tutte
-    le sei strategie e da /scanner, così ognuna riusa la stessa scansione invece di rifare le
-    chiamate da capo (nessuna chiamata aggiuntiva oltre a lanciarne una)."""
-    partite_raw = get_partite_live()
-    partite_valide = [
-        f for f in partite_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
-    ]
-    da_scandire = partite_valide[:max_partite]
-    risultati = []
-    for f in da_scandire:
-        fid = f["fixture"]["id"]
-        stats = get_statistiche_partita(fid)
-        if not (stats and len(stats) >= 2):
-            time.sleep(0.3)
-            continue
-        sh = stats[0].get("statistics", [])
-        sa = stats[1].get("statistics", [])
-        current_stats = estrai_current_stats(sh, sa)
-        minuto = f["fixture"]["status"].get("elapsed") or 0
-        delta_stats, delta_reale = calcola_delta_15min(fid, current_stats, minuto)
-        risultati.append({
-            "fixture": f,
-            "fid": fid,
-            "home": f["teams"]["home"]["name"],
-            "away": f["teams"]["away"]["name"],
-            "league": f.get("league", {}).get("name", ""),
-            "league_country": f.get("league", {}).get("country", ""),
-            "minute": minuto,
-            "score_h": f["goals"]["home"] or 0,
-            "score_a": f["goals"]["away"] or 0,
-            "stats": current_stats,
-            "delta": delta_stats,
-            "delta_reale": delta_reale,
-            "xg_home": estrai_xg(sh),
-            "xg_away": estrai_xg(sa),
-            "stato_precedente": stato_partite.get(fid, {}),
-        })
-        time.sleep(0.3)
-    return risultati, len(partite_valide)
 
 
 def valuta_assedio(p):
@@ -3125,120 +2977,6 @@ STRATEGIE = [
 ]
 
 
-def _cmd_strategia(chat_id, nome, emoji, valuta_fn, descrizione):
-    risultati_scan, totale_valide = _scansiona_partite_valide()
-    if not risultati_scan:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
-        return
-    trovati = []
-    for p in risultati_scan:
-        esito = valuta_fn(p)
-        if esito is not None:
-            punteggio, dettaglio = esito
-            trovati.append((punteggio, p, dettaglio))
-    if not trovati:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"{emoji} Nessuna partita soddisfa i criteri di '{nome}' in questo momento (su {len(risultati_scan)} partite scandite)."}, timeout=5)
-        return
-    trovati.sort(key=lambda t: -t[0])
-    top = trovati[:7]
-    righe = [f"{emoji} {nome} - top {len(top)} di {len(trovati)} partite ({descrizione})\n"]
-    for punteggio, p, dettaglio in top:
-        righe.append(
-            f"{p['home']} {p['score_h']}-{p['score_a']} {p['away']} "
-            f"({formatta_lega(p['league'], p['league_country'])}, {p['minute']}')\n   {dettaglio}"
-        )
-    testo = "\n".join(righe)
-    for i in range(0, len(testo), 3800):
-        pezzo = testo[i:i + 3800]
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
-        if risposta.status_code != 200:
-            log(f"Errore invio strategia '{nome}': HTTP {risposta.status_code} - {risposta.text[:300]}")
-
-
-def cmd_assedio(chat_id):
-    _cmd_strategia(chat_id, *STRATEGIE[0][:2], STRATEGIE[0][2], STRATEGIE[0][3])
-
-
-def cmd_fasciacalda(chat_id):
-    _cmd_strategia(chat_id, *STRATEGIE[1][:2], STRATEGIE[1][2], STRATEGIE[1][3])
-
-
-def cmd_rimonta(chat_id):
-    _cmd_strategia(chat_id, *STRATEGIE[2][:2], STRATEGIE[2][2], STRATEGIE[2][3])
-
-
-def cmd_concretezza(chat_id):
-    _cmd_strategia(chat_id, *STRATEGIE[3][:2], STRATEGIE[3][2], STRATEGIE[3][3])
-
-
-def cmd_xgtiro(chat_id):
-    _cmd_strategia(chat_id, *STRATEGIE[4][:2], STRATEGIE[4][2], STRATEGIE[4][3])
-
-
-def cmd_qualita(chat_id):
-    _cmd_strategia(chat_id, *STRATEGIE[5][:2], STRATEGIE[5][2], STRATEGIE[5][3])
-
-
-def cmd_scanner(chat_id):
-    """/scanner: applica tutte e sei le strategie insieme sulla stessa scansione (nessuna
-    chiamata aggiuntiva rispetto a lanciarne una sola) e mostra la top 7 con i simboli di quelle
-    soddisfatte, più una legenda."""
-    risultati_scan, totale_valide = _scansiona_partite_valide()
-    if not risultati_scan:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live al momento nei campionati con statistiche note."}, timeout=5)
-        return
-
-    valutazioni = []
-    for p in risultati_scan:
-        simboli = []
-        dettagli = []
-        punteggio_tot = 0
-        for nome, emoji, valuta_fn, _descr in STRATEGIE:
-            esito = valuta_fn(p)
-            if esito is not None:
-                punteggio, dettaglio = esito
-                simboli.append(emoji)
-                punteggio_tot += punteggio
-                dettagli.append(f"{emoji} {nome}: {dettaglio}")
-        if simboli:
-            valutazioni.append((len(simboli), punteggio_tot, p, simboli, dettagli))
-
-    if not valutazioni:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"🔍 Nessuna partita soddisfa nessuna strategia in questo momento (su {len(risultati_scan)} partite scandite)."}, timeout=5)
-        return
-
-    valutazioni.sort(key=lambda v: (-v[0], -v[1]))
-    top = valutazioni[:7]
-    righe = [f"🔍 Scanner strategie - top {len(top)} di {len(valutazioni)} partite\n"]
-    for n_simboli, punteggio_tot, p, simboli, dettagli in top:
-        righe.append(
-            f"{''.join(simboli)} {p['home']} {p['score_h']}-{p['score_a']} {p['away']} "
-            f"({formatta_lega(p['league'], p['league_country'])}, {p['minute']}')"
-        )
-        righe.extend(f"   {d}" for d in dettagli)
-        righe.append("")
-    righe.append("Legenda: " + " | ".join(f"{emoji} {nome}" for nome, emoji, _fn, _d in STRATEGIE))
-
-    testo = "\n".join(righe)
-    for i in range(0, len(testo), 3800):
-        pezzo = testo[i:i + 3800]
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
-        if risposta.status_code != 200:
-            log(f"Errore invio /scanner: HTTP {risposta.status_code} - {risposta.text[:300]}")
-
-
 def cmd_setup(chat_id):
     keyboard = {
         "inline_keyboard": [
@@ -3252,14 +2990,6 @@ def cmd_setup(chat_id):
             [{"text": "🔕 Modalità essenziale", "callback_data": "cmd:modalitaessenziale"},
              {"text": "🔔 Modalità completa", "callback_data": "cmd:modalitacompleta"}],
             [{"text": "🧪 Test canale preferiti", "callback_data": "cmd:testpreferiti"}],
-            [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
-            [{"text": "🔍 Scanner strategie", "callback_data": "cmd:scanner"}],
-            [{"text": "🏰 Assedio", "callback_data": "cmd:assedio"},
-             {"text": "⏰ Fascia calda", "callback_data": "cmd:fasciacalda"}],
-            [{"text": "🔄 Rimonta", "callback_data": "cmd:rimonta"},
-             {"text": "🎯 Concretezza", "callback_data": "cmd:concretezza"}],
-            [{"text": "💎 xG per tiro", "callback_data": "cmd:xgtiro"},
-             {"text": "⚖️ Qualità", "callback_data": "cmd:qualita"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
     }
