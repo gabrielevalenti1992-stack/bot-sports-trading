@@ -36,6 +36,8 @@
   "orario_attivo_fine_ora": 23,
   "orario_attivo_fine_minuto": 30,
   "intervallo_snapshot_valore": 900,
+  "diagnostica_automatica_attiva": true,
+  "intervallo_diagnostica_automatica": 1800,
   "solo_leghe_con_statistiche": true,
   "leghe_con_statistiche": [
     "Premier League",

@@ -202,6 +202,15 @@ REPORT_INTENSITA_AUTOMATICO_ATTIVO = False
 INTERVALLO_REPORT_INTENSITA = 900  # 15 minuti
 ULTIMO_REPORT_INTENSITA = 0
 
+# Diagnostica automatica pipeline dati: ogni quanto (secondi) ricontrollare da soli, dentro il
+# ciclo principale, se tracciamento/statistiche/quote/shadow-log delle partite live stanno
+# funzionando. Attiva di default (a differenza del report intensità sopra) perché qui l'obiettivo
+# è accorgersi da soli di un problema, non richiedere all'utente di lanciare un comando per
+# controllare - vedi esegui_diagnostica_automatica().
+DIAGNOSTICA_AUTOMATICA_ATTIVA = True
+INTERVALLO_DIAGNOSTICA_AUTOMATICA = 1800  # 30 minuti
+ULTIMA_DIAGNOSTICA_AUTOMATICA = 0
+
 # Storico minutaggi (analisi pre-partita /analisi): ogni quanto (secondi) ricontrollare le leghe
 # whitelist per nuove partite terminate da processare, e quante partite nuove processare al
 # massimo (in totale, su tutte le leghe insieme) ad ogni esecuzione, per non sforare le quote API
@@ -346,6 +355,8 @@ try:
     PESO_INTENSITA_CORNER = config.get("peso_intensita_corner", PESO_INTENSITA_CORNER)
     REPORT_INTENSITA_AUTOMATICO_ATTIVO = config.get("report_intensita_automatico_attivo", REPORT_INTENSITA_AUTOMATICO_ATTIVO)
     INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
+    DIAGNOSTICA_AUTOMATICA_ATTIVA = config.get("diagnostica_automatica_attiva", DIAGNOSTICA_AUTOMATICA_ATTIVA)
+    INTERVALLO_DIAGNOSTICA_AUTOMATICA = config.get("intervallo_diagnostica_automatica", INTERVALLO_DIAGNOSTICA_AUTOMATICA)
     INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
     STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
     STORICO_AGGIORNAMENTO_AUTOMATICO = config.get("storico_aggiornamento_automatico", STORICO_AGGIORNAMENTO_AUTOMATICO)
@@ -2422,12 +2433,17 @@ def cmd_funzioni(chat_id):
         "scattare anticipa davvero un gol, o se scatta e poi non succede nulla più spesso di "
         "quanto sembri lanciandole a mano ogni tanto. /shadowlogstrategie mostra a che punto "
         "è questa raccolta.\n\n"
+        "Il bot ora si controlla anche da solo: ogni 30 minuti verifica che partite "
+        "tracciate, statistiche e i due shadow-log sopra stiano davvero funzionando, e se "
+        "trova un problema te lo scrive qui in chat da solo (oltre che nei log) - non devi "
+        "controllare nulla a mano né lanciare comandi apposta.\n\n"
         "📋 ULTIME NOVITÀ (ultimi giorni)\n"
         "Quote 1X2 nelle notifiche, pausa automatica per fascia oraria, monitoraggio 24/7 "
         "anche fuori orario, il bottone Momentum ora aggiorna la notifica esistente invece "
         "di mandarne una nuova, corretto un bug che perdeva il risultato di partite finite "
         "durante la pausa, /strategie per capire le soglie attuali, raccolta dati automatica "
-        "sull'efficacia delle 6 strategie."
+        "sull'efficacia delle 6 strategie, controllo automatico della pipeline dati con avviso "
+        "in chat se qualcosa si inceppa."
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -3729,6 +3745,134 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
     ULTIMO_REPORT_INTENSITA = now
 
 
+# Legenda usata dalla diagnostica automatica sotto: ogni anomalia viene taggata con una di queste
+# etichette, così chi legge (in chat o nei log di Render) sa subito a quale passaggio della
+# pipeline risale e cosa controllare - senza dover rifare il ragionamento da capo ogni volta.
+#
+# Versione tecnica (nomi di funzioni/variabili reali, per chi legge il codice):
+# TRACCIAMENTO: la partita deve comparire tra quelle live e passare campionato_valido() prima che
+#   processa_partita() la veda. Se manca: controllare il filtro lega/whitelist, o se il ciclo
+#   principale è più lento delle partite che iniziano (troppe live insieme).
+# STATISTICHE: get_statistiche_partita() deve rispondere con dati. Se mancano a lungo: la lega
+#   potrebbe non essere coperta dall'API per le statistiche (vedi leghe_senza_statistiche.json)
+#   o c'è un errore/rate-limit API.
+# xG e QUOTA: non generano anomalie automatiche (mancano spesso per motivi normali: lega non
+#   coperta per l'xG, bookmaker senza quota su quella partita) - restano visibili solo lanciando
+#   /diagnostica a mano.
+# SHADOW-LOG VALORE: richiede la quota 1X2 già risolta, scrive ogni INTERVALLO_SNAPSHOT_VALORE
+#   secondi. Se la quota c'è ma non scrive mai: controllare registra_shadow_log_valore_snapshot()
+#   e il timer ultimo_snapshot_valore dentro processa_partita().
+# SHADOW-LOG STRATEGIE: richiede solo le statistiche (non la quota), stesso ritmo di sopra. Se le
+#   statistiche ci sono ma non scrive mai: controllare il blocco corrispondente dentro
+#   processa_partita() (dentro l'if current_stats).
+# STRATEGIE: se una strategia non scatta mai per ore su nessuna partita non è automaticamente un
+#   bug - può essere normale (soglie strette) o mancare un dato a monte (es. /fasciacalda resta
+#   vuota se storico_aggiornamento_automatico è spento, /xgtiro se l'xG non è disponibile per
+#   quelle leghe). Vedi /strategie per le soglie attuali.
+#
+# Versione mandata su Telegram sotto (parse_mode Markdown): niente underscore o parentesi quadre,
+# altrimenti Telegram prova a interpretarli come corsivo/link e può rifiutare il messaggio intero
+# con un errore di parsing invece di consegnarlo.
+LEGENDA_DIAGNOSTICA = (
+    "Legenda passaggi pipeline (dove può fermarsi, come intervenire):\n"
+    "TRACCIAMENTO: la partita deve comparire tra quelle live e in un campionato supportato prima "
+    "che il bot inizi a seguirla. Se manca: controllare il filtro lega/whitelist, o se il ciclo è "
+    "più lento delle partite che iniziano (troppe partite live insieme).\n"
+    "STATISTICHE: la chiamata API alle statistiche deve rispondere con dati. Se mancano a lungo: "
+    "la lega potrebbe non essere coperta dall'API per le statistiche, o c'è un errore/rate-limit "
+    "dell'API.\n"
+    "(xG e quota 1X2 non generano anomalie automatiche: mancano spesso per motivi normali - lega "
+    "non coperta per l'xG, bookmaker senza quota su quella partita - restano visibili solo "
+    "lanciando /diagnostica a mano.)\n"
+    "SHADOW-LOG VALORE: richiede la quota 1X2 già risolta, scrive ogni 15 minuti circa. Se la "
+    "quota c'è ma non scrive mai: bug nella scrittura dello snapshot valore o nel suo timer.\n"
+    "SHADOW-LOG STRATEGIE: richiede solo le statistiche (non la quota), stesso ritmo di sopra. Se "
+    "le statistiche ci sono ma non scrive mai: bug nel blocco corrispondente dentro l'elaborazione "
+    "della partita.\n"
+    "STRATEGIE: se una strategia non scatta mai per ore su nessuna partita non è automaticamente "
+    "un bug - può essere normale (soglie strette) oppure mancare un dato a monte (es. fascia calda "
+    "resta vuota se l'aggiornamento storico automatico è spento, xG per tiro se l'xG non è "
+    "disponibile per quelle leghe). Vedi /strategie per le soglie attuali."
+)
+
+
+def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
+    """Diagnostica automatica della pipeline dati: gira da sola dentro il ciclo principale ogni
+    INTERVALLO_DIAGNOSTICA_AUTOMATICA secondi, riusando partite_valide/stato_partite già
+    aggiornati in questo stesso ciclo (nessuna chiamata API in più). Logga sempre il dettaglio
+    passo-passo su Render (visibile anche quando tutto va bene, per un controllo a ritroso) e
+    manda un messaggio Telegram automatico SOLO se trova almeno un'anomalia - così non serve
+    lanciare nessun comando a mano per accorgersi di un problema mentre le partite sono in corso."""
+    global ULTIMA_DIAGNOSTICA_AUTOMATICA
+    if not DIAGNOSTICA_AUTOMATICA_ATTIVA:
+        return
+    ora = time.time()
+    if ora - ULTIMA_DIAGNOSTICA_AUTOMATICA < INTERVALLO_DIAGNOSTICA_AUTOMATICA:
+        return
+    ULTIMA_DIAGNOSTICA_AUTOMATICA = ora
+
+    if not partite_valide:
+        log("Diagnostica automatica: nessuna partita live valida in questo momento, skip.")
+        return
+
+    righe_log = []
+    anomalie = []
+    for f in partite_valide:
+        fid = f.get("fixture", {}).get("id")
+        if not fid:
+            continue
+        home = f.get("teams", {}).get("home", {}).get("name", "?")
+        away = f.get("teams", {}).get("away", {}).get("name", "?")
+        minuto_api = f.get("fixture", {}).get("status", {}).get("elapsed") or 0
+        stato = stato_partite.get(fid)
+
+        if not stato:
+            anomalie.append(f"TRACCIAMENTO - {home}-{away}: live e in campionato valido ma mai tracciata dal bot")
+            continue
+
+        minuto_bot = stato.get("last_minute")
+        if minuto_bot is not None and abs(minuto_api - minuto_bot) > 5:
+            anomalie.append(f"TRACCIAMENTO - {home}-{away}: minuto bot fermo a {minuto_bot}' contro {minuto_api}' dell'API")
+
+        history = stato.get("history", [])
+        if not history and minuto_api > 10:
+            anomalie.append(f"STATISTICHE - {home}-{away}: nessuna statistica arrivata al {minuto_api}'")
+
+        quote = quote_1x2_per_fixture(fid)
+        ultimo_val = stato.get("ultimo_snapshot_valore")
+        if isinstance(quote, dict) and not ultimo_val and minuto_api > 16:
+            anomalie.append(f"SHADOW-LOG VALORE - {home}-{away}: quota presente ma nessuno snapshot scritto al {minuto_api}'")
+
+        ultimo_strat = stato.get("ultimo_snapshot_strategie")
+        if history and not ultimo_strat and minuto_api > 16:
+            anomalie.append(f"SHADOW-LOG STRATEGIE - {home}-{away}: statistiche presenti ma nessuno snapshot scritto al {minuto_api}'")
+
+        righe_log.append(
+            f"{home}-{away} {minuto_api}': tracciata=si, stats={'si' if history else 'no'}, "
+            f"quota={'si' if isinstance(quote, dict) else 'no'}, "
+            f"snap_valore={'si' if ultimo_val else 'no'}, snap_strategie={'si' if ultimo_strat else 'no'}"
+        )
+
+    log("Diagnostica automatica - dettaglio: " + (" | ".join(righe_log) if righe_log else "nessuna partita tracciabile"))
+
+    if not anomalie:
+        log("Diagnostica automatica: nessuna anomalia rilevata.")
+        return
+
+    log("Diagnostica automatica - ANOMALIE: " + " | ".join(anomalie))
+    if not notifiche_attive:
+        log("Diagnostica automatica: notifiche spente (fuori orario), anomalie solo loggate su Render.")
+        return
+
+    testo = (
+        "🔍 Diagnostica automatica - trovate anomalie nella pipeline dati:\n\n"
+        + "\n".join(f"- {a}" for a in anomalie)
+        + "\n\n" + LEGENDA_DIAGNOSTICA
+    )
+    for i in range(0, len(testo), 3800):
+        invia_messaggio_telegram(testo[i:i + 3800])
+
+
 # =============================================================================
 # STORICO MINUTAGGI - backfill/aggiornamento e analisi pre-partita (/analisi)
 # =============================================================================
@@ -4940,6 +5084,7 @@ if __name__ == "__main__":
         pulisci_partite_terminate(fixture_ids_live)
         salva_stato_partite(stato_partite)
         invia_report_intensita_automatico(partite_valide, notifiche_attive)
+        esegui_diagnostica_automatica(partite_valide, notifiche_attive)
         aggiorna_storico_minutaggi_automatico()
 
         # Scheduler adattivo (piano giornata): fuori da ogni finestra attiva prevista e senza
