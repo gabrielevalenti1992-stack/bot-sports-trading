@@ -210,6 +210,12 @@ ULTIMO_REPORT_INTENSITA = 0
 DIAGNOSTICA_AUTOMATICA_ATTIVA = True
 INTERVALLO_DIAGNOSTICA_AUTOMATICA = 1800  # 30 minuti
 ULTIMA_DIAGNOSTICA_AUTOMATICA = 0
+# Anomalie già mandate in chat, per partita: {fixture_id: {"STATISTICHE", ...}}. Serve a NON
+# ripetere ogni 30 minuti la stessa identica anomalia sulla stessa partita (una partita senza
+# statistiche generava lo stesso avviso, legenda inclusa, per tutti i 90 minuti). Si notifica al
+# primo rilevamento; se l'anomalia rientra, la voce viene tolta e un'eventuale ricomparsa torna a
+# essere notificabile. Ripulita a fine partita da pulisci_partite_terminate().
+ANOMALIE_DIAGNOSTICA_NOTIFICATE = {}
 
 # Storico minutaggi (analisi pre-partita /analisi): ogni quanto (secondi) ricontrollare le leghe
 # whitelist per nuove partite terminate da processare, e quante partite nuove processare al
@@ -424,6 +430,11 @@ COPPE_NAZIONALI_ESCLUSE = [
 LEGHE_SENZA_STATISTICHE_FILE = data_path("leghe_senza_statistiche.json")
 SOGLIA_SENZA_STATISTICHE = 3
 DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
+# Prima di questo minuto una risposta senza statistiche non dice niente sulla copertura della
+# lega: nei primissimi minuti l'API spesso non ha ancora pubblicato nulla anche per campionati
+# perfettamente coperti. Senza questa soglia bastava una partita sola, controllata 3 volte tra il
+# 1' e il 9', per escludere per 24h un intero campionato che le statistiche le pubblica eccome.
+MINUTO_MINIMO_VERDETTO_STATISTICHE = 15
 
 
 def carica_leghe_senza_statistiche():
@@ -447,6 +458,10 @@ print(f"leghe_senza_statistiche recuperate da disco: {len(LEGHE_SENZA_STATISTICH
 
 
 def registra_esito_statistiche(league_country, league_name, disponibili):
+    """Va chiamata SOLO quando l'API ha davvero risposto (dati presenti o risposta vuota):
+    disponibili=False significa "l'API ha risposto e per questa partita non ci sono statistiche",
+    non "la chiamata è fallita". Passare qui anche i fallimenti (rate-limit, timeout, errori di
+    rete) faceva escludere per 24h campionati coperti dopo 3 cicli sfortunati di seguito."""
     chiave = (league_country.lower(), league_name.lower())
     stato = LEGHE_SENZA_STATISTICHE.get(chiave, {"senza_stats_consecutive": 0, "esclusa_fino": 0})
     if disponibili:
@@ -1619,7 +1634,14 @@ def get_statistiche_partita(fixture_id, debug=False):
             log(f"    [DEBUG stats {fixture_id}] risposta OK - {json.dumps(data)[:1500]}")
         else:
             log(f"    [DEBUG stats {fixture_id}] errore: {tipo_errore} - {dettaglio}")
-    risultato = None if data is None else data.get("response", [])
+    if data is None:
+        # Le chiamate FALLITE non si mettono in cache: mettercele (com'era prima) rendeva cieca
+        # per altri 50s anche la richiesta successiva sulla stessa partita, quindi un /diagnostica
+        # o un /live lanciati subito dopo un ciclo sfortunato riportavano "statistiche assenti"
+        # senza nemmeno riprovare. Restituire None (invece di []) resta il segnale di errore:
+        # chi chiama distingue "chiamata fallita" da "l'API ha risposto senza dati".
+        return None
+    risultato = data.get("response", [])
     _CACHE_STATISTICHE_PARTITA[fixture_id] = (now, risultato)
     return risultato
 
@@ -2295,8 +2317,15 @@ def cmd_diagnostica(chat_id):
 
         history = stato.get("history", [])
         if not history:
-            blocco.append("  ⚠️ Statistiche: mai arrivate (nessuna riga nello storico)")
-            if minuto_api > 10:
+            esito_stats = stato.get("stats_ultimo_esito")
+            vuote = stato.get("stats_vuote_consecutive", 0)
+            if esito_stats == "vuote":
+                blocco.append(f"  ➖ Statistiche: l'API risponde ma non ne ha per questa partita ({vuote} risposte vuote di fila)")
+            elif esito_stats == "errore":
+                blocco.append("  ⚠️ Statistiche: ultima chiamata fallita (rate-limit/timeout/rete)")
+            else:
+                blocco.append("  ⚠️ Statistiche: mai arrivate (nessuna riga nello storico)")
+            if minuto_api > 10 and esito_stats != "vuote":
                 anomalie.append(f"{home}-{away}: statistiche mai arrivate al {minuto_api}'")
         else:
             eta_stats = ora - history[-1]["timestamp"]
@@ -2689,13 +2718,40 @@ def cmd_momentum(chat_id, query):
         invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a)
 
 
+def _invia_reply_con_fallback(chat_id, text, reply_to_message_id, contesto):
+    """Manda `text` in risposta (reply_parameters) a reply_to_message_id; se Telegram rifiuta il
+    collegamento (messaggio troppo vecchio, cancellato, o un altro limite dell'API) la sendMessage
+    fallisce PER INTERO - non solo la parte "in risposta a" - e senza controllare lo status code
+    il messaggio va perso in silenzio: nessuna eccezione, nessun log, niente in chat (esattamente
+    il sintomo "clicco Momentum e non succede assolutamente nulla"). Qui si ricontrolla e, se il
+    collegamento fallisce, si rimanda lo stesso testo come messaggio normale invece di perderlo."""
+    risposta = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": text, "reply_parameters": {"message_id": reply_to_message_id}},
+        timeout=5)
+    if risposta.status_code == 200:
+        return
+    log(f"[{contesto}] sendMessage con reply_parameters fallita (HTTP {risposta.status_code}): "
+        f"{risposta.text[:300]} - reinvio senza collegamento")
+    risposta2 = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": text}, timeout=5)
+    if risposta2.status_code != 200:
+        log(f"[{contesto}] sendMessage anche senza reply_parameters fallita (HTTP {risposta2.status_code}): {risposta2.text[:300]}")
+
+
 def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
     """Bottone "📈 Momentum" cliccato su una notifica: invece di mandare un grafico come messaggio
     a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con il solo grafico
     momentum (non combinato con le barre: più leggero, un'immagine sola, nessuna chiamata
     statistiche in più) - così il grafico compare esattamente nel messaggio su cui si è cliccato,
     non altrove in chat. Se lo storico non basta ancora, lascia la notifica invariata (niente da
-    mostrare di meglio) e risponde solo con la spiegazione."""
+    mostrare di meglio) e risponde solo con la spiegazione.
+
+    Su una partita con tante notifiche ravvicinate (preferiti, partite movimentate) l'edit da solo
+    è facile da perdere in mezzo a messaggi quasi identici: in coda si manda anche una piccola
+    conferma IN RISPOSTA (reply_parameters) a questa stessa notifica, cosi' Telegram mostra la
+    citazione/collegamento e un tap ci salta dritto sopra, anche se è più in alto nella chat."""
     stato = stato_partite.get(fixture_id)
     if not stato:
         requests.post(
@@ -2711,13 +2767,9 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"))
 
     if not foto_path:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": f"Momentum non disponibile: {spiega_momentum_insufficiente(history)}",
-                "reply_parameters": {"message_id": message_id},
-            }, timeout=5)
+        _invia_reply_con_fallback(
+            chat_id, f"Momentum non disponibile: {spiega_momentum_insufficiente(history)}",
+            message_id, "momentum non disponibile")
         return
 
     try:
@@ -2732,7 +2784,7 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
                            f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
                            f"{stato.get('last_minute', '?')}'{nota_copertura_momentum(history)}")
             media = {"type": "photo", "media": "attach://photo", "caption": caption}
-            requests.post(
+            risposta_edit = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageMedia",
                 data={"chat_id": chat_id, "message_id": message_id, "media": json.dumps(media)},
                 files={"photo": photo}, timeout=15)
@@ -2748,6 +2800,15 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         except Exception:
             pass
 
+    if risposta_edit.status_code != 200:
+        # Non si tocca il bottone se l'edit non è davvero riuscito (es. notifica troppo vecchia,
+        # rate-limit): altrimenti il bottone sparirebbe senza che il grafico sia mai comparso.
+        log(f"editMessageMedia fallita per la notifica momentum: HTTP {risposta_edit.status_code} - {risposta_edit.text[:300]}")
+        _invia_reply_con_fallback(
+            chat_id, "Errore nell'aggiornare la notifica con il grafico momentum, riprova.",
+            message_id, "editMessageMedia fallita")
+        return
+
     # Il bottone non serve più: il grafico è già agganciato alla notifica, ricliccarlo
     # rigenererebbe la stessa immagine inutilmente.
     is_fav = str(fixture_id) in FAVORITE_MATCHES
@@ -2757,6 +2818,12 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
             json={"chat_id": chat_id, "message_id": message_id, "reply_markup": json.dumps(nuova_keyboard)}, timeout=5)
+
+    # Collegamento visibile: su una partita con tante notifiche simili impilate, questa citazione
+    # (Telegram mostra un'anteprima della notifica originale, tap per saltarci sopra) è l'unico
+    # modo per far capire subito QUALE messaggio è stato appena aggiornato con il grafico.
+    _invia_reply_con_fallback(
+        chat_id, "📈 Grafico momentum aggiornato qui sopra ⬆️", message_id, "conferma momentum")
 
 
 def calcola_indice_intensita(delta_stats):
@@ -3753,9 +3820,12 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 # TRACCIAMENTO: la partita deve comparire tra quelle live e passare campionato_valido() prima che
 #   processa_partita() la veda. Se manca: controllare il filtro lega/whitelist, o se il ciclo
 #   principale è più lento delle partite che iniziano (troppe live insieme).
-# STATISTICHE: get_statistiche_partita() deve rispondere con dati. Se mancano a lungo: la lega
-#   potrebbe non essere coperta dall'API per le statistiche (vedi leghe_senza_statistiche.json)
-#   o c'è un errore/rate-limit API.
+# STATISTICHE: get_statistiche_partita() ha restituito None, cioè la chiamata è fallita
+#   (rate-limit, timeout, rete) o non è mai stata fatta. Vero problema di pipeline.
+# COPERTURA STATISTICHE: get_statistiche_partita() risponde ma ha_statistiche_disponibili() è
+#   False da almeno SOGLIA_SENZA_STATISTICHE cicli: l'API non ha dati per quella partita (vedi
+#   leghe_senza_statistiche.json per l'esclusione lega, che scatta solo dal
+#   MINUTO_MINIMO_VERDETTO_STATISTICHE in poi). Non è un bug del bot.
 # xG e QUOTA: non generano anomalie automatiche (mancano spesso per motivi normali: lega non
 #   coperta per l'xG, bookmaker senza quota su quella partita) - restano visibili solo lanciando
 #   /diagnostica a mano.
@@ -3778,9 +3848,16 @@ LEGENDA_DIAGNOSTICA = (
     "TRACCIAMENTO: la partita deve comparire tra quelle live e in un campionato supportato prima "
     "che il bot inizi a seguirla. Se manca: controllare il filtro lega/whitelist, o se il ciclo è "
     "più lento delle partite che iniziano (troppe partite live insieme).\n"
-    "STATISTICHE: la chiamata API alle statistiche deve rispondere con dati. Se mancano a lungo: "
-    "la lega potrebbe non essere coperta dall'API per le statistiche, o c'è un errore/rate-limit "
-    "dell'API.\n"
+    "STATISTICHE: la chiamata API alle statistiche è fallita o non è mai arrivata a destinazione "
+    "(rate-limit, timeout, errore di rete). È l'unico caso in cui le statistiche mancanti sono "
+    "davvero un problema di pipeline: di solito rientra da solo al ciclo dopo, se persiste "
+    "controllare quota giornaliera e stato dell'API.\n"
+    "COPERTURA STATISTICHE: l'API risponde regolarmente ma per quella partita non pubblica "
+    "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita (gol, cartellini, "
+    "rigori, recuperi) ma mostrerà N/D al posto di tiri/corner e non potrà far scattare le "
+    "strategie. Capita anche a partite della stessa lega in cui invece le statistiche arrivano.\n"
+    "Ogni anomalia viene segnalata una volta sola per partita: se resta uguale non viene "
+    "ripetuta ad ogni controllo, e ricompare in chat solo se rientra e si ripresenta.\n"
     "(xG e quota 1X2 non generano anomalie automatiche: mancano spesso per motivi normali - lega "
     "non coperta per l'xG, bookmaker senza quota su quella partita - restano visibili solo "
     "lanciando /diagnostica a mano.)\n"
@@ -3796,13 +3873,32 @@ LEGENDA_DIAGNOSTICA = (
 )
 
 
+def _anomalie_nuove(fixture_id, trovate, registra=True):
+    """Tiene solo le anomalie di questa partita non ancora mandate in chat, e aggiorna lo storico
+    per la prossima passata: le categorie rientrate vengono dimenticate, così se lo stesso
+    problema si ripresenta più tardi torna a essere notificato (una volta sola, di nuovo).
+    Con registra=False (notifiche spente fuori orario) nulla viene marcato come notificato:
+    l'anomalia resta in coda e verrà segnalata al primo controllo dentro l'orario attivo."""
+    gia_note = ANOMALIE_DIAGNOSTICA_NOTIFICATE.get(fixture_id, set())
+    nuove = [testo for categoria, testo in trovate.items() if categoria not in gia_note]
+    if registra:
+        if trovate:
+            ANOMALIE_DIAGNOSTICA_NOTIFICATE[fixture_id] = set(trovate.keys())
+        else:
+            ANOMALIE_DIAGNOSTICA_NOTIFICATE.pop(fixture_id, None)
+    return nuove
+
+
 def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
     """Diagnostica automatica della pipeline dati: gira da sola dentro il ciclo principale ogni
     INTERVALLO_DIAGNOSTICA_AUTOMATICA secondi, riusando partite_valide/stato_partite già
     aggiornati in questo stesso ciclo (nessuna chiamata API in più). Logga sempre il dettaglio
     passo-passo su Render (visibile anche quando tutto va bene, per un controllo a ritroso) e
     manda un messaggio Telegram automatico SOLO se trova almeno un'anomalia - così non serve
-    lanciare nessun comando a mano per accorgersi di un problema mentre le partite sono in corso."""
+    lanciare nessun comando a mano per accorgersi di un problema mentre le partite sono in corso.
+
+    In chat ogni anomalia va una volta sola per partita (vedi _anomalie_nuove): i log di Render
+    continuano invece a riportarle tutte ad ogni passata, per poter ricostruire quanto è durata."""
     global ULTIMA_DIAGNOSTICA_AUTOMATICA
     if not DIAGNOSTICA_AUTOMATICA_ATTIVA:
         return
@@ -3816,7 +3912,8 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
         return
 
     righe_log = []
-    anomalie = []
+    anomalie = []       # tutto ciò che risulta anomalo adesso (finisce nei log di Render)
+    anomalie_nuove = [] # solo ciò che non era già stato notificato (finisce in chat)
     for f in partite_valide:
         fid = f.get("fixture", {}).get("id")
         if not fid:
@@ -3825,30 +3922,57 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
         away = f.get("teams", {}).get("away", {}).get("name", "?")
         minuto_api = f.get("fixture", {}).get("status", {}).get("elapsed") or 0
         stato = stato_partite.get(fid)
+        # Anomalie di QUESTO giro per questa partita, indicizzate per categoria: sotto si notifica
+        # solo ciò che non era già stato notificato prima (vedi ANOMALIE_DIAGNOSTICA_NOTIFICATE).
+        trovate = {}
 
         if not stato:
-            anomalie.append(f"TRACCIAMENTO - {home}-{away}: live e in campionato valido ma mai tracciata dal bot")
+            trovate["TRACCIAMENTO"] = (
+                f"TRACCIAMENTO - {home}-{away}: live e in campionato valido ma mai tracciata dal bot")
+            anomalie.extend(trovate.values())
+            anomalie_nuove.extend(_anomalie_nuove(fid, trovate, registra=notifiche_attive))
             continue
 
         minuto_bot = stato.get("last_minute")
         if minuto_bot is not None and abs(minuto_api - minuto_bot) > 5:
-            anomalie.append(f"TRACCIAMENTO - {home}-{away}: minuto bot fermo a {minuto_bot}' contro {minuto_api}' dell'API")
+            trovate["TRACCIAMENTO"] = (
+                f"TRACCIAMENTO - {home}-{away}: minuto bot fermo a {minuto_bot}' contro {minuto_api}' dell'API")
 
         history = stato.get("history", [])
+        esito_stats = stato.get("stats_ultimo_esito")
         if not history and minuto_api > 10:
-            anomalie.append(f"STATISTICHE - {home}-{away}: nessuna statistica arrivata al {minuto_api}'")
+            # Due cose diverse che prima venivano dette con la stessa frase: se l'API risponde
+            # regolarmente ma per questa partita non ha statistiche, non c'è niente da riparare
+            # nel bot (stessa natura di xG e quota mancanti); se invece la chiamata fallisce, o
+            # non è mai stata fatta, quello sì è un problema di pipeline.
+            if esito_stats == "vuote" and stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE:
+                trovate["COPERTURA STATISTICHE"] = (
+                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
+                    f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
+                    f"seguita, ma senza statistiche mostrerà N/D e non potrà far scattare strategie.")
+            else:
+                dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
+                    else "nessuna risposta utile alle statistiche"
+                trovate["STATISTICHE"] = (
+                    f"STATISTICHE - {home}-{away}: nessuna statistica arrivata al {minuto_api}' ({dettaglio})")
 
         quote = quote_1x2_per_fixture(fid)
         ultimo_val = stato.get("ultimo_snapshot_valore")
         if isinstance(quote, dict) and not ultimo_val and minuto_api > 16:
-            anomalie.append(f"SHADOW-LOG VALORE - {home}-{away}: quota presente ma nessuno snapshot scritto al {minuto_api}'")
+            trovate["SHADOW-LOG VALORE"] = (
+                f"SHADOW-LOG VALORE - {home}-{away}: quota presente ma nessuno snapshot scritto al {minuto_api}'")
 
         ultimo_strat = stato.get("ultimo_snapshot_strategie")
         if history and not ultimo_strat and minuto_api > 16:
-            anomalie.append(f"SHADOW-LOG STRATEGIE - {home}-{away}: statistiche presenti ma nessuno snapshot scritto al {minuto_api}'")
+            trovate["SHADOW-LOG STRATEGIE"] = (
+                f"SHADOW-LOG STRATEGIE - {home}-{away}: statistiche presenti ma nessuno snapshot scritto al {minuto_api}'")
 
+        anomalie.extend(trovate.values())
+        anomalie_nuove.extend(_anomalie_nuove(fid, trovate, registra=notifiche_attive))
+
+        stats_txt = "si" if history else f"no (esito API: {esito_stats or 'mai chiamata'})"
         righe_log.append(
-            f"{home}-{away} {minuto_api}': tracciata=si, stats={'si' if history else 'no'}, "
+            f"{home}-{away} {minuto_api}': tracciata=si, stats={stats_txt}, "
             f"quota={'si' if isinstance(quote, dict) else 'no'}, "
             f"snap_valore={'si' if ultimo_val else 'no'}, snap_strategie={'si' if ultimo_strat else 'no'}"
         )
@@ -3864,9 +3988,15 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
         log("Diagnostica automatica: notifiche spente (fuori orario), anomalie solo loggate su Render.")
         return
 
+    if not anomalie_nuove:
+        # Le stesse anomalie di prima, sulle stesse partite: restano nei log ma non si rimanda lo
+        # stesso messaggio (con legenda annessa) ogni 30 minuti per tutta la durata della partita.
+        log(f"Diagnostica automatica: {len(anomalie)} anomalie già notificate in precedenza, nessun nuovo messaggio in chat.")
+        return
+
     testo = (
         "🔍 Diagnostica automatica - trovate anomalie nella pipeline dati:\n\n"
-        + "\n".join(f"- {a}" for a in anomalie)
+        + "\n".join(f"- {a}" for a in anomalie_nuove)
         + "\n\n" + LEGENDA_DIAGNOSTICA
     )
     for i in range(0, len(testo), 3800):
@@ -4504,8 +4634,19 @@ def processa_partita(fixture, notifiche_attive=True):
         stato_partite[fixture_id]["rigori"] = rigori
         stato_partite[fixture_id]["goals"] = goals
 
+        # Tre esiti diversi, che prima finivano tutti e tre in due soli rami:
+        #  - stats is None            -> la CHIAMATA è fallita (rate-limit, timeout, rete)
+        #  - risposta senza dati veri -> l'API ha risposto, ma per questa partita non pubblica stats
+        #  - dati veri                -> caso normale
+        # La distinzione conta in due punti: solo il secondo caso dice qualcosa sulla copertura
+        # della lega (vedi registra_esito_statistiche) e solo il primo è un vero problema di
+        # pipeline da segnalare nella diagnostica. Si usa ha_statistiche_disponibili() come già
+        # fa /live: il vecchio "len(stats) >= 2" considerava buona anche la risposta con le due
+        # squadre ma tutti i valori a null (tipica dei primi minuti), che estrai_current_stats
+        # traduce in zeri - finivano nello storico come punti finti e in notifica come "0 - 0"
+        # invece che "N/D".
         stats = get_statistiche_partita(fixture_id)
-        if stats and len(stats) >= 2:
+        if ha_statistiche_disponibili(stats):
             stats_home = stats[0].get("statistics", [])
             stats_away = stats[1].get("statistics", [])
             current_stats = estrai_current_stats(stats_home, stats_away)
@@ -4527,6 +4668,8 @@ def processa_partita(fixture, notifiche_attive=True):
                 "xg": [estrai_xg(stats_home), estrai_xg(stats_away)],
             })
             stato_partite[fixture_id]["history"] = history
+            stato_partite[fixture_id]["stats_ultimo_esito"] = "ok"
+            stato_partite[fixture_id]["stats_vuote_consecutive"] = 0
             registra_esito_statistiche(league_country, league_name, True)
             if fine_1h_appena_avvenuta:
                 stato_partite[fixture_id]["stats_fine_1h"] = current_stats
@@ -4536,8 +4679,19 @@ def processa_partita(fixture, notifiche_attive=True):
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
             tiri_area_casa = tiri_area_ospite = 0
             xg_casa = xg_ospite = None
-            log(f"    ⚠️ Statistiche non disponibili da API (lega potrebbe non supportare stats)")
-            registra_esito_statistiche(league_country, league_name, False)
+            if stats is None:
+                # Chiamata fallita: non dice nulla sulla copertura della lega, si riprova al ciclo
+                # dopo. Il contatore delle risposte vuote NON va azzerato (non abbiamo notizie
+                # nuove) ma nemmeno incrementato.
+                stato_partite[fixture_id]["stats_ultimo_esito"] = "errore"
+                log(f"    ⚠️ Statistiche non recuperate: chiamata API fallita (rate-limit/timeout/rete), riprovo al prossimo ciclo")
+            else:
+                vuote = stato_partite[fixture_id].get("stats_vuote_consecutive", 0) + 1
+                stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
+                stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
+                log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
+                if minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE:
+                    registra_esito_statistiche(league_country, league_name, False)
 
         if status_short in ("FT", "AET", "PEN"):
             stato = stato_partite.get(fixture_id, {})
@@ -4942,6 +5096,12 @@ def pulisci_partite_terminate(fixture_ids_live):
     for cache in (_CACHE_STATISTICHE_PARTITA, _CACHE_EVENTI_PARTITA):
         for fid in [f for f in cache if f not in fixture_ids_live]:
             del cache[fid]
+
+    # Stesso motivo per lo storico delle anomalie già notificate: senza pulizia crescerebbe per
+    # tutta la vita del processo e, se lo stesso fixture_id tornasse live (partita sospesa e
+    # ripresa), si porterebbe dietro anomalie vecchie facendole considerare "già viste".
+    for fid in [f for f in ANOMALIE_DIAGNOSTICA_NOTIFICATE if f not in fixture_ids_live]:
+        del ANOMALIE_DIAGNOSTICA_NOTIFICATE[fid]
 
 
 # =============================================================================
