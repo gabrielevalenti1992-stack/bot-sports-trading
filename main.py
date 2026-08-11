@@ -2742,11 +2742,16 @@ def _invia_reply_con_fallback(chat_id, text, reply_to_message_id, contesto):
 
 def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
     """Bottone "📈 Momentum" cliccato su una notifica: invece di mandare un grafico come messaggio
-    a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con il solo grafico
-    momentum (non combinato con le barre: più leggero, un'immagine sola, nessuna chiamata
-    statistiche in più) - così il grafico compare esattamente nel messaggio su cui si è cliccato,
-    non altrove in chat. Se lo storico non basta ancora, lascia la notifica invariata (niente da
-    mostrare di meglio) e risponde solo con la spiegazione.
+    a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con la versione
+    combinata barre+momentum in un'unica immagine (genera_grafico_combinato) - così il grafico
+    compare esattamente nel messaggio su cui si è cliccato, non altrove in chat, e le barre con
+    il totale cumulativo restano visibili invece di sparire sostituite dal solo andamento momentum.
+    I totali per le barre riusano l'ultimo snapshot già in history (stato_partite), NON una nuova
+    chiamata a get_statistiche_partita: la versione combinata era stata tolta da qui proprio per
+    quella chiamata extra, ma il dato è già in memoria (al più qualche minuto vecchio, come ovunque
+    altrove nel bot) quindi si evita il costo mantenendo comunque le barre. Se lo storico non
+    basta ancora, lascia la notifica invariata (niente da mostrare di meglio) e risponde solo con
+    la spiegazione.
 
     Su una partita con tante notifiche ravvicinate (preferiti, partite movimentate) l'edit da solo
     è facile da perdere in mezzo a messaggi quasi identici: in coda si manda anche una piccola
@@ -2761,10 +2766,13 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
 
     history = stato.get("history", [])
     home, away = stato.get("home", "?"), stato.get("away", "?")
+    stats_totali = history[-1]["stats"] if history else {
+        "Tiri totali": (0, 0), "Tiri in porta": (0, 0), "Corner": (0, 0), "Tiri in area": (0, 0)}
 
-    foto_path = genera_grafico_momentum(
-        fixture_id, home, away, history,
-        stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"))
+    foto_path = genera_grafico_combinato(
+        fixture_id, home, away, stats_totali, history,
+        stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"),
+        stato.get("recupero_1h"), stato.get("recupero_2h"))
 
     if not foto_path:
         _invia_reply_con_fallback(
