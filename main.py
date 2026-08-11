@@ -2718,6 +2718,28 @@ def cmd_momentum(chat_id, query):
         invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a)
 
 
+def _invia_reply_con_fallback(chat_id, text, reply_to_message_id, contesto):
+    """Manda `text` in risposta (reply_parameters) a reply_to_message_id; se Telegram rifiuta il
+    collegamento (messaggio troppo vecchio, cancellato, o un altro limite dell'API) la sendMessage
+    fallisce PER INTERO - non solo la parte "in risposta a" - e senza controllare lo status code
+    il messaggio va perso in silenzio: nessuna eccezione, nessun log, niente in chat (esattamente
+    il sintomo "clicco Momentum e non succede assolutamente nulla"). Qui si ricontrolla e, se il
+    collegamento fallisce, si rimanda lo stesso testo come messaggio normale invece di perderlo."""
+    risposta = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": text, "reply_parameters": {"message_id": reply_to_message_id}},
+        timeout=5)
+    if risposta.status_code == 200:
+        return
+    log(f"[{contesto}] sendMessage con reply_parameters fallita (HTTP {risposta.status_code}): "
+        f"{risposta.text[:300]} - reinvio senza collegamento")
+    risposta2 = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": text}, timeout=5)
+    if risposta2.status_code != 200:
+        log(f"[{contesto}] sendMessage anche senza reply_parameters fallita (HTTP {risposta2.status_code}): {risposta2.text[:300]}")
+
+
 def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
     """Bottone "📈 Momentum" cliccato su una notifica: invece di mandare un grafico come messaggio
     a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con il solo grafico
@@ -2745,13 +2767,9 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"))
 
     if not foto_path:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": f"Momentum non disponibile: {spiega_momentum_insufficiente(history)}",
-                "reply_parameters": {"message_id": message_id},
-            }, timeout=5)
+        _invia_reply_con_fallback(
+            chat_id, f"Momentum non disponibile: {spiega_momentum_insufficiente(history)}",
+            message_id, "momentum non disponibile")
         return
 
     try:
@@ -2786,13 +2804,9 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         # Non si tocca il bottone se l'edit non è davvero riuscito (es. notifica troppo vecchia,
         # rate-limit): altrimenti il bottone sparirebbe senza che il grafico sia mai comparso.
         log(f"editMessageMedia fallita per la notifica momentum: HTTP {risposta_edit.status_code} - {risposta_edit.text[:300]}")
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "Errore nell'aggiornare la notifica con il grafico momentum, riprova.",
-                "reply_parameters": {"message_id": message_id},
-            }, timeout=5)
+        _invia_reply_con_fallback(
+            chat_id, "Errore nell'aggiornare la notifica con il grafico momentum, riprova.",
+            message_id, "editMessageMedia fallita")
         return
 
     # Il bottone non serve più: il grafico è già agganciato alla notifica, ricliccarlo
@@ -2808,13 +2822,8 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
     # Collegamento visibile: su una partita con tante notifiche simili impilate, questa citazione
     # (Telegram mostra un'anteprima della notifica originale, tap per saltarci sopra) è l'unico
     # modo per far capire subito QUALE messaggio è stato appena aggiornato con il grafico.
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": "📈 Grafico momentum aggiornato qui sopra ⬆️",
-            "reply_parameters": {"message_id": message_id},
-        }, timeout=5)
+    _invia_reply_con_fallback(
+        chat_id, "📈 Grafico momentum aggiornato qui sopra ⬆️", message_id, "conferma momentum")
 
 
 def calcola_indice_intensita(delta_stats):
