@@ -799,9 +799,9 @@ def poll_callbacks():
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                             json={"callback_query_id": cq["id"], "text": "Genero il grafico momentum..."}, timeout=5)
-                        # msg_id: cmd_momentum_da_bottone sostituisce la foto di QUESTA notifica
-                        # (editMessageMedia) invece di mandare un grafico come messaggio a parte,
-                        # cosi' compare esattamente dove si e' cliccato, non altrove in chat.
+                        # msg_id: cmd_momentum_da_bottone manda il grafico in risposta a QUESTA
+                        # notifica, cosi' resta collegato al punto in cui si e' cliccato senza
+                        # sostituirne la foto (il grafico a barre della notifica resta visibile).
                         esegui_comando_sicuro(chat_id, cmd_momentum_da_bottone, fid_bottone, msg_id)
 
                     elif data.startswith("cmd:"):
@@ -1053,10 +1053,7 @@ def invia_messaggio_telegram(testo, chat_id=None):
 
 
 def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=None):
-    """Ritorna il message_id del messaggio inviato (o None se non disponibile/fallito) - usato
-    dal chiamante per ricordare quale didascalia è stata mandata a quale messaggio, così il
-    bottone "📈 Momentum" può in seguito sostituire solo la foto senza perdere il testo con tutti
-    i dati (quote, statistiche, gol...) già inviato in quella notifica."""
+    """Ritorna il message_id del messaggio inviato (o None se non disponibile/fallito)."""
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {messaggio[:50]}")
         return None
@@ -2389,7 +2386,9 @@ def cmd_funzioni(chat_id):
         "Il bottone \"📈 Momentum\" sotto ogni notifica ti fa vedere come sta andando la "
         "pressione della partita minuto per minuto (tiri, tiri in porta, corner, xG) - utile "
         "per capire se una squadra sta davvero spingendo adesso o se il momento buono è già "
-        "passato.\n\n"
+        "passato. Arriva come risposta subito sotto la notifica, quindi il grafico a barre "
+        "(tiri totali, tiri in porta, corner, tiri in area) resta dov'era e puoi guardarli "
+        "tutti e due; ricliccando il bottone più avanti ottieni un momentum aggiornato.\n\n"
         "Quote 1X2\n"
         "Ogni notifica include la quota di apertura (1-X-2) di Bet365, presa prima dell'inizio "
         "della partita - vedi subito come il mercato valutava la partita, senza cercarla altrove.\n\n"
@@ -2439,8 +2438,9 @@ def cmd_funzioni(chat_id):
         "controllare nulla a mano né lanciare comandi apposta.\n\n"
         "📋 ULTIME NOVITÀ (ultimi giorni)\n"
         "Quote 1X2 nelle notifiche, pausa automatica per fascia oraria, monitoraggio 24/7 "
-        "anche fuori orario, il bottone Momentum ora aggiorna la notifica esistente invece "
-        "di mandarne una nuova, corretto un bug che perdeva il risultato di partite finite "
+        "anche fuori orario, il bottone Momentum ora manda il grafico in risposta sotto la "
+        "notifica senza cancellare il grafico a barre (tiri, tiri in porta, corner) che c'era "
+        "già, corretto un bug che perdeva il risultato di partite finite "
         "durante la pausa, /strategie per capire le soglie attuali, raccolta dati automatica "
         "sull'efficacia delle 6 strategie, controllo automatico della pipeline dati con avviso "
         "in chat se qualcosa si inceppa."
@@ -2626,9 +2626,9 @@ def spiega_momentum_insufficiente(history):
 
 def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a):
     """Genera e invia il grafico momentum per una partita già identificata (fixture_id noto),
-    usato da /momentum <squadra> (dopo la ricerca per nome) - come messaggio nuovo, perché qui
-    non c'è nessuna notifica precedente a cui agganciarlo (vedi invece cmd_momentum_da_bottone,
-    che modifica sul posto la notifica da cui si è cliccato)."""
+    usato da /momentum <squadra> (dopo la ricerca per nome) - come messaggio nuovo e senza reply,
+    perché qui non c'è nessuna notifica precedente a cui agganciarlo (vedi invece
+    cmd_momentum_da_bottone, che risponde alla notifica da cui si è cliccato)."""
     stato = stato_partite.get(fid, {})
     history = stato.get("history", [])
     foto_path = genera_grafico_momentum(fid, home, away, history, stato.get("goals"), stato.get("rigori"), stato.get("cartellini_rossi"))
@@ -2690,12 +2690,13 @@ def cmd_momentum(chat_id, query):
 
 
 def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
-    """Bottone "📈 Momentum" cliccato su una notifica: invece di mandare un grafico come messaggio
-    a parte, sostituisce la FOTO DELLA NOTIFICA STESSA (editMessageMedia) con il solo grafico
-    momentum (non combinato con le barre: più leggero, un'immagine sola, nessuna chiamata
-    statistiche in più) - così il grafico compare esattamente nel messaggio su cui si è cliccato,
-    non altrove in chat. Se lo storico non basta ancora, lascia la notifica invariata (niente da
-    mostrare di meglio) e risponde solo con la spiegazione."""
+    """Bottone "📈 Momentum" cliccato su una notifica: manda il grafico momentum come messaggio
+    NUOVO agganciato in risposta alla notifica (reply_parameters), sotto di essa. Prima invece
+    sostituiva la foto della notifica (editMessageMedia) e così facendo faceva sparire il grafico
+    a barre con tiri totali / tiri in porta / corner / tiri in area: i due grafici servono
+    entrambi, quindi la notifica resta intatta e il momentum si aggiunge. La risposta lo tiene
+    comunque collegato al messaggio su cui si è cliccato, anche se in chat sono arrivate nel
+    frattempo altre notifiche. Se lo storico non basta ancora, risponde solo con la spiegazione."""
     stato = stato_partite.get(fixture_id)
     if not stato:
         requests.post(
@@ -2720,43 +2721,36 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
             }, timeout=5)
         return
 
+    # Didascalia breve: la notifica sopra ha già quote, statistiche e gol, ripeterli qui
+    # raddoppierebbe solo il testo in chat.
+    caption = (f"📈 Momentum - {home} {stato.get('score_home', '?')}-{stato.get('score_away', '?')} {away}\n"
+               f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
+               f"{stato.get('last_minute', '?')}'{nota_copertura_momentum(history)}")
     try:
         with open(foto_path, 'rb') as photo:
-            # Riusa la didascalia esatta già mandata con questa notifica (quote, statistiche,
-            # gol, tutto quello che c'era) - si perde solo se il bot è stato riavviato tra
-            # l'invio e il click (stato in memoria perso), nel qual caso si ricostruisce una
-            # versione minima piuttosto che lasciare senza didascalia.
-            caption = stato.get("didascalie_notifiche", {}).get(message_id)
-            if not caption:
-                caption = (f"{home} {stato.get('score_home', '?')}-{stato.get('score_away', '?')} {away}\n"
-                           f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
-                           f"{stato.get('last_minute', '?')}'{nota_copertura_momentum(history)}")
-            media = {"type": "photo", "media": "attach://photo", "caption": caption}
             requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageMedia",
-                data={"chat_id": chat_id, "message_id": message_id, "media": json.dumps(media)},
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                data={
+                    "chat_id": chat_id,
+                    "caption": caption,
+                    # Aggancia il grafico alla notifica da cui si è cliccato: resta collegato
+                    # anche se nel frattempo sono arrivate altre notifiche in mezzo.
+                    "reply_parameters": json.dumps({"message_id": message_id, "allow_sending_without_reply": True}),
+                },
                 files={"photo": photo}, timeout=15)
     except Exception as e:
-        log(f"Errore aggiornamento notifica con grafico momentum: {e}")
+        log(f"Errore invio grafico momentum da bottone: {e}")
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": "Errore nel generare il grafico momentum, riprova."}, timeout=5)
-        return
     finally:
         try:
             os.remove(foto_path)
         except Exception:
             pass
 
-    # Il bottone non serve più: il grafico è già agganciato alla notifica, ricliccarlo
-    # rigenererebbe la stessa immagine inutilmente.
-    is_fav = str(fixture_id) in FAVORITE_MATCHES
-    is_sil = str(fixture_id) in SILENCED_MATCHES
-    nuova_keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum=False)
-    if nuova_keyboard:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
-            json={"chat_id": chat_id, "message_id": message_id, "reply_markup": json.dumps(nuova_keyboard)}, timeout=5)
+    # Il bottone resta attivo: ora che il grafico è un messaggio a parte, ricliccarlo più tardi
+    # dà un momentum aggiornato ai minuti successivi invece di distruggere la notifica.
 
 
 def calcola_indice_intensita(delta_stats):
@@ -4895,12 +4889,7 @@ def processa_partita(fixture, notifiche_attive=True):
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
         if notifiche_attive:
-            message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
-            if message_id_inviato and mostra_momentum:
-                # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
-                # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
-                # resta quello originale, invece di essere rimpiazzato da un testo minimo.
-                stato_partite[fixture_id].setdefault("didascalie_notifiche", {})[message_id_inviato] = messaggio
+            invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
         # Fuori orario: niente invio, ma lo stato sotto viene comunque aggiornato come se avessimo
         # notificato (timestamp_notifica azzerato, notified_final marcato) - altrimenti un
         # preferito verrebbe rimosso automaticamente solo perché è notte, non perché si è spento
