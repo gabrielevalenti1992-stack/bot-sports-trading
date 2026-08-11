@@ -168,6 +168,16 @@ SHADOW_LOG_AUTO_PREFERITI_FILE = data_path("shadow_log_auto_preferiti.jsonl")
 # semaforo finché non ci sono abbastanza partite reali per calibrarli (vedi Fase 2).
 SHADOW_LOG_VALORE_FILE = data_path("shadow_log_valore.jsonl")
 
+# Shadow-log strategie: stesso principio, ma per le sei strategie (/assedio /fasciacalda /rimonta
+# /concretezza /xgtiro /qualita). Ad ogni ciclo (stesso ritmo dello snapshot valore sopra, dati
+# già scaricati per le notifiche normali, zero chiamate API in più) si valutano tutte e sei sulla
+# partita corrente e si registra quali scattano - anche quando NESSUNA scatta, altrimenti si
+# misurerebbe solo "cosa succede quando scatta" senza sapere cosa succede quando non scatta (lo
+# stesso bias di selezione visto per il valore). A fine partita una riga "risultato_finale" con
+# punteggio e gol (minuto + squadra) per poter incrociare offline: quando una strategia scatta,
+# il gol che "promette" arriva davvero, e più spesso di quando non scatta?
+SHADOW_LOG_STRATEGIE_FILE = data_path("shadow_log_strategie.jsonl")
+
 # Momentum: rilevazioni minime nello storico prima di generare il grafico (2 punti = 1 sola
 # barra, che riempie tutto lo spazio e sembra un blocco pieno invece di un andamento leggibile -
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
@@ -950,6 +960,9 @@ def poll_callbacks():
 
                     elif cmd == "/shadowlog":
                         esegui_comando_sicuro(chat_id, cmd_shadowlog)
+
+                    elif cmd == "/shadowlogstrategie":
+                        esegui_comando_sicuro(chat_id, cmd_shadowlogstrategie)
 
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
@@ -1792,6 +1805,7 @@ def cmd_help(chat_id):
         "/modalitacompleta - Torna alle notifiche di soglia normali\n"
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
+        "/shadowlogstrategie - Riepilogo e file dei dati raccolti sull'efficacia delle 6 strategie\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
         "/strategie - Cosa cerca ciascuna delle 6 strategie, spiegato semplice\n"
         "/setup - Menu comandi a bottoni"
@@ -2130,6 +2144,81 @@ def cmd_shadowlog(chat_id):
         log(f"Errore invio file shadow_log_valore.jsonl: {e}")
 
 
+def cmd_shadowlogstrategie(chat_id):
+    """Manda un riepilogo numerico + il file grezzo di shadow_log_strategie.jsonl via Telegram,
+    stesso principio di /shadowlog ma per le sei strategie: quante volte scatta ciascuna e su
+    quante partite diverse, più il file grezzo (segnali + gol reali) per un'analisi offline più
+    fine. Nessuna soglia o classifica costruita su questi numeri finché non ce ne sono abbastanza."""
+    if not os.path.exists(SHADOW_LOG_STRATEGIE_FILE):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "Nessun dato ancora: shadow_log_strategie.jsonl non esiste (il bot non ha ancora registrato nessuno snapshot)."
+            }, timeout=5)
+        return
+
+    snapshot_fixtures, risultato_fixtures = set(), set()
+    totale_righe = righe_malformate = 0
+    conteggio_strategie = {nome: 0 for nome, _e, _f, _d in STRATEGIE}
+    fixtures_per_strategia = {nome: set() for nome, _e, _f, _d in STRATEGIE}
+    try:
+        with open(SHADOW_LOG_STRATEGIE_FILE, "r") as f:
+            for riga in f:
+                riga = riga.strip()
+                if not riga:
+                    continue
+                totale_righe += 1
+                try:
+                    dato = json.loads(riga)
+                except Exception:
+                    righe_malformate += 1
+                    continue
+                fid = dato.get("fixture_id")
+                if dato.get("tipo") == "snapshot":
+                    snapshot_fixtures.add(fid)
+                    for segnale in dato.get("segnali", []):
+                        nome_strat = segnale.get("strategia")
+                        if nome_strat in conteggio_strategie:
+                            conteggio_strategie[nome_strat] += 1
+                            fixtures_per_strategia[nome_strat].add(fid)
+                elif dato.get("tipo") == "risultato_finale":
+                    risultato_fixtures.add(fid)
+    except Exception as e:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Errore leggendo shadow_log_strategie.jsonl: {e}"}, timeout=5)
+        return
+
+    partite_complete = snapshot_fixtures & risultato_fixtures
+    righe_strategie = "\n".join(
+        f"  {nome}: {conteggio_strategie[nome]} volte scattata, su {len(fixtures_per_strategia[nome])} partite diverse"
+        for nome, _e, _f, _d in STRATEGIE
+    )
+    testo = (
+        "Shadow-log strategie - riepilogo:\n"
+        f"- Righe totali: {totale_righe}" + (f" ({righe_malformate} malformate)" if righe_malformate else "") + "\n"
+        f"- Partite con almeno uno snapshot: {len(snapshot_fixtures)}\n"
+        f"- Partite con risultato finale registrato: {len(risultato_fixtures)}\n"
+        f"- Partite complete (snapshot + risultato, utilizzabili per l'analisi): {len(partite_complete)}\n\n"
+        f"Quante volte è scattata ciascuna strategia finora:\n{righe_strategie}\n\n"
+        "Ancora nessuna analisi fatta su questi numeri: servono abbastanza partite complete "
+        "prima di poter dire se scattare anticipa davvero qualcosa o no."
+    )
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": testo}, timeout=5)
+
+    try:
+        with open(SHADOW_LOG_STRATEGIE_FILE, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                data={"chat_id": chat_id},
+                files={"document": f}, timeout=30)
+    except Exception as e:
+        log(f"Errore invio file shadow_log_strategie.jsonl: {e}")
+
+
 def cmd_funzioni(chat_id):
     """Panoramica del bot, ma spiegata (non solo un elenco di nomi con un'etichetta
     stabile/in validazione): per ogni voce, cosa fa concretamente e perché. Mandata in 2
@@ -2183,11 +2272,18 @@ def cmd_funzioni(chat_id):
         "guarda tra le altre già valutate (arbitraggio, confronto multi-bookmaker, modelli "
         "xG, e più di dieci altre).\n\n"
         "/shadowlog ti fa vedere in ogni momento a che punto è la raccolta.\n\n"
+        "Stessa idea anche per le 6 strategie di /strategie: ogni 15 minuti il bot le valuta "
+        "tutte da solo su ogni partita seguita (non solo quando lanci tu il comando) e "
+        "registra quali scattano, così più avanti si può controllare con dati reali se "
+        "scattare anticipa davvero un gol, o se scatta e poi non succede nulla più spesso di "
+        "quanto sembri lanciandole a mano ogni tanto. /shadowlogstrategie mostra a che punto "
+        "è questa raccolta.\n\n"
         "📋 ULTIME NOVITÀ (ultimi giorni)\n"
         "Quote 1X2 nelle notifiche, pausa automatica per fascia oraria, monitoraggio 24/7 "
         "anche fuori orario, il bottone Momentum ora aggiorna la notifica esistente invece "
         "di mandarne una nuova, corretto un bug che perdeva il risultato di partite finite "
-        "durante la pausa."
+        "durante la pausa, /strategie per capire le soglie attuali, raccolta dati automatica "
+        "sull'efficacia delle 6 strategie."
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -3903,6 +3999,37 @@ def registra_shadow_log_valore_risultato(fixture_id, score_home, score_away):
     })
 
 
+def registra_shadow_log_strategie_snapshot(fixture_id, home, away, minuto, score_home, score_away, segnali):
+    """Fotografia periodica di quali delle sei strategie scattano in questo momento sulla
+    partita (lista vuota se nessuna) - vedi commento su SHADOW_LOG_STRATEGIE_FILE per il perché
+    si registra anche quando non scatta nulla."""
+    _appendi_shadow_log(SHADOW_LOG_STRATEGIE_FILE, {
+        "tipo": "snapshot",
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "home": home,
+        "away": away,
+        "minuto": minuto,
+        "score_home": score_home,
+        "score_away": score_away,
+        "segnali": segnali,
+    })
+
+
+def registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, goals):
+    """Riga "risultato_finale" per lo stesso fixture_id degli snapshot sopra, con anche i gol
+    della partita (minuto + squadra) così l'analisi offline può controllare, per ogni segnale
+    registrato, se e quando è arrivato il gol successivo - non solo il risultato finale."""
+    _appendi_shadow_log(SHADOW_LOG_STRATEGIE_FILE, {
+        "tipo": "risultato_finale",
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "score_home": score_home,
+        "score_away": score_away,
+        "goals": goals,
+    })
+
+
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
@@ -4216,6 +4343,7 @@ def processa_partita(fixture, notifiche_attive=True):
                 # di questa partita (senza, gli snapshot già raccolti restano orfani per sempre -
                 # bug scoperto proprio perché prima la pausa fermava tutto, notifica inclusa).
                 registra_shadow_log_valore_risultato(fixture_id, score_home, score_away)
+                registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, goals)
                 if notifiche_attive:
                     chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
                     invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
@@ -4251,6 +4379,32 @@ def processa_partita(fixture, notifiche_attive=True):
             delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats, minuto)
             stats_dict = delta_stats
             header_stats = "Statistiche ultimi 15 min" if is_real_delta else "Primo rilevamento"
+
+            # Shadow-log strategie: stesso ritmo (15 min) e stessa logica indipendente da
+            # deve_notificare() dello snapshot valore più sotto - vedi commento su
+            # SHADOW_LOG_STRATEGIE_FILE. Riusa dati già calcolati sopra, nessuna chiamata in più.
+            ultimo_snapshot_strategie = stato_partite[fixture_id].get("ultimo_snapshot_strategie", 0)
+            if (time.time() - ultimo_snapshot_strategie) >= INTERVALLO_SNAPSHOT_VALORE:
+                p_strategie = {
+                    "home": home, "away": away, "minute": minuto,
+                    "score_h": score_home, "score_a": score_away,
+                    "stats": current_stats, "delta": delta_stats, "delta_reale": is_real_delta,
+                    "xg_home": xg_casa, "xg_away": xg_ospite,
+                    "stato_precedente": stato_partite.get(fixture_id, {}),
+                }
+                segnali = []
+                for nome_strat, _emoji_strat, valuta_fn, _descr_strat in STRATEGIE:
+                    esito_strat = valuta_fn(p_strategie)
+                    if esito_strat is not None:
+                        punteggio_strat, dettaglio_strat = esito_strat
+                        segnali.append({
+                            "strategia": nome_strat,
+                            "punteggio": round(punteggio_strat, 2),
+                            "dettaglio": dettaglio_strat,
+                        })
+                registra_shadow_log_strategie_snapshot(
+                    fixture_id, home, away, minuto, score_home, score_away, segnali)
+                stato_partite[fixture_id]["ultimo_snapshot_strategie"] = time.time()
         else:
             stats_dict = {"Tiri totali": (0, 0), "Tiri in porta": (0, 0), "Corner": (0, 0)}
             header_stats = "Statistiche"
@@ -4523,6 +4677,7 @@ def imposta_comandi_telegram():
         {"command": "modalitacompleta", "description": "Torna alle notifiche normali"},
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "shadowlog", "description": "Riepilogo dati raccolti per la validazione"},
+        {"command": "shadowlogstrategie", "description": "Dati raccolti sull'efficacia delle strategie"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "strategie", "description": "Cosa cerca ciascuna delle 6 strategie"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},

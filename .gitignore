@@ -228,6 +228,7 @@ stato_partite.json
 leghe_senza_statistiche.json
 shadow_log_auto_preferiti.jsonl
 shadow_log_valore.jsonl
+shadow_log_strategie.jsonl
 *.json.tmp
 
 # Certificati e chiavi private (es. login Betfair) - mai su GitHub
