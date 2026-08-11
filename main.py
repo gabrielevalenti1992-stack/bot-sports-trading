@@ -2383,12 +2383,14 @@ def cmd_funzioni(chat_id):
         "conta (tanti tiri, pressione in aumento, un gol, un cartellino rosso, un rigore, un "
         "recupero lungo) - così non devi controllare tu ogni partita a mano.\n\n"
         "Grafico momentum\n"
-        "Il bottone \"📈 Momentum\" sotto ogni notifica ti fa vedere come sta andando la "
+        "Il bottone \"📈 Momentum\" sotto le notifiche normali ti fa vedere come sta andando la "
         "pressione della partita minuto per minuto (tiri, tiri in porta, corner, xG) - utile "
         "per capire se una squadra sta davvero spingendo adesso o se il momento buono è già "
         "passato. Arriva come risposta subito sotto la notifica, quindi il grafico a barre "
         "(tiri totali, tiri in porta, corner, tiri in area) resta dov'era e puoi guardarli "
-        "tutti e due; ricliccando il bottone più avanti ottieni un momentum aggiornato.\n\n"
+        "tutti e due; ricliccando il bottone più avanti ottieni un momentum aggiornato. Nel "
+        "canale preferiti il bottone non c'è: lì il momentum è già dentro il grafico della "
+        "notifica e si aggiorna da solo a ogni giro, non serve chiederlo.\n\n"
         "Quote 1X2\n"
         "Ogni notifica include la quota di apertura (1-X-2) di Bet365, presa prima dell'inizio "
         "della partita - vedi subito come il mercato valutava la partita, senza cercarla altrove.\n\n"
@@ -2440,7 +2442,8 @@ def cmd_funzioni(chat_id):
         "Quote 1X2 nelle notifiche, pausa automatica per fascia oraria, monitoraggio 24/7 "
         "anche fuori orario, il bottone Momentum ora manda il grafico in risposta sotto la "
         "notifica senza cancellare il grafico a barre (tiri, tiri in porta, corner) che c'era "
-        "già, corretto un bug che perdeva il risultato di partite finite "
+        "già ed è stato tolto dal canale preferiti dove il momentum arriva già aggiornato da "
+        "solo, corretto un bug che perdeva il risultato di partite finite "
         "durante la pausa, /strategie per capire le soglie attuali, raccolta dati automatica "
         "sull'efficacia delle 6 strategie, controllo automatico della pipeline dati con avviso "
         "in chat se qualcosa si inceppa."
@@ -4779,6 +4782,9 @@ def processa_partita(fixture, notifiche_attive=True):
         is_fav = str(fixture_id) in FAVORITE_MATCHES
         foto_path = None
         nota_momentum = ""
+        # True quando la foto inviata contiene già il momentum (grafico combinato dei preferiti):
+        # in quel caso il bottone "📈 Momentum" non serve, mostrerebbe un grafico già sotto gli occhi.
+        momentum_gia_nel_grafico = False
         # Il grafico (barre o combinato) serve solo per l'invio Telegram più sotto: se le
         # notifiche sono spente (fuori orario) generarlo comunque sarebbe lavoro sprecato
         # (rendering matplotlib + scrittura file) per un'immagine mai inviata e subito cancellata.
@@ -4790,6 +4796,7 @@ def processa_partita(fixture, notifiche_attive=True):
                     goals, rigori, cartellini_rossi, recupero_1h, recupero_2h)
                 if foto_path:
                     nota_momentum = nota_copertura_momentum(history_completo)
+                    momentum_gia_nel_grafico = True
                 else:
                     # Il grafico combinato manca solo la parte momentum (le barre da sole si generano
                     # comunque sotto): senza questa nota il momentum spariva senza spiegazione, dando
@@ -4885,7 +4892,11 @@ def processa_partita(fixture, notifiche_attive=True):
 
         is_sil = str(fixture_id) in SILENCED_MATCHES
         history_per_bottone = stato_partite.get(fixture_id, {}).get("history", [])
-        mostra_momentum = len(history_per_bottone) >= MOMENTUM_MIN_STORICO
+        # Nel canale preferiti la notifica porta già il grafico combinato (barre + momentum) e si
+        # aggiorna da sola a ogni ciclo: il bottone chiederebbe a mano lo stesso grafico che è già
+        # nel messaggio, quindi non viene mostrato. Resta solo nel raro caso in cui il combinato
+        # non sia riuscito e si sia ripiegato sulle sole barre, dove il bottone aggiunge qualcosa.
+        mostra_momentum = len(history_per_bottone) >= MOMENTUM_MIN_STORICO and not momentum_gia_nel_grafico
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
         if notifiche_attive:
