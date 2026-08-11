@@ -953,6 +953,9 @@ def poll_callbacks():
 
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
+
+                    elif cmd == "/strategie":
+                        esegui_comando_sicuro(chat_id, cmd_strategie)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -1790,6 +1793,7 @@ def cmd_help(chat_id):
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
+        "/strategie - Cosa cerca ciascuna delle 6 strategie, spiegato semplice\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -2191,6 +2195,59 @@ def cmd_funzioni(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": parte2}, timeout=5)
+
+
+def cmd_strategie(chat_id):
+    """Spiega in parole semplici cosa cerca ciascuna delle 6 strategie e con quali soglie
+    attuali, sullo stesso schema esplicativo di /funzioni (non solo un nome, il "perché" e il
+    "come" concreti). La nota su Fascia calda riflette lo stato vero di
+    STORICO_AGGIORNAMENTO_AUTOMATICO invece di un testo fisso, così resta accurata anche se in
+    futuro viene attivato senza dover ricordarsi di aggiornare questo testo a mano."""
+    nota_storico = (
+        "l'aggiornamento automatico dello storico è ATTIVO, quindi si popola da solo nel tempo."
+        if STORICO_AGGIORNAMENTO_AUTOMATICO else
+        "l'aggiornamento automatico dello storico è SPENTO (impostazione attuale): questo storico "
+        "si popola solo lanciando /aggiornastorico a mano. Se non l'hai mai fatto, questa "
+        "strategia non troverà quasi mai nulla - non per soglie sbagliate, manca proprio il dato."
+    )
+    testo = (
+        "📐 CONFIGURAZIONE ATTUALE DELLE STRATEGIE\n\n"
+        "Ognuna guarda le partite live in questo momento e segnala quelle che rispettano certe "
+        "condizioni. Ecco cosa cerca ciascuna, con le soglie di oggi spiegate semplici.\n\n"
+        "🏰 Assedio\n"
+        "Partite ancora bloccate (0 o 1 gol in totale) ma giocate con ritmo alto nelle ultime 15 "
+        "minuti - il classico \"sta per succedere qualcosa\". Serve che siano già passati almeno "
+        "20 minuti, e c'è un punteggio extra se l'xG (occasioni create) è molto più alto dei gol "
+        "realmente segnati - squadra sfortunata o portiere avversario in giornata.\n\n"
+        "⏰ Fascia calda\n"
+        "Una squadra che, storicamente, segna o subisce spesso proprio in questa fascia di 15 "
+        f"minuti (es. sempre un gol tra il 60' e il 75'). Ad oggi {nota_storico}\n\n"
+        "🔄 Rimonta\n"
+        "Una squadra in svantaggio che nel 2° tempo sta spingendo chiaramente più di quanto "
+        "faceva nel 1° (confrontata con se stessa, non con l'avversario). Funziona solo nel 2° "
+        "tempo, e solo se il bot ha seguito la partita fin dall'inizio del 1° - se hai iniziato a "
+        "seguirla a metà o dopo un riavvio del bot, manca il dato per fare il confronto.\n\n"
+        "🎯 Concretezza\n"
+        "La squadra che trasforma meglio i tiri in occasioni vere, non solo chi tira di più: "
+        "guarda quanti tiri arrivano da dentro l'area e quanti vanno in porta, sul totale dei "
+        "tiri fatti. Serve un minimo di 3 tiri per essere considerata.\n\n"
+        "💎 xG per tiro\n"
+        "Poche occasioni ma di alta qualità: quanto \"xG\" (probabilità di gol) produce in media "
+        "ogni tiro. Utile per squadre che non tirano tanto ma creano occasioni pericolose. "
+        "Richiede il dato xG dall'API, non disponibile per tutte le leghe/partite - se manca, "
+        "quella partita viene semplicemente scartata dal conteggio.\n\n"
+        "⚖️ Qualità\n"
+        "Confronta le due squadre quando tirano un numero simile di volte, ma una delle due è "
+        "nettamente più concreta dell'altra (stesso indice della Concretezza qui sopra, usato "
+        "per confrontarle tra loro invece che una sola per volta).\n\n"
+        "🔍 /scanner\n"
+        "Le applica tutte e sei insieme sulla stessa scansione (zero chiamate in più) e mostra "
+        "solo le partite che superano almeno una strategia, con i simboli di quali - il modo più "
+        "comodo per non lanciare 6 comandi uno per uno."
+    )
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": testo}, timeout=5)
 
 
 def cmd_status(chat_id, query):
@@ -4467,6 +4524,7 @@ def imposta_comandi_telegram():
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "shadowlog", "description": "Riepilogo dati raccolti per la validazione"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
+        {"command": "strategie", "description": "Cosa cerca ciascuna delle 6 strategie"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "assedio", "description": "Partite bloccate ma con pressione alta"},
         {"command": "fasciacalda", "description": "Squadra pericolosa in questa fascia oraria"},
