@@ -223,15 +223,26 @@ ODDS_BOOKMAKER_NOME = "Bet365"
 ODDS_BET_NOME = "Match Winner"
 ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca meno di così al kickoff
 
-# Pausa automatica notturna: fuori da questa fascia (ora locale Italia) il loop principale non fa
-# nessuna chiamata API e non manda notifiche, esattamente come /stop manuale - ma è un meccanismo
-# indipendente (nessuno stato salvato su disco, nessuna interazione con /stop o /riprendi): si
-# ricalcola ogni ciclo dall'orologio, quindi non rischia di confondersi con una pausa manuale
-# dell'utente (es. un /stop per un weekend intero non viene "riattivato" da questo alle 12).
+# Pausa automatica notturna: fuori da questa fascia (ora locale Italia) il bot NON manda
+# notifiche Telegram (proattive: notifiche live, risultato finale, auto-preferiti) - ma il
+# monitoraggio (statistiche, quote, shadow-log) resta attivo 24 ore su 24, per non perdere dati
+# utili alla validazione futura e per non lasciare orfane le partite che finiscono proprio a
+# cavallo dell'orario di stop. Le risposte a comandi manuali (es. /live a qualsiasi ora) non sono
+# toccate: girano su un thread separato (poll_callbacks) che non passa da questo controllo.
+# È un meccanismo indipendente dalla pausa manuale /stop (nessuno stato salvato su disco, si
+# ricalcola ogni ciclo dall'orologio): un /stop per un weekend intero non viene "riattivato" da
+# questo alle 12, e viceversa questo non manda notifiche mentre l'utente ha messo /stop.
 ORARIO_ATTIVO_INIZIO_ORA = 12
 ORARIO_ATTIVO_INIZIO_MINUTO = 0
 ORARIO_ATTIVO_FINE_ORA = 23
 ORARIO_ATTIVO_FINE_MINUTO = 30
+
+# Shadow-log valore: snapshot periodico per partita monitorata, indipendente dal fatto che scatti
+# o meno una notifica - registrare solo nei momenti "notevoli" (soglie superate) introdurrebbe un
+# bias di selezione documentato nella letteratura sulla calibrazione delle previsioni (si
+# valuterebbe il modello solo nei momenti ad alta attività, non su un quadro rappresentativo
+# dell'intera partita). 15 minuti è un compromesso tra granularità e dimensione del file di log.
+INTERVALLO_SNAPSHOT_VALORE = 900
 
 # Minuti di recupero: se superano questa soglia in un tempo (1° o 2°), la partita merita una
 # notifica dedicata anche se le altre soglie (tiri, momentum...) non sono soddisfatte, perché più
@@ -342,6 +353,7 @@ try:
     ORARIO_ATTIVO_INIZIO_MINUTO = config.get("orario_attivo_inizio_minuto", ORARIO_ATTIVO_INIZIO_MINUTO)
     ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
     ORARIO_ATTIVO_FINE_MINUTO = config.get("orario_attivo_fine_minuto", ORARIO_ATTIVO_FINE_MINUTO)
+    INTERVALLO_SNAPSHOT_VALORE = config.get("intervallo_snapshot_valore", INTERVALLO_SNAPSHOT_VALORE)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
@@ -3207,11 +3219,12 @@ def calcola_delta_15min(fixture_id, current_stats, minuto_corrente):
     return _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente)
 
 
-def invia_report_intensita_automatico(partite_valide):
+def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
     """Chiamata una volta per ciclo dal loop principale. Non manda nulla finché lo storico
     (azzerato ad ogni riavvio) non ha almeno un delta reale su 15 minuti; da quel momento invia
     la classifica di intensità ogni INTERVALLO_REPORT_INTENSITA secondi, riusando i dati già
-    scaricati in questo ciclo (nessuna chiamata API aggiuntiva)."""
+    scaricati in questo ciclo (nessuna chiamata API aggiuntiva). notifiche_attive=False (fuori
+    dalla fascia oraria configurata) salta solo l'invio, non il calcolo/timer."""
     global ULTIMO_REPORT_INTENSITA
     if not REPORT_INTENSITA_AUTOMATICO_ATTIVO:
         return
@@ -3262,7 +3275,8 @@ def invia_report_intensita_automatico(partite_valide):
             f"({formatta_lega(league, league_country)}, {minute}')\n"
             f"   Tiri totali: {d_tiri[0]} - {d_tiri[1]} | Tiri in porta: {d_porta[0]} - {d_porta[1]} | Tiri in area: {d_area[0]} - {d_area[1]}"
         )
-    invia_messaggio_telegram("\n".join(righe))
+    if notifiche_attive:
+        invia_messaggio_telegram("\n".join(righe))
     ULTIMO_REPORT_INTENSITA = now
 
 
@@ -3764,10 +3778,14 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
 # =============================================================================
 # PROCESSA SINGOLA PARTITA
 # =============================================================================
-def processa_partita(fixture):
+def processa_partita(fixture, notifiche_attive=True):
     """Elabora una partita live già filtrata dal chiamante (main loop): qui non si ricontrolla più
     campionato_valido(), il filtro è fatto una sola volta a monte per evitare il doppio controllo
-    e per far sì che lo sleep tra una partita e l'altra scatti solo per partite valide."""
+    e per far sì che lo sleep tra una partita e l'altra scatti solo per partite valide.
+
+    notifiche_attive: False fuori dalla fascia oraria configurata (vedi dentro_orario_attivo) -
+    statistiche, quote e shadow-log continuano comunque ad essere raccolti, solo l'invio delle
+    notifiche Telegram viene saltato."""
     try:
         fixture_id = fixture["fixture"]["id"]
         league = fixture.get("league", {})
@@ -3981,9 +3999,13 @@ def processa_partita(fixture):
                         f"{tempi_finale_text}"
                     )
 
-                chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
-                invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
+                # L'esito va registrato sempre, notifica o no: è il dato che chiude lo shadow-log
+                # di questa partita (senza, gli snapshot già raccolti restano orfani per sempre -
+                # bug scoperto proprio perché prima la pausa fermava tutto, notifica inclusa).
                 registra_shadow_log_valore_risultato(fixture_id, score_home, score_away)
+                if notifiche_attive:
+                    chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
+                    invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
 
                 SILENCED_MATCHES.pop(str(fixture_id), None)
                 save_silenced(SILENCED_MATCHES)
@@ -4023,6 +4045,19 @@ def processa_partita(fixture):
         log(f"  Tiri: {tiri_casa}-{tiri_ospite} | Porta: {tiri_p_casa}-{tiri_p_ospite} | Corner: {corner_casa}-{corner_ospite}")
         log(f"  Delta 15min: {stats_dict}")
 
+        # Shadow-log valore: snapshot ogni INTERVALLO_SNAPSHOT_VALORE, indipendente da
+        # deve_notificare() più sotto - girare solo quando scatta una notifica campionerebbe solo
+        # i momenti "ad alta attività", introducendo il bias di selezione visto nella ricerca.
+        quote_iniziali_snapshot = quote_1x2_per_fixture(fixture_id)
+        probabilita_no_vig_snapshot = calcola_probabilita_no_vig(quote_iniziali_snapshot) if quote_iniziali_snapshot else None
+        if probabilita_no_vig_snapshot:
+            ultimo_snapshot = stato_partite[fixture_id].get("ultimo_snapshot_valore", 0)
+            if (time.time() - ultimo_snapshot) >= INTERVALLO_SNAPSHOT_VALORE:
+                registra_shadow_log_valore_snapshot(
+                    fixture_id, home, away, minuto, score_home, score_away,
+                    probabilita_no_vig_snapshot, stats_dict)
+                stato_partite[fixture_id]["ultimo_snapshot_valore"] = time.time()
+
         # Preferito "raffreddato": se sono passati troppi minuti dall'ultima notifica inviata,
         # la partita si è spenta - si rimuove dai preferiti PRIMA di valutare deve_notificare(),
         # cosi' questo stesso ciclo segue già le regole normali invece di restare agganciato a
@@ -4034,9 +4069,10 @@ def processa_partita(fixture):
                 save_favorites(FAVORITE_MATCHES)
                 minuti_senza_notifica = DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
                 log(f"    ⭐➡️ Preferito rimosso automaticamente: nessuna notifica da oltre {minuti_senza_notifica} min")
-                invia_messaggio_telegram(
-                    f"⭐➡️ {home} vs {away} rimossa automaticamente dai preferiti: nessuna notifica rilevante da {minuti_senza_notifica} minuti. Torna alle notifiche/soglie normali."
-                )
+                if notifiche_attive:
+                    invia_messaggio_telegram(
+                        f"⭐➡️ {home} vs {away} rimossa automaticamente dai preferiti: nessuna notifica rilevante da {minuti_senza_notifica} minuti. Torna alle notifiche/soglie normali."
+                    )
         elif not stato_partite.get(fixture_id, {}).get("auto_preferito_processato"):
             # Partita che parte già "a razzo" (tanti tiri o gol nei primissimi minuti): valutata
             # una sola volta per partita, cosi' se l'utente la rimuove in seguito non viene
@@ -4051,10 +4087,11 @@ def processa_partita(fixture):
                 save_favorites(FAVORITE_MATCHES)
                 stato_partite[fixture_id]["auto_preferito_processato"] = True
                 log(f"    ⭐ Aggiunta automaticamente ai preferiti: ritmo alto al {minuto}' (tiri {tiri_totali_partita}, gol {gol_totali})")
-                invia_messaggio_telegram(
-                    f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti: ritmo alto già al {minuto}' "
-                    f"(tiri totali {tiri_totali_partita}, gol {gol_totali}). Rimuovila dai preferiti se non ti interessa seguirla."
-                )
+                if notifiche_attive:
+                    invia_messaggio_telegram(
+                        f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti: ritmo alto già al {minuto}' "
+                        f"(tiri totali {tiri_totali_partita}, gol {gol_totali}). Rimuovila dai preferiti se non ti interessa seguirla."
+                    )
                 registra_shadow_log_auto_preferiti(
                     fixture_id, home, away, league_name, league_country, minuto,
                     tiri_totali_partita, (tiri_p_casa + tiri_p_ospite) if current_stats else 0,
@@ -4175,10 +4212,6 @@ def processa_partita(fixture):
         # sopra il momentum per i preferiti) - non serve ripeterlo anche in testo.
         quote_iniziali = quote_1x2_per_fixture(fixture_id)
         quote_text = testo_quote_1x2(quote_iniziali)
-        probabilita_no_vig = calcola_probabilita_no_vig(quote_iniziali) if quote_iniziali else None
-        if probabilita_no_vig:
-            registra_shadow_log_valore_snapshot(
-                fixture_id, home, away, minuto, score_home, score_away, probabilita_no_vig, stats_dict)
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
@@ -4202,12 +4235,17 @@ def processa_partita(fixture):
         mostra_momentum = len(history_per_bottone) >= MOMENTUM_MIN_STORICO
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
-        message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
-        if message_id_inviato and mostra_momentum:
-            # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
-            # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
-            # resta quello originale, invece di essere rimpiazzato da un testo minimo.
-            stato_partite[fixture_id].setdefault("didascalie_notifiche", {})[message_id_inviato] = messaggio
+        if notifiche_attive:
+            message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
+            if message_id_inviato and mostra_momentum:
+                # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
+                # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
+                # resta quello originale, invece di essere rimpiazzato da un testo minimo.
+                stato_partite[fixture_id].setdefault("didascalie_notifiche", {})[message_id_inviato] = messaggio
+        # Fuori orario: niente invio, ma lo stato sotto viene comunque aggiornato come se avessimo
+        # notificato (timestamp_notifica azzerato, notified_final marcato) - altrimenti un
+        # preferito verrebbe rimosso automaticamente solo perché è notte, non perché si è spento
+        # davvero (vedi DURATA_MAX_SENZA_NOTIFICA_PREFERITI più sopra).
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
         stato_partite[fixture_id].update({
@@ -4310,12 +4348,15 @@ if __name__ == "__main__":
             time.sleep(INTERVALLO_CICLO_MORTO)
             continue
 
-        if not dentro_orario_attivo():
+        # Fuori dalla fascia oraria configurata: il monitoraggio (statistiche, quote, shadow-log)
+        # resta comunque attivo 24/7 - notifiche_attive spegne solo l'invio delle notifiche più
+        # sotto (vedi processa_partita), non il ciclo in sé. Questo evita sia di perdere dati utili
+        # alla validazione futura, sia il bug delle partite che finiscono a cavallo dell'orario di
+        # stop restando orfane nello shadow-log (nessun risultato finale mai registrato).
+        notifiche_attive = dentro_orario_attivo()
+        if not notifiche_attive:
             log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
-                f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}), nessuna chiamata API. "
-                f"Attesa {INTERVALLO_CICLO_MORTO}s...")
-            time.sleep(INTERVALLO_CICLO_MORTO)
-            continue
+                f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}): monitoraggio silenzioso, nessuna notifica.")
 
         aggiorna_piano_giornata_se_serve()
         aggiorna_quote_prepartita_imminenti()
@@ -4335,7 +4376,7 @@ if __name__ == "__main__":
         ]
         log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
 
-        if ciclo_numero == 1 or ciclo_numero % 10 == 0:
+        if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
             if chiamata_partite_live_fallita:
                 invia_messaggio_telegram(
                     f"Bot attivo - Ciclo #{ciclo_numero}\n"
@@ -4371,14 +4412,14 @@ if __name__ == "__main__":
             ultimo_controllo = stato_partite.get(fid, {}).get("ultimo_controllo", 0) if fid is not None else 0
             if time.time() - ultimo_controllo < intervallo_minimo:
                 continue
-            processa_partita(fixture)
+            processa_partita(fixture, notifiche_attive)
             if fid is not None:
                 stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
             time.sleep(1)
 
         pulisci_partite_terminate(fixture_ids_live)
         salva_stato_partite(stato_partite)
-        invia_report_intensita_automatico(partite_valide)
+        invia_report_intensita_automatico(partite_valide, notifiche_attive)
         aggiorna_storico_minutaggi_automatico()
 
         # Scheduler adattivo (piano giornata): fuori da ogni finestra attiva prevista e senza
