@@ -947,6 +947,9 @@ def poll_callbacks():
 
                     elif cmd == "/testpreferiti":
                         esegui_comando_sicuro(chat_id, cmd_testpreferiti)
+
+                    elif cmd == "/shadowlog":
+                        esegui_comando_sicuro(chat_id, cmd_shadowlog)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -1274,8 +1277,10 @@ def dentro_finestra_attiva(piano, now_ts=None):
 
 def dentro_orario_attivo(now_it=None):
     """True se l'ora locale italiana corrente cade nella fascia ORARIO_ATTIVO_* (default
-    12:00-23:30). Nessuna eccezione per partite già in corso a cavallo del limite: fuori fascia
-    il bot si ferma comunque, come richiesto."""
+    12:00-23:30). Nessuna eccezione per partite già in corso a cavallo del limite. NOTA: fuori
+    fascia il bot NON si ferma più - il monitoraggio (statistiche, quote, shadow-log) resta
+    attivo 24/7, solo l'invio delle notifiche Telegram viene saltato (vedi notifiche_attive nel
+    loop principale e in processa_partita)."""
     now_it = now_it if now_it is not None else datetime.datetime.now(ZoneInfo("Europe/Rome"))
     inizio = now_it.replace(hour=ORARIO_ATTIVO_INIZIO_ORA, minute=ORARIO_ATTIVO_INIZIO_MINUTO, second=0, microsecond=0)
     fine = now_it.replace(hour=ORARIO_ATTIVO_FINE_ORA, minute=ORARIO_ATTIVO_FINE_MINUTO, second=0, microsecond=0)
@@ -1780,6 +1785,7 @@ def cmd_help(chat_id):
         "/modalitaessenziale - Solo gol/rossi/rigori/recupero lungo, sospende le altre notifiche\n"
         "/modalitacompleta - Torna alle notifiche di soglia normali\n"
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
+        "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -1925,6 +1931,17 @@ def cmd_piano(chat_id):
         stato = "fuori finestra (ciclo rallentato)"
     righe.append(f"\nAdesso: {stato}")
 
+    # "Ciclo veloce/rallentato" sopra riguarda solo il ritmo del monitoraggio (sempre attivo
+    # 24/7), non se le notifiche arrivano davvero: senza questa riga il comando potrebbe dire
+    # "ATTIVA" anche fuori dalla fascia oraria configurata, facendo pensare che una notifica
+    # stia per arrivare quando in realtà è soppressa (vedi notifiche_attive nel loop principale).
+    if not STATO_PAUSA.get("in_pausa"):
+        fascia = f"{ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}"
+        if dentro_orario_attivo():
+            righe.append(f"Notifiche: ATTIVE (fascia oraria {fascia})")
+        else:
+            righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - monitoraggio e raccolta dati comunque attivi")
+
     testo = "\n".join(righe)
     for i in range(0, len(testo), 3800):
         pezzo = testo[i:i + 3800]
@@ -2039,6 +2056,70 @@ def cmd_testpreferiti(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": esito}, timeout=5)
+
+
+def cmd_shadowlog(chat_id):
+    """Manda un riepilogo numerico + il file grezzo di shadow_log_valore.jsonl via Telegram.
+    Serve perché non esiste nessun altro modo per leggere questo file da fuori Render (nessun
+    accesso diretto al filesystem/ai log del servizio da una sessione Claude Code) - pensato
+    apposta per il checkpoint di validazione (verificare quante partite hanno sia lo snapshot sia
+    il risultato finale, il campione utilizzabile per un'analisi di calibrazione)."""
+    if not os.path.exists(SHADOW_LOG_VALORE_FILE):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "Nessun dato ancora: shadow_log_valore.jsonl non esiste (il bot non ha ancora registrato nessuno snapshot)."
+            }, timeout=5)
+        return
+
+    snapshot_fixtures, risultato_fixtures = set(), set()
+    totale_righe = righe_malformate = 0
+    try:
+        with open(SHADOW_LOG_VALORE_FILE, "r") as f:
+            for riga in f:
+                riga = riga.strip()
+                if not riga:
+                    continue
+                totale_righe += 1
+                try:
+                    dato = json.loads(riga)
+                except Exception:
+                    righe_malformate += 1
+                    continue
+                fid = dato.get("fixture_id")
+                if dato.get("tipo") == "snapshot":
+                    snapshot_fixtures.add(fid)
+                elif dato.get("tipo") == "risultato_finale":
+                    risultato_fixtures.add(fid)
+    except Exception as e:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Errore leggendo shadow_log_valore.jsonl: {e}"}, timeout=5)
+        return
+
+    partite_complete = snapshot_fixtures & risultato_fixtures
+    testo = (
+        "Shadow-log valore - riepilogo:\n"
+        f"- Righe totali: {totale_righe}" + (f" ({righe_malformate} malformate)" if righe_malformate else "") + "\n"
+        f"- Partite con almeno uno snapshot: {len(snapshot_fixtures)}\n"
+        f"- Partite con risultato finale registrato: {len(risultato_fixtures)}\n"
+        f"- Partite complete (snapshot + risultato, utilizzabili per la validazione): {len(partite_complete)}\n\n"
+        "Servono circa 200-500 partite complete per una validazione statisticamente sensata "
+        "(minimo), idealmente 1000+."
+    )
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": testo}, timeout=5)
+
+    try:
+        with open(SHADOW_LOG_VALORE_FILE, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                data={"chat_id": chat_id},
+                files={"document": f}, timeout=30)
+    except Exception as e:
+        log(f"Errore invio file shadow_log_valore.jsonl: {e}")
 
 
 def cmd_status(chat_id, query):
@@ -3948,7 +4029,11 @@ def processa_partita(fixture, notifiche_attive=True):
                     )
                     foto_path = None
                 else:
-                    if current_stats:
+                    # Il grafico serve solo per l'invio Telegram più sotto: se le notifiche sono
+                    # spente (fuori orario) generarlo comunque sarebbe lavoro sprecato (rendering
+                    # matplotlib + scrittura file) per un'immagine che verrebbe subito cancellata
+                    # senza mai essere usata.
+                    if current_stats and notifiche_attive:
                         foto_path = genera_grafico_barre(fixture_id, home, away, current_stats)
                     else:
                         foto_path = None
@@ -4130,20 +4215,24 @@ def processa_partita(fixture, notifiche_attive=True):
         is_fav = str(fixture_id) in FAVORITE_MATCHES
         foto_path = None
         nota_momentum = ""
-        if is_fav:
-            history_completo = stato_partite.get(fixture_id, {}).get("history", [])
-            foto_path = genera_grafico_combinato(
-                fixture_id, home, away, current_stats if current_stats else stats_dict, history_completo,
-                goals, rigori, cartellini_rossi, recupero_1h, recupero_2h)
-            if foto_path:
-                nota_momentum = nota_copertura_momentum(history_completo)
-            else:
-                # Il grafico combinato manca solo la parte momentum (le barre da sole si generano
-                # comunque sotto): senza questa nota il momentum spariva senza spiegazione, dando
-                # l'impressione di un bug invece che di storico ancora insufficiente.
-                nota_momentum = f"\n(grafico momentum non disponibile: {spiega_momentum_insufficiente(history_completo)})"
-        if not foto_path:
-            foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
+        # Il grafico (barre o combinato) serve solo per l'invio Telegram più sotto: se le
+        # notifiche sono spente (fuori orario) generarlo comunque sarebbe lavoro sprecato
+        # (rendering matplotlib + scrittura file) per un'immagine mai inviata e subito cancellata.
+        if notifiche_attive:
+            if is_fav:
+                history_completo = stato_partite.get(fixture_id, {}).get("history", [])
+                foto_path = genera_grafico_combinato(
+                    fixture_id, home, away, current_stats if current_stats else stats_dict, history_completo,
+                    goals, rigori, cartellini_rossi, recupero_1h, recupero_2h)
+                if foto_path:
+                    nota_momentum = nota_copertura_momentum(history_completo)
+                else:
+                    # Il grafico combinato manca solo la parte momentum (le barre da sole si generano
+                    # comunque sotto): senza questa nota il momentum spariva senza spiegazione, dando
+                    # l'impressione di un bug invece che di storico ancora insufficiente.
+                    nota_momentum = f"\n(grafico momentum non disponibile: {spiega_momentum_insufficiente(history_completo)})"
+            if not foto_path:
+                foto_path = genera_grafico_barre(fixture_id, home, away, current_stats if current_stats else stats_dict)
 
         diff = stats_dict["Tiri totali"][0] - stats_dict["Tiri totali"][1]
         # Nessun indicatore quando sono pari (EQ non è utile): solo chi è avanti nel delta 15 min.
@@ -4305,6 +4394,7 @@ def imposta_comandi_telegram():
         {"command": "modalitaessenziale", "description": "Solo gol/rossi/rigori/recupero lungo"},
         {"command": "modalitacompleta", "description": "Torna alle notifiche normali"},
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
+        {"command": "shadowlog", "description": "Riepilogo dati raccolti per la validazione"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "assedio", "description": "Partite bloccate ma con pressione alta"},
         {"command": "fasciacalda", "description": "Squadra pericolosa in questa fascia oraria"},
