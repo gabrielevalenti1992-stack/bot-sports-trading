@@ -950,6 +950,9 @@ def poll_callbacks():
 
                     elif cmd == "/shadowlog":
                         esegui_comando_sicuro(chat_id, cmd_shadowlog)
+
+                    elif cmd == "/funzioni":
+                        esegui_comando_sicuro(chat_id, cmd_funzioni)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -1786,6 +1789,7 @@ def cmd_help(chat_id):
         "/modalitacompleta - Torna alle notifiche di soglia normali\n"
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
+        "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -2120,6 +2124,54 @@ def cmd_shadowlog(chat_id):
                 files={"document": f}, timeout=30)
     except Exception as e:
         log(f"Errore invio file shadow_log_valore.jsonl: {e}")
+
+
+def cmd_funzioni(chat_id):
+    """Panoramica delle funzioni del bot per livello di maturità, sullo stesso schema che le
+    aziende software usano per comunicare lo stato di una feature (Alpha/Beta/GA - vedi
+    es. Google Cloud, Kong, ecc.): non tutto quello che il bot fa è "pronto all'uso" allo stesso
+    modo, e va detto esplicitamente invece di lasciarlo intuire. Testo statico aggiornato a mano
+    ad ogni funzione nuova rilevante - non generato dinamicamente dal codice, quindi va tenuto
+    sincronizzato quando cambia qualcosa di importante."""
+    testo = (
+        "🟢 STABILI (in uso quotidiano)\n\n"
+        "Monitoraggio live\n"
+        "- Notifiche automatiche su soglie tiri/momentum/gol/cartellini rossi/rigori/recupero lungo\n"
+        "- Grafico momentum (bottone \"📈 Momentum\", sostituisce la foto della notifica sul posto)\n"
+        "- Quote 1X2 pre-partita (Bet365, aggiornate ~90 min prima del kickoff)\n"
+        "- Piano giornata con ciclo veloce/rallentato adattivo\n\n"
+        "Preferiti\n"
+        "- Aggiunta manuale o automatica (ritmo alto nei primi minuti)\n"
+        "- Canale Telegram dedicato (/testpreferiti per verificarlo)\n"
+        "- Grafico combinato barre + momentum in un'unica immagine\n\n"
+        "Controllo del bot\n"
+        "- /stop, /riprendi (pausa manuale completa)\n"
+        "- Pausa automatica fuori orario 12:00-23:30 (solo notifiche - il monitoraggio dati resta attivo 24/7)\n"
+        "- /piano, /live, /favorites, /silenced, /clearfavorites\n\n"
+        "Analisi manuale\n"
+        "- 6 strategie: /assedio /fasciacalda /rimonta /concretezza /xgtiro /qualita\n"
+        "- /scanner, /analisi, /intensita, /status <squadra>, /momentum <squadra>\n\n"
+        "🟡 IN VALIDAZIONE (attive, ma non ancora affidabili per decisioni)\n\n"
+        "- Shadow-log valore: raccolta silenziosa di probabilità no-vig + statistiche live, "
+        "uno snapshot ogni 15 min per partita monitorata\n"
+        "- /shadowlog: riepilogo e file grezzo dei dati raccolti finora\n"
+        "- Checkpoint: 21 agosto (controllo intermedio, solo diagnostico), 31 agosto "
+        "(decisione, con criteri statistici fissati in anticipo)\n"
+        "- Non genera ancora nessun segnale visibile in chat: solo raccolta dati\n\n"
+        "📋 ULTIME NOVITÀ\n\n"
+        "- Quote 1X2 pre-partita nelle notifiche\n"
+        "- Pausa automatica per fascia oraria\n"
+        "- Monitoraggio 24/7 anche fuori orario (solo raccolta dati, niente notifiche)\n"
+        "- Bottone Momentum aggiorna la notifica esistente invece di mandarne una nuova\n"
+        "- Corretto un bug che perdeva il risultato finale delle partite terminate in pausa\n\n"
+        "💡 IDEE VALUTATE, NON ANCORA AVVIATE\n\n"
+        "- Confronto multi-bookmaker, rilevamento \"steam move\", modelli xG/machine learning "
+        "e altre 10+ alternative discusse ma non implementate - dipendono dall'esito della "
+        "validazione del 31 agosto"
+    )
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": testo}, timeout=5)
 
 
 def cmd_status(chat_id, query):
@@ -4395,6 +4447,7 @@ def imposta_comandi_telegram():
         {"command": "modalitacompleta", "description": "Torna alle notifiche normali"},
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "shadowlog", "description": "Riepilogo dati raccolti per la validazione"},
+        {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "assedio", "description": "Partite bloccate ma con pressione alta"},
         {"command": "fasciacalda", "description": "Squadra pericolosa in questa fascia oraria"},
