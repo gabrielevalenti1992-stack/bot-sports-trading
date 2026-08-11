@@ -660,6 +660,45 @@ def get_fire_suffix_shots(delta):
         return "\U0001F525"
     return ""
 
+def rispondi(chat_id, testo, parse_mode=None):
+    """Risposta a un comando con l'esito SEMPRE controllato, invece di sperare che sia partita.
+    Telegram non solleva eccezioni quando rifiuta un messaggio: risponde HTTP 400 con una
+    descrizione e requests.post ritorna normalmente, quindi senza questo controllo un messaggio
+    scartato diventa silenzio totale lato utente (nessuna risposta, nessun errore, niente nei log).
+
+    Il caso che mordeva davvero: parse_mode Markdown su un testo con _ o * non bilanciati - cioè
+    quasi ogni messaggio d'errore Python, visto che i nomi qui dentro sono pieni di underscore
+    (delta_reale, stato_partite, cmd_diagnostica...). Per questo di default NON si usa parse_mode,
+    e se un invio con parse_mode viene rifiutato si riprova una volta come testo semplice: meglio
+    un messaggio senza formattazione che nessun messaggio. Ritorna True se il testo è arrivato."""
+    if not testo:
+        log(f"Risposta vuota non inviata a {chat_id}")
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": testo}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        risposta = requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        log(f"Errore di rete inviando la risposta a {chat_id}: {e}")
+        return False
+    if risposta.status_code == 200:
+        return True
+    log(f"Telegram ha rifiutato la risposta a {chat_id}: HTTP {risposta.status_code} - {risposta.text[:300]}")
+    if parse_mode:
+        payload.pop("parse_mode", None)
+        try:
+            ritentata = requests.post(url, json=payload, timeout=10)
+            if ritentata.status_code == 200:
+                log("Risposta reinviata come testo semplice (senza parse_mode) e accettata")
+                return True
+            log(f"Anche il reinvio senza parse_mode è stato rifiutato: HTTP {ritentata.status_code} - {ritentata.text[:300]}")
+        except Exception as e:
+            log(f"Errore di rete nel reinvio senza parse_mode a {chat_id}: {e}")
+    return False
+
+
 def _esegui_comando(chat_id, funzione, args):
     """Esegue una funzione cmd_* intercettando qualsiasi eccezione, così un errore
     non passa mai inosservato: viene loggato e l'utente riceve un avviso invece del silenzio."""
@@ -667,12 +706,10 @@ def _esegui_comando(chat_id, funzione, args):
         funzione(chat_id, *args)
     except Exception as e:
         log(f"Errore comando {funzione.__name__}: {e}")
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}", "parse_mode": "Markdown"}, timeout=5)
-        except Exception:
-            pass
+        # Niente parse_mode: il testo dell'eccezione contiene quasi sempre underscore
+        # (nomi di variabili e di funzioni), che in Markdown farebbero rifiutare il messaggio
+        # da Telegram - trasformando l'errore in silenzio proprio quando serve vederlo.
+        rispondi(chat_id, f"⚠️ Errore durante l'esecuzione di {funzione.__name__}: {e}")
 
 
 def esegui_comando_sicuro(chat_id, funzione, *args):
@@ -694,7 +731,16 @@ def poll_callbacks():
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             r = requests.get(url, params={"offset": offset, "limit": 10}, timeout=10)
-            updates = r.json().get("result", [])
+            corpo = r.json()
+            # Se Telegram rifiuta getUpdates (tipicamente 409 Conflict: due istanze del bot che
+            # leggono la stessa coda, per esempio un deploy vecchio ancora vivo) la risposta non
+            # ha "result" e senza questo log il bot sembrerebbe semplicemente non ricevere mai
+            # nessun comando, senza una riga che spieghi perché.
+            if not corpo.get("ok", False):
+                log(f"getUpdates rifiutato da Telegram: {str(corpo)[:300]}")
+                time.sleep(5)
+                continue
+            updates = corpo.get("result", [])
             for upd in updates:
                 offset = upd["update_id"] + 1
 
@@ -853,8 +899,12 @@ def poll_callbacks():
                     text = msg["text"].strip()
                     chat_id = msg["chat"]["id"]
                     parts = text.split()
-                    cmd = parts[0].lower()
+                    # split("@"): nei gruppi Telegram i comandi arrivano come /diagnostica@NomeBot,
+                    # che senza questo non corrisponderebbe a nessun ramo e resterebbe senza risposta.
+                    cmd = parts[0].lower().split("@")[0]
                     args = parts[1:] if len(parts) > 1 else []
+                    if cmd.startswith("/"):
+                        log(f"Comando ricevuto da {chat_id}: {text[:100]}")
 
                     if cmd == "/help":
                         esegui_comando_sicuro(chat_id, cmd_help)
@@ -983,12 +1033,30 @@ def poll_callbacks():
 
                     elif cmd == "/strategie":
                         esegui_comando_sicuro(chat_id, cmd_strategie)
+
+                    elif cmd.startswith("/"):
+                        # Prima di questo ramo un comando non riconosciuto non produceva NULLA:
+                        # nessuna risposta e nessun log. Succede con un refuso, ma soprattutto
+                        # quando la versione in esecuzione è più vecchia del comando che stai
+                        # provando (deploy non ancora ripartito) - e da fuori è indistinguibile
+                        # da un bot rotto. Meglio dirlo esplicitamente.
+                        log(f"Comando non riconosciuto da questa versione del bot: {cmd}")
+                        rispondi(
+                            chat_id,
+                            f"❓ Comando {cmd} non riconosciuto da questa versione del bot.\n"
+                            "Controlla di averlo scritto bene, oppure usa /help per l'elenco dei comandi "
+                            "davvero disponibili in questa versione."
+                        )
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
 
-callback_thread = threading.Thread(target=poll_callbacks, daemon=True)
-callback_thread.start()
+# NOTA: il thread di polling NON viene avviato qui, ma in fondo al file (blocco __main__), dopo
+# che tutte le funzioni cmd_* esistono davvero. Avviandolo qui partiva mentre il resto del file era
+# ancora in fase di caricamento: se in quell'istante c'era un comando in coda su Telegram (tipico
+# subito dopo un riavvio/deploy, quando Telegram riconsegna gli update non confermati), il
+# dispatcher andava in NameError sul nome della funzione non ancora definita - e siccome l'offset
+# era già stato avanzato, quel comando veniva consumato e perso per sempre, senza risposta.
 
 # =============================================================================
 # FUNZIONI UTILITY
@@ -2247,11 +2315,15 @@ def cmd_diagnostica(chat_id):
 
     Le anomalie trovate vengono sia scritte nel messaggio Telegram sia loggate con log() (visibili
     nei log di Render), cosi' risultano in entrambi i posti come chiesto."""
+    # Conferma immediata: il resto del comando fa una chiamata all'API (fino a 15s di timeout) e
+    # manda il referto solo alla fine, quindi senza questa riga il comando sembra ignorato per
+    # tutto quel tempo - ed è indistinguibile da un comando che non è mai arrivato.
+    rispondi(chat_id, "🔍 Diagnostica in corso, un attimo...")
+
     partite_raw = get_partite_live()
     if not partite_raw:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "🔍 Diagnostica: nessuna partita live in questo momento secondo l'API."}, timeout=5)
+        rispondi(chat_id, "🔍 Diagnostica: nessuna partita live in questo momento secondo l'API "
+                          "(oppure la chiamata all'API è fallita: controlla i log per l'errore esatto).")
         return
 
     partite_valide = [
@@ -2350,8 +2422,22 @@ def cmd_diagnostica(chat_id):
                 "xg_home": xg_diag[0], "xg_away": xg_diag[1],
                 "stato_precedente": stato,
             }
-            scattate = [emoji for _n, emoji, valuta_fn, _d in STRATEGIE if valuta_fn(p_diag) is not None]
+            # Ogni strategia è valutata a sé: se una va in errore su questa partita, si segnala
+            # quella singola strategia invece di far fallire l'intero comando e lasciare l'utente
+            # senza referto (era proprio il tipo di guasto che questa diagnostica deve scoprire).
+            scattate = []
+            strategie_in_errore = []
+            for _nome_strat, emoji, valuta_fn, _descr in STRATEGIE:
+                try:
+                    if valuta_fn(p_diag) is not None:
+                        scattate.append(emoji)
+                except Exception as e:
+                    strategie_in_errore.append(f"{_nome_strat} ({e})")
+                    log(f"Diagnostica: strategia {_nome_strat} in errore su {home}-{away}: {e}")
             blocco.append(f"  Strategie che scatterebbero ora: {' '.join(scattate) if scattate else 'nessuna'}")
+            if strategie_in_errore:
+                blocco.append(f"  ⚠️ Strategie in errore: {', '.join(strategie_in_errore)}")
+                anomalie.append(f"{home}-{away}: strategie in errore - {', '.join(strategie_in_errore)}")
 
         righe.append("\n".join(blocco))
 
@@ -2366,12 +2452,7 @@ def cmd_diagnostica(chat_id):
         testo += "\n\n✅ Nessuna anomalia rilevata in questo controllo."
 
     for i in range(0, len(testo), 3800):
-        pezzo = testo[i:i + 3800]
-        risposta = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
-        if risposta.status_code != 200:
-            log(f"Errore invio diagnostica: HTTP {risposta.status_code} - {risposta.text[:300]}")
+        rispondi(chat_id, testo[i:i + 3800])
 
 
 def cmd_funzioni(chat_id):
@@ -4991,6 +5072,9 @@ def imposta_comandi_telegram():
 
 if __name__ == "__main__":
     log("=== Bot avviato ===")
+    # Avviato solo ora, a file completamente caricato: vedi la nota accanto a poll_callbacks.
+    callback_thread = threading.Thread(target=poll_callbacks, daemon=True)
+    callback_thread.start()
     imposta_comandi_telegram()
     invia_messaggio_telegram("Bot avviato\nMonitoraggio partite live in corso...")
 
