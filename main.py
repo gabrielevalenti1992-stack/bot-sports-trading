@@ -331,6 +331,58 @@ LEGHE_ATTIVE_CACHE = set()
 LEGHE_ATTIVE_TIMESTAMP = 0
 LEGHE_ATTIVE_TTL = 43200  # 12 ore
 
+# =============================================================================
+# STRATEGIA "DOMINIO": una squadra forte sta assediando davvero, a partita ancora aperta.
+# =============================================================================
+# Finestra temporale. Prima di SOGLIA_DOMINIO_MINUTO_MIN i totali sono ancora rumore (bastano due
+# tiri per fare "+5"); dopo SOGLIA_DOMINIO_MINUTO_MAX il segnale perde senso da trader: sullo 0-0
+# dominato all'80' resta troppo poco tempo perché il gol arrivi, ed è esattamente la situazione in
+# cui il prezzo si è già mosso contro chi entra tardi.
+SOGLIA_DOMINIO_MINUTO_MIN = 25
+SOGLIA_DOMINIO_MINUTO_MAX = 75
+
+# Chi conta come "squadra top". Due strade in OR, così funziona sia nelle leghe dove il bot ha la
+# quota sia altrove: (a) la favorita pre-partita secondo il mercato, con probabilità no-vig sopra
+# questa soglia (0.60 ≈ quota 1.55 o meno) - è il giudizio del bookmaker su chi è forte IN QUESTA
+# partita, si aggiorna da solo e vale in tutte le leghe; (b) un nome nella lista TOP_TEAMS, per i
+# club che vuoi considerare top anche quando la quota non è disponibile.
+SOGLIA_DOMINIO_PROB_FAVORITA = 0.60
+TOP_TEAMS = [
+    "Manchester City", "Liverpool", "Arsenal", "Chelsea", "Manchester United", "Tottenham",
+    "Real Madrid", "Barcelona", "Atletico Madrid",
+    "Bayern Munich", "Bayer Leverkusen", "Borussia Dortmund",
+    "Paris Saint Germain", "PSG",
+    "Inter", "AC Milan", "Juventus", "Napoli", "Atalanta", "Roma",
+    "Ajax", "PSV Eindhoven", "Feyenoord",
+    "Benfica", "Porto", "Sporting CP",
+]
+
+# Dominio cumulato su tutta la partita: le soglie "classiche" di un assedio vero.
+SOGLIA_DOMINIO_DIFF_TIRI = 5
+SOGLIA_DOMINIO_DIFF_PORTA = 3
+SOGLIA_DOMINIO_DIFF_CORNER = 3
+
+# Possesso palla minimo della squadra top. Volutamente non altissimo e mai da solo: il possesso
+# senza tiri ("sterile dominance", la big che gira palla davanti al pullman) ABBASSA la probabilità
+# del gol invece di alzarla, quindi qui serve solo come conferma di un dominio già dimostrato dai
+# tiri. Se l'API non dà il possesso per quella lega la strategia valuta comunque il resto, invece
+# di perdere il segnale su mezza whitelist.
+SOGLIA_DOMINIO_POSSESSO = 55
+
+# Pressione ANCORA viva: tiri della squadra top negli ultimi 15 minuti. È la condizione che
+# distingue un assedio in corso da una partita dominata mezz'ora fa e ormai spenta - senza questa,
+# i totali cumulati continuano a segnalare un dominio che sul campo non esiste più.
+SOGLIA_DOMINIO_TIRI_RECENTI = 2
+
+# Punteggio ancora "aperto": parità (0-0, 1-1, 2-2...) oppure squadra top sotto di al massimo
+# questo scarto. La top già in vantaggio è esclusa: chi è avanti gestisce, e il mercato del
+# prossimo gol vale molto meno.
+SOGLIA_DOMINIO_MAX_SVANTAGGIO = 1
+
+# Notifica dedicata quando il dominio scatta (una sola per partita, si riarma se cambia il
+# punteggio). A False resta solo la registrazione nello shadow-log, come le altre sei strategie.
+DOMINIO_NOTIFICA_ATTIVA = True
+
 try:
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
@@ -376,6 +428,17 @@ try:
     ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
     ORARIO_ATTIVO_FINE_MINUTO = config.get("orario_attivo_fine_minuto", ORARIO_ATTIVO_FINE_MINUTO)
     INTERVALLO_SNAPSHOT_VALORE = config.get("intervallo_snapshot_valore", INTERVALLO_SNAPSHOT_VALORE)
+    SOGLIA_DOMINIO_MINUTO_MIN = config.get("soglia_dominio_minuto_min", SOGLIA_DOMINIO_MINUTO_MIN)
+    SOGLIA_DOMINIO_MINUTO_MAX = config.get("soglia_dominio_minuto_max", SOGLIA_DOMINIO_MINUTO_MAX)
+    SOGLIA_DOMINIO_PROB_FAVORITA = config.get("soglia_dominio_prob_favorita", SOGLIA_DOMINIO_PROB_FAVORITA)
+    SOGLIA_DOMINIO_DIFF_TIRI = config.get("soglia_dominio_diff_tiri", SOGLIA_DOMINIO_DIFF_TIRI)
+    SOGLIA_DOMINIO_DIFF_PORTA = config.get("soglia_dominio_diff_porta", SOGLIA_DOMINIO_DIFF_PORTA)
+    SOGLIA_DOMINIO_DIFF_CORNER = config.get("soglia_dominio_diff_corner", SOGLIA_DOMINIO_DIFF_CORNER)
+    SOGLIA_DOMINIO_POSSESSO = config.get("soglia_dominio_possesso", SOGLIA_DOMINIO_POSSESSO)
+    SOGLIA_DOMINIO_TIRI_RECENTI = config.get("soglia_dominio_tiri_recenti", SOGLIA_DOMINIO_TIRI_RECENTI)
+    SOGLIA_DOMINIO_MAX_SVANTAGGIO = config.get("soglia_dominio_max_svantaggio", SOGLIA_DOMINIO_MAX_SVANTAGGIO)
+    DOMINIO_NOTIFICA_ATTIVA = config.get("dominio_notifica_attiva", DOMINIO_NOTIFICA_ATTIVA)
+    TOP_TEAMS = config.get("top_teams", TOP_TEAMS)
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
@@ -1784,11 +1847,11 @@ def cmd_help(chat_id):
         "/modalitacompleta - Torna alle notifiche di soglia normali\n"
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
-        "/shadowlogstrategie - Riepilogo e file dei dati raccolti sull'efficacia delle 6 strategie\n"
+        "/shadowlogstrategie - Riepilogo e file dei dati raccolti sull'efficacia delle 7 strategie\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
-        "/strategie - Cosa cerca ciascuna delle 6 strategie, spiegato semplice\n"
+        "/strategie - Cosa cerca ciascuna delle 7 strategie, spiegato semplice\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -2127,7 +2190,7 @@ def cmd_shadowlog(chat_id):
 
 def cmd_shadowlogstrategie(chat_id):
     """Manda un riepilogo numerico + il file grezzo di shadow_log_strategie.jsonl via Telegram,
-    stesso principio di /shadowlog ma per le sei strategie: quante volte scatta ciascuna e su
+    stesso principio di /shadowlog ma per le sette strategie: quante volte scatta ciascuna e su
     quante partite diverse, più il file grezzo (segnali + gol reali) per un'analisi offline più
     fine. Nessuna soglia o classifica costruita su questi numeri finché non ce ne sono abbastanza."""
     if not os.path.exists(SHADOW_LOG_STRATEGIE_FILE):
@@ -2306,13 +2369,16 @@ def cmd_diagnostica(chat_id):
         if history:
             current_stats_diag = history[-1]["stats"]
             xg_diag = history[-1].get("xg", [None, None])
+            poss_diag = history[-1].get("possesso", [None, None])
             minuto_calc = minuto_bot if minuto_bot is not None else minuto_api
             delta_diag, delta_reale_diag = calcola_delta_15min(fid, current_stats_diag, minuto_calc)
             p_diag = {
+                "fid": fid,
                 "home": home, "away": away, "minute": minuto_calc,
                 "score_h": stato.get("score_home", 0), "score_a": stato.get("score_away", 0),
                 "stats": current_stats_diag, "delta": delta_diag, "delta_reale": delta_reale_diag,
                 "xg_home": xg_diag[0], "xg_away": xg_diag[1],
+                "poss_home": poss_diag[0], "poss_away": poss_diag[1],
                 "stato_precedente": stato,
             }
             scattate = [emoji for _n, emoji, valuta_fn, _d in STRATEGIE if valuta_fn(p_diag) is not None]
@@ -2397,7 +2463,7 @@ def cmd_funzioni(chat_id):
         "guarda tra le altre già valutate (arbitraggio, confronto multi-bookmaker, modelli "
         "xG, e più di dieci altre).\n\n"
         "/shadowlog ti fa vedere in ogni momento a che punto è la raccolta.\n\n"
-        "Stessa idea anche per le 6 strategie di /strategie: ogni 15 minuti il bot le valuta "
+        "Stessa idea anche per le 7 strategie di /strategie: ogni 15 minuti il bot le valuta "
         "tutte da solo su ogni partita seguita (non solo quando lanci tu il comando) e "
         "registra quali scattano, così più avanti si può controllare con dati reali se "
         "scattare anticipa davvero un gol, o se scatta e poi non succede nulla più spesso di "
@@ -2416,7 +2482,9 @@ def cmd_funzioni(chat_id):
         "sei singole: restano valutate in automatico per la raccolta dati), corretto un bug "
         "che perdeva il risultato di partite finite "
         "durante la pausa, /strategie per capire le soglie attuali, raccolta dati automatica "
-        "sull'efficacia delle 6 strategie, controllo automatico della pipeline dati con avviso "
+        "sull'efficacia delle 7 strategie, nuova strategia 👑 Dominio con notifica dedicata "
+        "(squadra top che assedia a partita ancora aperta, vedi /strategie), "
+        "controllo automatico della pipeline dati con avviso "
         "in chat se qualcosa si inceppa."
     )
     requests.post(
@@ -2428,7 +2496,7 @@ def cmd_funzioni(chat_id):
 
 
 def cmd_strategie(chat_id):
-    """Spiega in parole semplici cosa cerca ciascuna delle 6 strategie e con quali soglie
+    """Spiega in parole semplici cosa cerca ciascuna delle 7 strategie e con quali soglie
     attuali, sullo stesso schema esplicativo di /funzioni (non solo un nome, il "perché" e il
     "come" concreti). La nota su Fascia calda riflette lo stato vero di
     STORICO_AGGIORNAMENTO_AUTOMATICO invece di un testo fisso, così resta accurata anche se in
@@ -2470,11 +2538,33 @@ def cmd_strategie(chat_id):
         "Confronta le due squadre quando tirano un numero simile di volte, ma una delle due è "
         "nettamente più concreta dell'altra (stesso indice della Concretezza qui sopra, usato "
         "per confrontarle tra loro invece che una sola per volta).\n\n"
+        "👑 Dominio (l'unica che ti manda una notifica)\n"
+        "Una squadra forte sta assediando davvero mentre la partita è ancora in bilico. Perché "
+        f"scatti servono tutte queste cose insieme: siamo tra il {SOGLIA_DOMINIO_MINUTO_MIN}' e "
+        f"il {SOGLIA_DOMINIO_MINUTO_MAX}'; la squadra è \"top\" (favorita pre-partita sopra il "
+        f"{round(SOGLIA_DOMINIO_PROB_FAVORITA * 100)}% secondo le quote, oppure è in lista nella "
+        f"configurazione); il risultato è in parità o la top è sotto di al massimo "
+        f"{SOGLIA_DOMINIO_MAX_SVANTAGGIO} gol; ha almeno +{SOGLIA_DOMINIO_DIFF_TIRI} tiri, "
+        f"+{SOGLIA_DOMINIO_DIFF_PORTA} in porta e +{SOGLIA_DOMINIO_DIFF_CORNER} corner "
+        f"sull'avversaria; il possesso è almeno {SOGLIA_DOMINIO_POSSESSO}% (se la lega lo "
+        f"fornisce); e sta ancora spingendo adesso, con almeno {SOGLIA_DOMINIO_TIRI_RECENTI} "
+        "tiri negli ultimi 15 minuti.\n"
+        "Le tre condizioni che sembrano di troppo sono quelle che tolgono i falsi segnali: la "
+        "finestra oraria evita lo 0-0 dominato all'85', quando non c'è più tempo perché il gol "
+        "arrivi; i tiri recenti evitano di segnalare un assedio finito mezz'ora fa che nei totali "
+        "sembra ancora vivo; e il possesso non basta mai da solo, perché la big che gira palla "
+        "davanti al pullman senza tirare rende il gol MENO probabile, non più probabile.\n"
+        "La top già in vantaggio è esclusa apposta: chi conduce gestisce. Il caso che vale di "
+        "più, e che infatti pesa di più nel punteggio, è la top sotto di un gol che sta "
+        "schiacciando: lì il mercato ha prezzato il vantaggio dell'altra e il campo dice il "
+        "contrario.\n\n"
         "ℹ️ Come vengono usate oggi\n"
-        "Non ci sono più comandi per lanciare le strategie a mano su tutte le partite live: le "
-        "sei vengono valutate in automatico dal bot su ogni partita seguita e i risultati "
-        "finiscono nella raccolta dati (/shadowlogstrategie), che serve a capire con numeri "
-        "veri quali funzionano davvero prima di trasformarle in notifiche."
+        "Non ci sono più comandi per lanciare le strategie a mano su tutte le partite live. Le "
+        "prime sei vengono solo valutate in automatico su ogni partita seguita e finiscono nella "
+        "raccolta dati (/shadowlogstrategie), che serve a capire con numeri veri quali funzionano "
+        "davvero prima di trasformarle in notifiche. Il Dominio invece ti manda anche una "
+        "notifica dedicata quando scatta: una sola per partita, e si ripresenta solo se il "
+        "risultato cambia (perché a quel punto è una situazione di trading diversa)."
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -2805,6 +2895,24 @@ SOGLIA_QUALITA_DIFF_TIRI_MAX = 2
 SOGLIA_QUALITA_DIFF_INDICE_MIN = 0.25
 
 
+def estrai_possesso(stats_team):
+    """Possesso palla in percentuale (int 0-100), o None se il dato manca. Serve un parser a parte
+    perché l'API lo restituisce come stringa con il simbolo ("58%"), quindi estrai_valore_stat ci
+    fallirebbe l'int() e tornerebbe 0 - cioè "0% di possesso" invece di "dato non disponibile".
+    Volutamente NON dentro estrai_current_stats: quelle 4 chiavi finiscono nei grafici a barre e
+    nel delta 15 minuti, e un possesso "cumulato per differenza" non vorrebbe dire nulla."""
+    for stat in stats_team:
+        if (stat.get("type") or "").lower() == "ball possession":
+            val = stat.get("value")
+            if val is None:
+                return None
+            try:
+                return int(str(val).strip().rstrip("%"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def estrai_xg(stats_team):
     """xG (expected_goals) della squadra, o None se il campo non è presente/valorizzato
     (distingue "dato assente" da "0.0 reale", a differenza di estrai_valore_stat)."""
@@ -2967,6 +3075,180 @@ def valuta_qualita(p):
     return abs(diff) * 10, f"{migliore} molto più concreta a parità di tiri ({tiri_h}-{tiri_a}): indice {max(indice_h, indice_a):.2f} vs {min(indice_h, indice_a):.2f}"
 
 
+MARCATORI_SQUADRE_RISERVE = {
+    "ii", "iii", "b", "c", "u17", "u18", "u19", "u20", "u21", "u23",
+    "castilla", "reserve", "reserves", "riserve", "youth", "academy", "juvenil", "primavera",
+}
+
+
+def _nome_squadra_normalizzato(nome):
+    """Confronto tollerante tra il nome dell'API e quelli scritti a mano in TOP_TEAMS: minuscolo,
+    senza punteggiatura e senza i suffissi societari che l'API mette e l'utente no (o viceversa),
+    così "Man. City", "Manchester City FC" e "Manchester City" cadono tutti sullo stesso nome."""
+    testo = (nome or "").lower()
+    for rumore in (".", ",", "-", "'"):
+        testo = testo.replace(rumore, " ")
+    parole = [par for par in testo.split() if par not in ("fc", "cf", "sc", "ac", "as", "ss", "us", "afc", "cd", "sv", "if")]
+    return " ".join(parole)
+
+
+def _e_nome_in_lista_top(nome):
+    """True se il nome della squadra corrisponde a una voce di TOP_TEAMS.
+
+    Il confronto è volutamente stretto: si accetta l'uguaglianza dopo la normalizzazione, e la
+    presenza come sequenza di parole intere SOLO per i nomi di listino composti da almeno due
+    parole. Con una regola più larga i nomi corti facevano danni seri - "Inter" pescava Inter
+    Miami e Inter Turku, "Napoli" pescava Napoli United, "Ajax" pescava Ajax Cape Town - cioè il
+    bot avrebbe trattato squadre qualunque come top di campionato."""
+    parole_nome = _nome_squadra_normalizzato(nome).split()
+    if not parole_nome:
+        return False
+    # Seconde squadre e giovanili portano il nome del club madre ma giocano in tutt'altra
+    # categoria: senza questo filtro "Bayern Munich II" e "Real Madrid Castilla" passerebbero
+    # per top di campionato.
+    if any(parola in MARCATORI_SQUADRE_RISERVE for parola in parole_nome):
+        return False
+    for top in TOP_TEAMS:
+        parole_top = _nome_squadra_normalizzato(top).split()
+        if not parole_top:
+            continue
+        if parole_nome == parole_top:
+            return True
+        if len(parole_top) >= 2:
+            for inizio in range(len(parole_nome) - len(parole_top) + 1):
+                if parole_nome[inizio:inizio + len(parole_top)] == parole_top:
+                    return True
+    return False
+
+
+def _e_squadra_top(p, idx):
+    """(True, motivo) se la squadra di indice idx è "top" in questa partita. Due strade in OR:
+    la favorita pre-partita secondo il mercato (probabilità no-vig, quota già scaricata col piano
+    giornata - nessuna chiamata API qui) oppure un nome presente in TOP_TEAMS."""
+    nome = p["home"] if idx == 0 else p["away"]
+    if _e_nome_in_lista_top(nome):
+        return True, "top di listino"
+    probabilita = calcola_probabilita_no_vig(quote_1x2_per_fixture(p.get("fid")))
+    if probabilita:
+        chiave = "casa" if idx == 0 else "ospite"
+        if probabilita[chiave] >= SOGLIA_DOMINIO_PROB_FAVORITA:
+            return True, f"favorita pre-partita {round(probabilita[chiave] * 100)}%"
+    return False, None
+
+
+def valuta_dominio(p):
+    """7. Dominio di una squadra top a partita ancora aperta: la favorita (per quota o per nome)
+    sta assediando davvero - non solo tenendo palla - mentre il risultato è ancora in bilico.
+
+    È il setup classico da trader (lay the draw / prossimo gol), e le condizioni sono scelte per
+    evitarne le tre trappole tipiche:
+      - il dominio "di ieri": si pretende pressione anche negli ultimi 15 minuti, non solo nei
+        totali cumulati, altrimenti si segnala un assedio finito mezz'ora prima;
+      - il possesso sterile: il possesso conta solo come conferma di un vantaggio già dimostrato
+        dai tiri, mai da solo;
+      - il tempo finito: fuori dalla finestra 25'-75' il segnale non è più tradabile.
+
+    La top già in vantaggio è esclusa (chi conduce gestisce): restano parità e top sotto di poco,
+    che è anche il caso più forte - il mercato ha prezzato il vantaggio dell'altra, la pressione
+    dice il contrario."""
+    if not (SOGLIA_DOMINIO_MINUTO_MIN <= p["minute"] <= SOGLIA_DOMINIO_MINUTO_MAX):
+        return None
+
+    candidati = []
+    for idx in (0, 1):
+        e_top, motivo_top = _e_squadra_top(p, idx)
+        if not e_top:
+            continue
+
+        # Punteggio ancora aperto dal punto di vista DI QUESTA squadra: parità, oppure sotto di
+        # non più di SOGLIA_DOMINIO_MAX_SVANTAGGIO. Se è avanti, niente segnale.
+        gol_propri = p["score_h"] if idx == 0 else p["score_a"]
+        gol_altrui = p["score_a"] if idx == 0 else p["score_h"]
+        svantaggio = gol_altrui - gol_propri
+        if svantaggio < 0 or svantaggio > SOGLIA_DOMINIO_MAX_SVANTAGGIO:
+            continue
+
+        altro = 1 - idx
+        diff_tiri = p["stats"]["Tiri totali"][idx] - p["stats"]["Tiri totali"][altro]
+        diff_porta = p["stats"]["Tiri in porta"][idx] - p["stats"]["Tiri in porta"][altro]
+        diff_corner = p["stats"]["Corner"][idx] - p["stats"]["Corner"][altro]
+        if (diff_tiri < SOGLIA_DOMINIO_DIFF_TIRI or diff_porta < SOGLIA_DOMINIO_DIFF_PORTA
+                or diff_corner < SOGLIA_DOMINIO_DIFF_CORNER):
+            continue
+
+        # Possesso: filtro solo se il dato c'è davvero (vedi estrai_possesso).
+        possesso = (p.get("poss_home"), p.get("poss_away"))[idx]
+        if possesso is not None and possesso < SOGLIA_DOMINIO_POSSESSO:
+            continue
+
+        # Pressione ancora viva: senza un delta 15' affidabile non si può dire nulla sull'"adesso",
+        # quindi si preferisce non segnalare piuttosto che segnalare un dominio forse spento.
+        if not p["delta_reale"]:
+            continue
+        tiri_recenti = p["delta"].get("Tiri totali", (0, 0))[idx]
+        if tiri_recenti < SOGLIA_DOMINIO_TIRI_RECENTI:
+            continue
+
+        nome = p["home"] if idx == 0 else p["away"]
+        avversario = p["away"] if idx == 0 else p["home"]
+        # Il caso "top sotto" pesa di più: è quello in cui il mercato e il campo dicono cose
+        # opposte, cioè dove un segnale ha davvero qualcosa da aggiungere al prezzo.
+        moltiplicatore = 1.5 if svantaggio > 0 else 1.0
+        punteggio = (diff_tiri + diff_porta * 2 + diff_corner) * moltiplicatore
+        if possesso is not None:
+            punteggio += max(0, possesso - 50) * 0.2
+
+        dettaglio_possesso = f", possesso {possesso}%" if possesso is not None else ", possesso n/d"
+        situazione = (f"sotto di {svantaggio}" if svantaggio > 0 else "in parità")
+        dettaglio = (
+            f"{nome} ({motivo_top}) {situazione} e in pieno controllo su {avversario}: "
+            f"+{diff_tiri} tiri, +{diff_porta} in porta, +{diff_corner} corner{dettaglio_possesso}, "
+            f"{tiri_recenti} tiri negli ultimi 15'"
+        )
+        candidati.append((punteggio, dettaglio))
+
+    if not candidati:
+        return None
+    candidati.sort(key=lambda c: -c[0])
+    return candidati[0]
+
+
+def controlla_notifica_dominio(fixture_id, p, league_name, league_country, is_favorita):
+    """Notifica dedicata quando il Dominio scatta: una sola per partita e per punteggio. La chiave
+    è il risultato, non un timestamp, così il segnale si riarma da solo quando la partita cambia
+    davvero stato (gol) invece di ripetersi ogni ciclo su una situazione identica - e un dominio
+    che continua dopo il pareggio, che per il trading è una situazione nuova, viene risegnalato."""
+    esito = valuta_dominio(p)
+    if esito is None:
+        return
+    _punteggio, dettaglio = esito
+
+    chiave_punteggio = f"{p['score_h']}-{p['score_a']}"
+    if stato_partite.get(fixture_id, {}).get("dominio_notificato") == chiave_punteggio:
+        return
+
+    quote = quote_1x2_per_fixture(fixture_id)
+    riga_quote = testo_quote_1x2(quote) if quote else ""
+    messaggio = (
+        f"👑 DOMINIO\n\n"
+        f"{p['home']} {p['score_h']}-{p['score_a']} {p['away']}\n"
+        f"{formatta_lega(league_name, league_country)}\n"
+        f"Minuto: {p['minute']}'\n\n"
+        f"{dettaglio}"
+        f"{riga_quote}"
+    )
+    destinatario = TELEGRAM_CHAT_ID_PREFERITI if is_favorita else TELEGRAM_CHAT_ID
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": destinatario, "text": messaggio}, timeout=5)
+    except Exception as e:
+        log(f"Errore invio notifica Dominio: {e}")
+        return
+    stato_partite.setdefault(fixture_id, {})["dominio_notificato"] = chiave_punteggio
+    log(f"    👑 Dominio notificato: {dettaglio}")
+
+
 STRATEGIE = [
     ("Assedio", "🏰", valuta_assedio, "match fermi ma con pressione alta"),
     ("Fascia calda", "⏰", valuta_fasciacalda, "squadra storicamente pericolosa in questa fascia oraria"),
@@ -2974,6 +3256,7 @@ STRATEGIE = [
     ("Concretezza", "🎯", valuta_concretezza, "squadra che trasforma bene i tiri in occasioni vere"),
     ("xG per tiro", "💎", valuta_xgtiro, "poche occasioni ma di alta qualità"),
     ("Qualità", "⚖️", valuta_qualita, "tiri quasi pari ma una squadra molto più concreta"),
+    ("Dominio", "👑", valuta_dominio, "squadra top che assedia a partita ancora aperta"),
 ]
 
 
@@ -4015,7 +4298,7 @@ def registra_shadow_log_valore_risultato(fixture_id, score_home, score_away):
 
 
 def registra_shadow_log_strategie_snapshot(fixture_id, home, away, minuto, score_home, score_away, segnali):
-    """Fotografia periodica di quali delle sei strategie scattano in questo momento sulla
+    """Fotografia periodica di quali delle sette strategie scattano in questo momento sulla
     partita (lista vuota se nessuna) - vedi commento su SHADOW_LOG_STRATEGIE_FILE per il perché
     si registra anche quando non scatta nulla."""
     _appendi_shadow_log(SHADOW_LOG_STRATEGIE_FILE, {
@@ -4241,6 +4524,7 @@ def processa_partita(fixture, notifiche_attive=True):
             corner_casa, corner_ospite = current_stats["Corner"]
             tiri_area_casa, tiri_area_ospite = current_stats["Tiri in area"]
             xg_casa, xg_ospite = estrai_xg(stats_home), estrai_xg(stats_away)
+            poss_casa, poss_ospite = estrai_possesso(stats_home), estrai_possesso(stats_away)
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
             # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
@@ -4251,7 +4535,8 @@ def processa_partita(fixture, notifiche_attive=True):
             history = stato_partite[fixture_id].get("history", [])
             history.append({
                 "timestamp": time.time(), "minuto": minuto, "stats": current_stats,
-                "xg": [estrai_xg(stats_home), estrai_xg(stats_away)],
+                "xg": [xg_casa, xg_ospite],
+                "possesso": [poss_casa, poss_ospite],
             })
             stato_partite[fixture_id]["history"] = history
             registra_esito_statistiche(league_country, league_name, True)
@@ -4263,6 +4548,7 @@ def processa_partita(fixture, notifiche_attive=True):
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
             tiri_area_casa = tiri_area_ospite = 0
             xg_casa = xg_ospite = None
+            poss_casa = poss_ospite = None
             log(f"    ⚠️ Statistiche non disponibili da API (lega potrebbe non supportare stats)")
             registra_esito_statistiche(league_country, league_name, False)
 
@@ -4395,18 +4681,30 @@ def processa_partita(fixture, notifiche_attive=True):
             stats_dict = delta_stats
             header_stats = "Statistiche ultimi 15 min" if is_real_delta else "Primo rilevamento"
 
+            # Dati che ogni strategia può leggere: costruiti ad ogni ciclo (è solo un dict su
+            # numeri già in memoria, nessuna chiamata API) perché servono sia allo shadow-log
+            # ogni 15 minuti sia al controllo del Dominio qui sotto, che invece deve poter
+            # scattare appena la condizione si verifica.
+            p_strategie = {
+                "fid": fixture_id,
+                "home": home, "away": away, "minute": minuto,
+                "score_h": score_home, "score_a": score_away,
+                "stats": current_stats, "delta": delta_stats, "delta_reale": is_real_delta,
+                "xg_home": xg_casa, "xg_away": xg_ospite,
+                "poss_home": poss_casa, "poss_away": poss_ospite,
+                "stato_precedente": stato_partite.get(fixture_id, {}),
+            }
+
+            if DOMINIO_NOTIFICA_ATTIVA and notifiche_attive and not MODALITA_NOTIFICHE.get("essenziale"):
+                controlla_notifica_dominio(
+                    fixture_id, p_strategie, league_name, league_country,
+                    str(fixture_id) in FAVORITE_MATCHES)
+
             # Shadow-log strategie: stesso ritmo (15 min) e stessa logica indipendente da
             # deve_notificare() dello snapshot valore più sotto - vedi commento su
             # SHADOW_LOG_STRATEGIE_FILE. Riusa dati già calcolati sopra, nessuna chiamata in più.
             ultimo_snapshot_strategie = stato_partite[fixture_id].get("ultimo_snapshot_strategie", 0)
             if (time.time() - ultimo_snapshot_strategie) >= INTERVALLO_SNAPSHOT_VALORE:
-                p_strategie = {
-                    "home": home, "away": away, "minute": minuto,
-                    "score_h": score_home, "score_a": score_away,
-                    "stats": current_stats, "delta": delta_stats, "delta_reale": is_real_delta,
-                    "xg_home": xg_casa, "xg_away": xg_ospite,
-                    "stato_precedente": stato_partite.get(fixture_id, {}),
-                }
                 segnali = []
                 for nome_strat, _emoji_strat, valuta_fn, _descr_strat in STRATEGIE:
                     esito_strat = valuta_fn(p_strategie)
