@@ -964,6 +964,9 @@ def poll_callbacks():
                     elif cmd == "/shadowlogstrategie":
                         esegui_comando_sicuro(chat_id, cmd_shadowlogstrategie)
 
+                    elif cmd == "/diagnostica":
+                        esegui_comando_sicuro(chat_id, cmd_diagnostica)
+
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
 
@@ -1806,6 +1809,8 @@ def cmd_help(chat_id):
         "/testpreferiti - Verifica se il canale preferiti dedicato è raggiungibile\n"
         "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
         "/shadowlogstrategie - Riepilogo e file dei dati raccolti sull'efficacia delle 6 strategie\n"
+        "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
+        "eventuali anomalie\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
         "/strategie - Cosa cerca ciascuna delle 6 strategie, spiegato semplice\n"
         "/setup - Menu comandi a bottoni"
@@ -2217,6 +2222,145 @@ def cmd_shadowlogstrategie(chat_id):
                 files={"document": f}, timeout=30)
     except Exception as e:
         log(f"Errore invio file shadow_log_strategie.jsonl: {e}")
+
+
+def cmd_diagnostica(chat_id):
+    """Controllo dal vivo, partita per partita, di ogni passaggio della pipeline dati (tracciamento,
+    statistiche, xG, quota 1X2, shadow-log valore, shadow-log strategie, quali strategie
+    scatterebbero adesso) - pensato per verificare in tempo reale, mentre le partite sono in corso,
+    se i dati vengono davvero raccolti e analizzati, invece di scoprirlo solo a fine giornata.
+
+    Usa lo stato già in memoria (stato_partite, PIANO_GIORNATA) più UNA sola chiamata fresca a
+    get_partite_live() per sapere cosa è live adesso: nessuna chiamata aggiuntiva alle statistiche,
+    per non consumare quota extra proprio mentre ci sono più partite in corso.
+
+    Le anomalie trovate vengono sia scritte nel messaggio Telegram sia loggate con log() (visibili
+    nei log di Render), cosi' risultano in entrambi i posti come chiesto."""
+    partite_raw = get_partite_live()
+    if not partite_raw:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "🔍 Diagnostica: nessuna partita live in questo momento secondo l'API."}, timeout=5)
+        return
+
+    partite_valide = [
+        f for f in partite_raw
+        if campionato_valido(
+            f.get("league", {}).get("name", ""),
+            f.get("league", {}).get("type", ""),
+            f.get("league", {}).get("country", "")
+        )
+    ]
+    ora = time.time()
+    righe = [
+        f"🔍 Diagnostica pipeline dati\n"
+        f"{len(partite_raw)} partite live dall'API, {len(partite_valide)} in campionati con statistiche note."
+    ]
+    anomalie = []
+
+    for f in partite_valide[:12]:
+        fid = f["fixture"]["id"]
+        home = f["teams"]["home"]["name"]
+        away = f["teams"]["away"]["name"]
+        minuto_api = f["fixture"]["status"].get("elapsed") or 0
+        league_name = f.get("league", {}).get("name", "")
+        league_country = f.get("league", {}).get("country", "")
+        stato = stato_partite.get(fid)
+
+        blocco = [f"{home} vs {away} ({formatta_lega(league_name, league_country)}, {minuto_api}' da API)"]
+
+        if not stato:
+            blocco.append("  ⚠️ Non ancora tracciata dal bot (nessun ciclo l'ha ancora processata)")
+            anomalie.append(f"{home}-{away}: mai tracciata pur essendo live e in un campionato valido")
+            righe.append("\n".join(blocco))
+            continue
+
+        minuto_bot = stato.get("last_minute")
+        if minuto_bot is not None and abs(minuto_api - minuto_bot) > 5:
+            blocco.append(f"  ⚠️ Minuto bot fermo a {minuto_bot}' contro {minuto_api}' dell'API (ciclo lento o bloccato)")
+            anomalie.append(f"{home}-{away}: minuto bot {minuto_bot}' vs API {minuto_api}'")
+        else:
+            blocco.append(f"  ✅ Tracciata, ultimo minuto visto: {minuto_bot}'")
+
+        history = stato.get("history", [])
+        if not history:
+            blocco.append("  ⚠️ Statistiche: mai arrivate (nessuna riga nello storico)")
+            if minuto_api > 10:
+                anomalie.append(f"{home}-{away}: statistiche mai arrivate al {minuto_api}'")
+        else:
+            eta_stats = ora - history[-1]["timestamp"]
+            blocco.append(f"  ✅ Statistiche: ultimo aggiornamento {int(eta_stats)}s fa")
+            xg = history[-1].get("xg", [None, None])
+            if xg[0] is not None or xg[1] is not None:
+                blocco.append(f"  ✅ xG: {xg[0]} - {xg[1]}")
+            else:
+                blocco.append("  ➖ xG: non disponibile per questa lega/partita")
+
+        quote = quote_1x2_per_fixture(fid)
+        if isinstance(quote, dict):
+            blocco.append(f"  ✅ Quota 1X2: 1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}")
+        elif quote is False:
+            blocco.append("  ➖ Quota 1X2: controllata, non disponibile per questa partita")
+        else:
+            blocco.append("  ➖ Quota 1X2: non ancora recuperata")
+
+        ultimo_val = stato.get("ultimo_snapshot_valore")
+        if isinstance(quote, dict):
+            if ultimo_val:
+                blocco.append(f"  ✅ Shadow-log valore: ultimo snapshot {int(ora - ultimo_val)}s fa")
+            elif minuto_api > 16:
+                blocco.append("  ⚠️ Shadow-log valore: quota presente ma nessuno snapshot ancora scritto")
+                anomalie.append(f"{home}-{away}: quota presente ma shadow-log valore vuoto al {minuto_api}'")
+            else:
+                blocco.append("  ⏳ Shadow-log valore: quota presente, primo snapshot non ancora dovuto (< 15 min)")
+        else:
+            blocco.append("  ➖ Shadow-log valore: nessuna quota, nessuno snapshot atteso")
+
+        ultimo_strat = stato.get("ultimo_snapshot_strategie")
+        if ultimo_strat:
+            blocco.append(f"  ✅ Shadow-log strategie: ultimo snapshot {int(ora - ultimo_strat)}s fa")
+        elif history and minuto_api > 16:
+            blocco.append("  ⚠️ Shadow-log strategie: statistiche presenti ma nessuno snapshot ancora scritto")
+            anomalie.append(f"{home}-{away}: statistiche presenti ma shadow-log strategie vuoto al {minuto_api}'")
+        elif history:
+            blocco.append("  ⏳ Shadow-log strategie: primo snapshot non ancora dovuto (< 15 min)")
+        else:
+            blocco.append("  ⏳ Shadow-log strategie: in attesa delle prime statistiche")
+
+        if history:
+            current_stats_diag = history[-1]["stats"]
+            xg_diag = history[-1].get("xg", [None, None])
+            minuto_calc = minuto_bot if minuto_bot is not None else minuto_api
+            delta_diag, delta_reale_diag = calcola_delta_15min(fid, current_stats_diag, minuto_calc)
+            p_diag = {
+                "home": home, "away": away, "minute": minuto_calc,
+                "score_h": stato.get("score_home", 0), "score_a": stato.get("score_away", 0),
+                "stats": current_stats_diag, "delta": delta_diag, "delta_reale": delta_reale_diag,
+                "xg_home": xg_diag[0], "xg_away": xg_diag[1],
+                "stato_precedente": stato,
+            }
+            scattate = [emoji for _n, emoji, valuta_fn, _d in STRATEGIE if valuta_fn(p_diag) is not None]
+            blocco.append(f"  Strategie che scatterebbero ora: {' '.join(scattate) if scattate else 'nessuna'}")
+
+        righe.append("\n".join(blocco))
+
+    testo = "\n\n".join(righe)
+    if len(partite_valide) > 12:
+        testo += f"\n\n(mostrate le prime 12 di {len(partite_valide)} partite valide)"
+
+    if anomalie:
+        testo += "\n\n⚠️ Anomalie rilevate:\n" + "\n".join(f"- {a}" for a in anomalie)
+        log("Diagnostica pipeline: " + " | ".join(anomalie))
+    else:
+        testo += "\n\n✅ Nessuna anomalia rilevata in questo controllo."
+
+    for i in range(0, len(testo), 3800):
+        pezzo = testo[i:i + 3800]
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": pezzo}, timeout=10)
+        if risposta.status_code != 200:
+            log(f"Errore invio diagnostica: HTTP {risposta.status_code} - {risposta.text[:300]}")
 
 
 def cmd_funzioni(chat_id):
@@ -4678,6 +4822,7 @@ def imposta_comandi_telegram():
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "shadowlog", "description": "Riepilogo dati raccolti per la validazione"},
         {"command": "shadowlogstrategie", "description": "Dati raccolti sull'efficacia delle strategie"},
+        {"command": "diagnostica", "description": "Controllo dal vivo di ogni partita live"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "strategie", "description": "Cosa cerca ciascuna delle 6 strategie"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
