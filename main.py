@@ -299,7 +299,10 @@ LEGHE_CON_STATISTICHE = [
     "Liga Profesional Argentina", "Copa de la Liga Profesional", "Primera A", "Primera División",
     "Division Profesional", "División Profesional",
     "Champions League", "Europa League", "Conference League", "UEFA Super Cup",
-    "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
+    "World Cup", "Euro Championship", "Copa America", "Copa Libertadores",
+    # Supercoppe di lega nazionali (l'equivalente locale della Community Shield inglese)
+    "Community Shield", "Supercoppa Italiana", "Supercopa de Espana", "DFL-Supercup",
+    "Trophee des Champions", "Johan Cruijff Schaal", "Supertaca",
 ]
 
 # Nomi di campionato IDENTICI usati da paesi diversi nell'API (l'API-Football non li distingue
@@ -409,13 +412,13 @@ PAROLE_ESCLUSE = [
 # essendo mai state messe in whitelist di proposito (a differenza di Champions/Europa/Conference
 # League, che restano incluse).
 COPPE_NAZIONALI_ESCLUSE = [
-    "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy", "community shield",
-    "coppa italia", "supercoppa italiana",
-    "copa del rey", "supercopa de espana",
-    "dfb-pokal", "dfb pokal", "dfl-supercup",
-    "coupe de france", "coupe de la ligue", "trophee des champions",
-    "knvb beker", "johan cruijff schaal",
-    "taca de portugal", "taça de portugal", "supertaca",
+    "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy",
+    "coppa italia",
+    "copa del rey",
+    "dfb-pokal", "dfb pokal",
+    "coupe de france", "coupe de la ligue",
+    "knvb beker",
+    "taca de portugal", "taça de portugal",
     "scottish cup", "scottish league cup", "scottish challenge cup",
 ]
 
@@ -1096,7 +1099,10 @@ def campionato_valido(league_name, league_type, league_country=""):
         if parola in nome:
             return False
     for coppa in COPPE_NAZIONALI_ESCLUSE:
-        if coppa in nome:
+        # Confine di parola, non sottostringa grezza: "coppa italia" non deve intercettare
+        # "Supercoppa Italiana" (whitelistata a parte) solo perché ne è una sottostringa - stesso
+        # criterio già usato da _lega_in_whitelist_statica per lo stesso identico motivo.
+        if re.search(rf"\b{re.escape(coppa)}\b", nome):
             return False
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
         return False
