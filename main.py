@@ -1787,6 +1787,25 @@ def testo_confronto_tempi(stats_fine_1h, current_stats):
     return f"\n1° tempo: {' | '.join(parti_1t)}\n2° tempo: {' | '.join(parti_2t)}\n"
 
 
+def testo_confronto_tempi_parziale(history, current_stats):
+    """Come testo_confronto_tempi, ma per quando manca lo snapshot di fine 1°T (il bot ha
+    iniziato a monitorare la partita a metà, es. per un riavvio durante l'intervallo): invece di
+    non mostrare nulla, usa come base il primo dato che il bot ha davvero visto (history[0]) e
+    mostra il delta da lì, dicendo esplicitamente da che minuto parte - non è "tutto il 2°
+    tempo", ma è comunque meglio di niente, ed è onesto su cosa manca."""
+    primo = history[0]
+    minuto_base = primo.get("minuto") or 0
+    stats_base = primo.get("stats", {}) or {}
+    etichette = {"Tiri totali": "Tiri", "Tiri in porta": "Porta", "Corner": "Corner"}
+    parti = []
+    for chiave, label in etichette.items():
+        h0, a0 = stats_base.get(chiave, (0, 0))
+        hc, ac = current_stats.get(chiave, (0, 0))
+        h, a = max(0, hc - h0), max(0, ac - a0)
+        parti.append(f"{label} {h}-{a}")
+    return f"\n(1°T/2°T non completo, il bot segue questa partita solo dal {minuto_base}')\nDal {minuto_base}': {' | '.join(parti)}\n"
+
+
 # =============================================================================
 # COMANDI TELEGRAM (funzioni riutilizzabili da testo e da bottoni inline)
 # =============================================================================
@@ -4554,8 +4573,10 @@ def processa_partita(fixture, notifiche_attive=True):
                     if current_stats:
                         if stats_1h_salvate:
                             tempi_finale_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+                        elif history:
+                            tempi_finale_text = testo_confronto_tempi_parziale(history, current_stats)
                         else:
-                            tempi_finale_text = "(1°T/2°T non disponibile: il bot ha iniziato a monitorare questa partita dopo l'intervallo)\n"
+                            tempi_finale_text = "(1°T/2°T non disponibile: nessun dato raccolto per questa partita)\n"
 
                     messaggio = (
                         f"{home} vs {away}\n"
@@ -4812,8 +4833,10 @@ def processa_partita(fixture, notifiche_attive=True):
         if status_short == "2H" and current_stats:
             if stats_1h_salvate:
                 tempi_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
+            elif history:
+                tempi_text = testo_confronto_tempi_parziale(history, current_stats)
             else:
-                tempi_text = "\n(1°T/2°T non disponibile: il bot ha iniziato a monitorare questa partita dopo l'intervallo)\n"
+                tempi_text = "\n(1°T/2°T non disponibile: nessun dato raccolto per questa partita)\n"
 
         # Il totale cumulativo della partita (tiri, porta, corner, area) si vede ora nel grafico
         # allegato (barre proporzionali, sempre presenti: da sole per le non preferite, impilate
