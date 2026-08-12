@@ -333,13 +333,6 @@ COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
     "world cup", "euro championship", "copa america", "copa libertadores",
 }
 
-# Cache dinamica delle leghe con statistiche coperte, ricavata dall'API /leagues.
-# Usata al posto di LEGHE_CON_STATISTICHE quando disponibile; quest'ultima resta come fallback
-# se l'API non risponde (es. all'avvio o in caso di errore).
-LEGHE_ATTIVE_CACHE = set()
-LEGHE_ATTIVE_TIMESTAMP = 0
-LEGHE_ATTIVE_TTL = 43200  # 12 ore
-
 try:
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
@@ -405,12 +398,11 @@ PAROLE_ESCLUSE = [
     # Ripristinare dopo il test!
 ]
 
-# Coppe nazionali (non UEFA) sempre escluse, anche se la whitelist dinamica le marca come "con
-# statistiche coperte": la whitelist statica è pensata come un'aggiunta rispetto alla copertura
-# dinamica dell'API, non come un filtro, quindi competizioni come la League Cup inglese passavano
-# il controllo semplicemente perché API-Football ha statistiche per quella competizione, pur non
-# essendo mai state messe in whitelist di proposito (a differenza di Champions/Europa/Conference
-# League, che restano incluse).
+# Coppe nazionali (non UEFA) sempre escluse. Da quando campionato_valido() usa solo la whitelist
+# statica (niente più cache dinamica dell'API, vedi commento lì) questo elenco è ridondante in
+# pratica - nessuna di queste competizioni è comunque in LEGHE_CON_STATISTICHE, quindi verrebbe
+# già bloccata dalla whitelist da sola - ma resta come rete di sicurezza esplicita e documentata:
+# se in futuro cambia la logica del filtro, queste restano escluse di proposito, non per omissione.
 COPPE_NAZIONALI_ESCLUSE = [
     "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy",
     "coppa italia",
@@ -1109,13 +1101,15 @@ def campionato_valido(league_name, league_type, league_country=""):
     if lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
-        aggiorna_leghe_attive()
-        in_cache_dinamica = (league_country.lower(), nome) in LEGHE_ATTIVE_CACHE
-        in_whitelist_statica = _lega_in_whitelist_statica(nome, league_country)
-        # Unione, non sostituzione: la whitelist statica resta una rete di sicurezza per i
-        # campionati core anche quando l'API non li marca ancora come "coperti" nella stagione
-        # corrente (es. a inizio stagione, prima che vengano giocate partite con statistiche reali).
-        if not in_cache_dinamica and not in_whitelist_statica:
+        # Solo whitelist statica curata: fino a poco fa si passava anche qualunque campionato
+        # marcato "statistiche coperte" a livello di stagione dalla cache dinamica dell'API
+        # (aggiorna_leghe_attive), come rete di sicurezza per i campionati core prima che
+        # vengano giocate partite con statistiche reali. Tolta su richiesta: quel flag e' un
+        # dettaglio tecnico dell'API, non una selezione per rilevanza, e lasciava passare
+        # campionati minori mai scelti di proposito (es. terze serie russe/georgiane) - partite
+        # ininfluenti per il trading che pero' pesano sulla stessa quota/rate-limit API delle
+        # partite vere, con anche il rischio di far fallire le chiamate statistiche su quelle.
+        if not _lega_in_whitelist_statica(nome, league_country):
             return False
     return True
 
@@ -1536,48 +1530,6 @@ def testo_quote_1x2(quote):
         return ""
     return (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
             f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
-
-
-def get_leghe_con_copertura_statistiche_raw():
-    """Interroga /leagues e restituisce coppie (paese, nome lega) con copertura statistiche nella stagione corrente."""
-    if not API_FOOTBALL_KEY:
-        return []
-    url = "https://v3.football.api-sports.io/leagues"
-    data, _, _ = get_api_football(url, {"current": "true"}, timeout=20, contesto="get_leghe_con_copertura_statistiche_raw")
-    if data is None:
-        return []
-    risultati = []
-    for item in data.get("response", []):
-        league = item.get("league", {})
-        country = item.get("country", {})
-        for season in item.get("seasons", []):
-            if not season.get("current"):
-                continue
-            coverage = season.get("coverage", {}) or {}
-            fixtures_cov = coverage.get("fixtures", {}) or {}
-            stats_ok = bool(fixtures_cov.get("statistics_fixtures", fixtures_cov.get("statistics", False)))
-            if stats_ok:
-                nome = league.get("name", "?")
-                paese = country.get("name", "?")
-                risultati.append((paese, nome))
-    return sorted(set(risultati))
-
-
-def aggiorna_leghe_attive(force=False):
-    """Aggiorna la cache dinamica delle leghe con statistiche coperte (usata da campionato_valido).
-    Se l'API non risponde o non restituisce nulla, la cache precedente resta valida (fallback)."""
-    global LEGHE_ATTIVE_CACHE, LEGHE_ATTIVE_TIMESTAMP
-    now = time.time()
-    if not force and LEGHE_ATTIVE_CACHE and (now - LEGHE_ATTIVE_TIMESTAMP) < LEGHE_ATTIVE_TTL:
-        return
-    raw = get_leghe_con_copertura_statistiche_raw()
-    if raw:
-        LEGHE_ATTIVE_CACHE = set((paese.lower(), nome.lower()) for paese, nome in raw)
-        LEGHE_ATTIVE_TIMESTAMP = now
-        log(f"Whitelist leghe aggiornata dinamicamente: {len(LEGHE_ATTIVE_CACHE)} campionati con statistiche coperte")
-    else:
-        log("Whitelist leghe non aggiornata (API vuota o errore) - mantengo cache/fallback precedente")
-    return raw
 
 
 # Statistiche ed eventi non supportano un fetch "bulk" su più partite (a differenza di /fixtures,
