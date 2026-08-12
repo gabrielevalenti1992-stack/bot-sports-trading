@@ -298,7 +298,7 @@ LEGHE_CON_STATISTICHE = [
     # Brasile e Argentina (Brasile già coperto da "Serie A"/"Serie B"), Colombia, Uruguay, Bolivia
     "Liga Profesional Argentina", "Copa de la Liga Profesional", "Primera A", "Primera División",
     "Division Profesional", "División Profesional",
-    "Champions League", "Europa League", "Conference League",
+    "Champions League", "Europa League", "Conference League", "UEFA Super Cup",
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores"
 ]
 
@@ -326,7 +326,7 @@ PAESE_ATTESO_LEGA_AMBIGUA = {
 # Champions League", "CAF Champions League" contengono "Champions League" come sottostringa ma
 # non hanno statistiche reali).
 COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
-    "champions league", "europa league", "conference league",
+    "champions league", "europa league", "conference league", "uefa super cup",
     "world cup", "euro championship", "copa america", "copa libertadores",
 }
 
