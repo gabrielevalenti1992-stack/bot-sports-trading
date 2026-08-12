@@ -4894,108 +4894,126 @@ if __name__ == "__main__":
     invia_messaggio_telegram("Bot avviato\nMonitoraggio partite live in corso...")
 
     while True:
-        if not CONFIG_VALIDA:
-            log("CONFIGURAZIONE INCOMPLETA - Attendo 30 secondi...")
-            time.sleep(30)
-            continue
-
-        if STATO_PAUSA.get("in_pausa"):
-            ora = time.time()
-            da_quanto = ora - STATO_PAUSA.get("dal", ora)
-            if ora - STATO_PAUSA.get("ultimo_promemoria", 0) >= INTERVALLO_PROMEMORIA_PAUSA:
-                ore = round(da_quanto / 3600, 1)
-                invia_messaggio_telegram(f"⏸ Bot ancora in pausa da {ore}h. Invia /riprendi per riattivarlo.")
-                STATO_PAUSA["ultimo_promemoria"] = ora
-                salva_pausa(STATO_PAUSA)
-            log(f"In pausa manuale da {round(da_quanto / 60)} min, nessuna chiamata API. Attesa {INTERVALLO_CICLO_MORTO}s...")
-            time.sleep(INTERVALLO_CICLO_MORTO)
-            continue
-
-        # Fuori dalla fascia oraria configurata: il monitoraggio (statistiche, quote, shadow-log)
-        # resta comunque attivo 24/7 - notifiche_attive spegne solo l'invio delle notifiche più
-        # sotto (vedi processa_partita), non il ciclo in sé. Questo evita sia di perdere dati utili
-        # alla validazione futura, sia il bug delle partite che finiscono a cavallo dell'orario di
-        # stop restando orfane nello shadow-log (nessun risultato finale mai registrato).
-        notifiche_attive = dentro_orario_attivo()
-        if not notifiche_attive:
-            log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
-                f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}): monitoraggio silenzioso, nessuna notifica.")
-
-        aggiorna_piano_giornata_se_serve()
-        aggiorna_quote_prepartita_imminenti()
-
-        ciclo_numero += 1
-        log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
-
-        partite = get_partite_live()
-        chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
-        partite_valide = [
-            f for f in partite
-            if campionato_valido(
-                f.get("league", {}).get("name", ""),
-                f.get("league", {}).get("type", ""),
-                f.get("league", {}).get("country", "")
-            )
-        ]
-        log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
-
-        if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
-            if chiamata_partite_live_fallita:
-                invia_messaggio_telegram(
-                    f"Bot attivo - Ciclo #{ciclo_numero}\n"
-                    f"Ultima chiamata API fallita (vedi errore sopra): dato partite live non affidabile"
-                )
-            else:
-                invia_messaggio_telegram(
-                    f"Bot attivo - Ciclo #{ciclo_numero}\n"
-                    f"Partite live monitorate: {len(partite_valide)}"
-                )
-
-        # Si itera solo sulle partite valide (non su tutte le partite live del mondo): lo sleep(1)
-        # tra una chiamata e l'altra serve a distanziare le chiamate API fatte da processa_partita
-        # (statistiche + eventi), quindi non ha senso pagarlo anche per le migliaia di partite
-        # scartate (dilettanti, giovanili, campionati fuori whitelist) su cui non viene fatta
-        # nessuna chiamata. stato_partite contiene solo partite valide, quindi fixture_ids_live
-        # può essere costruito direttamente da partite_valide.
-        fixture_ids_live = {
-            f["fixture"]["id"] for f in partite_valide if f.get("fixture", {}).get("id")
-        }
-        # I preferiti vengono ricontrollati ogni INTERVALLO_CICLO_MOMENTUM (60s) invece che ogni
-        # INTERVALLO_CICLO_ATTIVO (180s): più punti storici in meno tempo = grafico momentum più
-        # denso. Le altre partite valide restano al ritmo normale. Il ciclo esterno (sleep finale)
-        # viene comunque accorciato quando c'è almeno un preferito live, altrimenti il gate qui
-        # sotto non verrebbe mai ricontrollato abbastanza spesso da avere effetto.
-        preferito_live = False
-        for fixture in partite_valide:
-            fid = fixture.get("fixture", {}).get("id")
-            e_preferita = fid is not None and str(fid) in FAVORITE_MATCHES
-            if e_preferita:
-                preferito_live = True
-            intervallo_minimo = INTERVALLO_CICLO_MOMENTUM if e_preferita else INTERVALLO_CICLO_ATTIVO
-            ultimo_controllo = stato_partite.get(fid, {}).get("ultimo_controllo", 0) if fid is not None else 0
-            if time.time() - ultimo_controllo < intervallo_minimo:
+        # Tutto il corpo del ciclo è protetto da questo try/except: prima non lo era, quindi
+        # un'eccezione imprevista in QUALSIASI punto (dato dell'API fuori formato, edge case mai
+        # visto in una delle funzioni chiamate qui sotto) usciva dal while, terminava il processo
+        # Python e Render lo faceva ripartire da capo - il pattern "Bot avviato" a raffica visto
+        # in chat senza nessun deploy manuale di mezzo. processa_partita() e i comandi Telegram
+        # (_esegui_comando) erano già protetti così; mancava solo il ciclo principale che li
+        # richiama insieme alle funzioni automatiche (diagnostica, pulizia partite terminate,
+        # salvataggio stato, piano giornata...). Un errore qui viene ora loggato e segnalato in
+        # chat (se possibile), poi il ciclo riprende dopo una breve pausa invece di far morire
+        # tutto il bot.
+        try:
+            if not CONFIG_VALIDA:
+                log("CONFIGURAZIONE INCOMPLETA - Attendo 30 secondi...")
+                time.sleep(30)
                 continue
-            processa_partita(fixture, notifiche_attive)
-            if fid is not None:
-                stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
-            time.sleep(1)
 
-        pulisci_partite_terminate(fixture_ids_live)
-        salva_stato_partite(stato_partite)
-        invia_report_intensita_automatico(partite_valide, notifiche_attive)
-        esegui_diagnostica_automatica(partite_valide, notifiche_attive)
-        aggiorna_storico_minutaggi_automatico()
+            if STATO_PAUSA.get("in_pausa"):
+                ora = time.time()
+                da_quanto = ora - STATO_PAUSA.get("dal", ora)
+                if ora - STATO_PAUSA.get("ultimo_promemoria", 0) >= INTERVALLO_PROMEMORIA_PAUSA:
+                    ore = round(da_quanto / 3600, 1)
+                    invia_messaggio_telegram(f"⏸ Bot ancora in pausa da {ore}h. Invia /riprendi per riattivarlo.")
+                    STATO_PAUSA["ultimo_promemoria"] = ora
+                    salva_pausa(STATO_PAUSA)
+                log(f"In pausa manuale da {round(da_quanto / 60)} min, nessuna chiamata API. Attesa {INTERVALLO_CICLO_MORTO}s...")
+                time.sleep(INTERVALLO_CICLO_MORTO)
+                continue
 
-        # Scheduler adattivo (piano giornata): fuori da ogni finestra attiva prevista e senza
-        # partite valide effettivamente in corso in questo momento, il ciclo rallenta invece di
-        # continuare a interrogare l'API ogni pochi minuti per niente. Se il piano non è ancora
-        # disponibile (es. primo avvio prima che la generazione vada a buon fine) ci si comporta
-        # come se si fosse sempre in finestra attiva, per non restare ciechi.
-        piano_disponibile = PIANO_GIORNATA.get("data") is not None
-        in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
-        ciclo_attivo = in_finestra_attiva or bool(partite_valide)
-        prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
-        if preferito_live:
-            prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
-        log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''})...")
-        time.sleep(prossimo_intervallo)
+            # Fuori dalla fascia oraria configurata: il monitoraggio (statistiche, quote, shadow-log)
+            # resta comunque attivo 24/7 - notifiche_attive spegne solo l'invio delle notifiche più
+            # sotto (vedi processa_partita), non il ciclo in sé. Questo evita sia di perdere dati utili
+            # alla validazione futura, sia il bug delle partite che finiscono a cavallo dell'orario di
+            # stop restando orfane nello shadow-log (nessun risultato finale mai registrato).
+            notifiche_attive = dentro_orario_attivo()
+            if not notifiche_attive:
+                log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
+                    f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}): monitoraggio silenzioso, nessuna notifica.")
+
+            aggiorna_piano_giornata_se_serve()
+            aggiorna_quote_prepartita_imminenti()
+
+            ciclo_numero += 1
+            log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
+
+            partite = get_partite_live()
+            chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
+            partite_valide = [
+                f for f in partite
+                if campionato_valido(
+                    f.get("league", {}).get("name", ""),
+                    f.get("league", {}).get("type", ""),
+                    f.get("league", {}).get("country", "")
+                )
+            ]
+            log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
+
+            if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
+                if chiamata_partite_live_fallita:
+                    invia_messaggio_telegram(
+                        f"Bot attivo - Ciclo #{ciclo_numero}\n"
+                        f"Ultima chiamata API fallita (vedi errore sopra): dato partite live non affidabile"
+                    )
+                else:
+                    invia_messaggio_telegram(
+                        f"Bot attivo - Ciclo #{ciclo_numero}\n"
+                        f"Partite live monitorate: {len(partite_valide)}"
+                    )
+
+            # Si itera solo sulle partite valide (non su tutte le partite live del mondo): lo sleep(1)
+            # tra una chiamata e l'altra serve a distanziare le chiamate API fatte da processa_partita
+            # (statistiche + eventi), quindi non ha senso pagarlo anche per le migliaia di partite
+            # scartate (dilettanti, giovanili, campionati fuori whitelist) su cui non viene fatta
+            # nessuna chiamata. stato_partite contiene solo partite valide, quindi fixture_ids_live
+            # può essere costruito direttamente da partite_valide.
+            fixture_ids_live = {
+                f["fixture"]["id"] for f in partite_valide if f.get("fixture", {}).get("id")
+            }
+            # I preferiti vengono ricontrollati ogni INTERVALLO_CICLO_MOMENTUM (60s) invece che ogni
+            # INTERVALLO_CICLO_ATTIVO (180s): più punti storici in meno tempo = grafico momentum più
+            # denso. Le altre partite valide restano al ritmo normale. Il ciclo esterno (sleep finale)
+            # viene comunque accorciato quando c'è almeno un preferito live, altrimenti il gate qui
+            # sotto non verrebbe mai ricontrollato abbastanza spesso da avere effetto.
+            preferito_live = False
+            for fixture in partite_valide:
+                fid = fixture.get("fixture", {}).get("id")
+                e_preferita = fid is not None and str(fid) in FAVORITE_MATCHES
+                if e_preferita:
+                    preferito_live = True
+                intervallo_minimo = INTERVALLO_CICLO_MOMENTUM if e_preferita else INTERVALLO_CICLO_ATTIVO
+                ultimo_controllo = stato_partite.get(fid, {}).get("ultimo_controllo", 0) if fid is not None else 0
+                if time.time() - ultimo_controllo < intervallo_minimo:
+                    continue
+                processa_partita(fixture, notifiche_attive)
+                if fid is not None:
+                    stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
+                time.sleep(1)
+
+            pulisci_partite_terminate(fixture_ids_live)
+            salva_stato_partite(stato_partite)
+            invia_report_intensita_automatico(partite_valide, notifiche_attive)
+            esegui_diagnostica_automatica(partite_valide, notifiche_attive)
+            aggiorna_storico_minutaggi_automatico()
+
+            # Scheduler adattivo (piano giornata): fuori da ogni finestra attiva prevista e senza
+            # partite valide effettivamente in corso in questo momento, il ciclo rallenta invece di
+            # continuare a interrogare l'API ogni pochi minuti per niente. Se il piano non è ancora
+            # disponibile (es. primo avvio prima che la generazione vada a buon fine) ci si comporta
+            # come se si fosse sempre in finestra attiva, per non restare ciechi.
+            piano_disponibile = PIANO_GIORNATA.get("data") is not None
+            in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
+            ciclo_attivo = in_finestra_attiva or bool(partite_valide)
+            prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
+            if preferito_live:
+                prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
+            log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''})...")
+            time.sleep(prossimo_intervallo)
+        except Exception as e:
+            log(f"Errore imprevisto nel ciclo principale (il bot NON si riavvia, riprende dopo una pausa): {e}")
+            try:
+                invia_messaggio_telegram("⚠️ Errore imprevisto nel ciclo principale (vedi log Render per il dettaglio). Il bot continua, riprende tra poco.")
+            except Exception:
+                pass
+            time.sleep(30)
