@@ -298,6 +298,10 @@ LEGHE_CON_STATISTICHE = [
     # Brasile e Argentina (Brasile già coperto da "Serie A"/"Serie B"), Colombia, Uruguay, Bolivia
     "Liga Profesional Argentina", "Copa de la Liga Profesional", "Primera A", "Primera División",
     "Division Profesional", "División Profesional",
+    # Nome ESATTO restituito da API-Football (confermato da una notifica reale: "UEFA Europa
+    # Conference League", non solo "Conference League") - tenute anche le forme brevi come
+    # ulteriore match esatto, nel dubbio che qualche endpoint le usi ancora così.
+    "UEFA Champions League", "UEFA Europa League", "UEFA Europa Conference League",
     "Champions League", "Europa League", "Conference League", "UEFA Super Cup",
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores",
     # Supercoppe di lega nazionali (l'equivalente locale della Community Shield inglese)
@@ -329,6 +333,7 @@ PAESE_ATTESO_LEGA_AMBIGUA = {
 # Champions League", "CAF Champions League" contengono "Champions League" come sottostringa ma
 # non hanno statistiche reali).
 COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
+    "uefa champions league", "uefa europa league", "uefa europa conference league",
     "champions league", "europa league", "conference league", "uefa super cup",
     "world cup", "euro championship", "copa america", "copa libertadores",
 }
