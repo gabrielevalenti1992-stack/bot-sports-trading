@@ -1128,6 +1128,21 @@ def formatta_lega(nome, paese):
 ULTIMO_ERRORE_API = {"tipo": None, "timestamp": 0}
 INTERVALLO_NOTIFICA_ERRORE_API = 1800  # 30 minuti: non ripetere la stessa notifica più spesso
 
+# Raffreddamento dopo un rate-limit: il limite di API-Football è "richieste al minuto", quindi
+# insistere subito peggiora solo le cose (altre chiamate respinte, magari da più punti del bot
+# nello stesso momento: ciclo principale, comandi manuali, refresh quote in background). Un solo
+# rate-limit rilevato blocca TUTTE le chiamate API-Football per un minuto abbondante, poi si
+# riprova - molto più semplice ed efficace che stimare quante richieste restano.
+RATE_LIMIT_COOLDOWN_SECONDI = 65
+PROSSIMA_CHIAMATA_API_CONSENTITA = 0
+
+
+def _e_errore_rate_limit(errori):
+    """True se 'errori' (il campo "errors" della risposta API-Football, dict o lista a seconda
+    dell'endpoint) segnala un rate-limit - non un errore applicativo qualunque."""
+    testo = str(errori).lower()
+    return "ratelimit" in testo.replace(" ", "") or "too many requests" in testo
+
 
 def _log_quota_headers(response):
     """Logga la quota residua che l'API restituisce già negli header di ogni risposta,
@@ -1150,9 +1165,20 @@ def get_api_football(url, params, timeout, contesto):
     """GET verso API-Football con diagnostica sempre loggata (status, header di quota residua,
     corpo dell'errore troncato), usando solo i dati già presenti nella risposta ricevuta: nessuna
     chiamata aggiuntiva viene fatta per il debug. Ritorna (json_o_None, tipo_errore_o_None,
-    dettaglio_errore_o_None)."""
+    dettaglio_errore_o_None).
+
+    Rispetta il raffreddamento globale dopo un rate-limit (vedi PROSSIMA_CHIAMATA_API_CONSENTITA):
+    se ancora attivo, salta del tutto la chiamata di rete invece di rischiare di allungare il
+    rate-limit stesso - il limite è "al minuto", quindi ogni chiamata in più mentre è già superato
+    non fa che ritardare quando tornerà a funzionare."""
+    global PROSSIMA_CHIAMATA_API_CONSENTITA
     if not API_FOOTBALL_KEY:
         return None, "config", "API_FOOTBALL_KEY mancante"
+    now = time.time()
+    if now < PROSSIMA_CHIAMATA_API_CONSENTITA:
+        attesa = int(PROSSIMA_CHIAMATA_API_CONSENTITA - now)
+        log(f"[{contesto}] Rate-limit ancora in raffreddamento, chiamata saltata (riprova tra {attesa}s)")
+        return None, "rate_limit", "raffreddamento dopo un rate-limit recente, chiamata saltata"
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
     try:
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
@@ -1165,12 +1191,19 @@ def get_api_football(url, params, timeout, contesto):
     if response.status_code != 200:
         tipo, motivo = _classifica_errore_http(response.status_code)
         log(f"[{contesto}] {motivo} - corpo: {response.text[:500]}")
+        if tipo == "rate_limit":
+            PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + RATE_LIMIT_COOLDOWN_SECONDI
+            log(f"[{contesto}] Raffreddamento API-Football attivato per {RATE_LIMIT_COOLDOWN_SECONDI}s")
         return None, tipo, motivo
 
     data = response.json()
     errori = data.get("errors")
     if errori:
         log(f"[{contesto}] Errore applicativo API: {errori}")
+        if _e_errore_rate_limit(errori):
+            PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + RATE_LIMIT_COOLDOWN_SECONDI
+            log(f"[{contesto}] Raffreddamento API-Football attivato per {RATE_LIMIT_COOLDOWN_SECONDI}s")
+            return None, "rate_limit", str(errori)
         return None, "api_errors", str(errori)
 
     return data, None, None
@@ -1472,16 +1505,26 @@ def aggiorna_quote_prepartita_imminenti():
     vicina al kickoff): quando manca meno di ODDS_REFRESH_MINUTI_PRIMA_KICKOFF minuti, rifà la
     quota una seconda volta (più vicina al closing) e la marca definitiva - se anche qui non
     c'è nulla, smette di ritentare e lo mostra esplicitamente come "non pubblicate" invece di
-    lasciare un campo vuoto senza spiegazione."""
+    lasciare un campo vuoto senza spiegazione.
+
+    time.sleep(1) tra una chiamata e l'altra quando più partite entrano nella finestra nello
+    stesso ciclo (stesso motivo/ritmo di _recupero_quote_iniziali_worker, che questa funzione
+    non aveva mai avuto: prima le chiamate partivano una via l'altra senza pausa, e con più
+    partite vicine al kickoff nello stesso ciclo bastava a far scattare il rate-limit "al
+    minuto" - visto nei log con tre chiamate nello stesso secondo, due respinte subito)."""
     now_ts = time.time()
     finestra_sec = ODDS_REFRESH_MINUTI_PRIMA_KICKOFF * 60
     modificato = False
+    prima_chiamata = True
     for partita in PIANO_GIORNATA.get("partite", []):
         kickoff_ts = partita.get("kickoff_ts")
         if not kickoff_ts or partita.get("quote_refresh_fatto"):
             continue
         if not (0 <= kickoff_ts - now_ts <= finestra_sec):
             continue
+        if not prima_chiamata:
+            time.sleep(1)
+        prima_chiamata = False
         quote = recupera_quote_1x2(partita["fixture_id"])
         partita["quote_1x2"] = quote if quote else False
         partita["quote_refresh_fatto"] = True
