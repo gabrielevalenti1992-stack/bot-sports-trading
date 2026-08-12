@@ -4444,6 +4444,15 @@ def processa_partita(fixture, notifiche_attive=True):
             log(f"  -> Tempi regolamentari finiti ({status_short}, {minuto}'): supplementari/rigori in corso, notifiche sospese")
             return
 
+        # Pausa tra le due chiamate di questa stessa partita (eventi appena fatta, statistiche
+        # tra un attimo): senza, con molte partite live nello stesso ciclo (es. più gironi di
+        # qualificazione in contemporanea) il ritmo reale era di 2 chiamate quasi consecutive per
+        # partita e solo 1s di pausa PRIMA della partita successiva - con una decina di partite
+        # live si arriva facilmente a 100+ richieste/minuto, il limite per-minuto dell'abbonamento
+        # API-Football (visto coi rate-limit sporadici anche a traffico medio basso). Ora ogni
+        # partita costa 2 chiamate ben distanziate invece di una raffica.
+        time.sleep(1)
+
         # Tre esiti diversi, che prima finivano tutti e tre in due soli rami:
         #  - stats is None            -> la CHIAMATA è fallita (rate-limit, timeout, rete)
         #  - risposta senza dati veri -> l'API ha risposto, ma per questa partita non pubblica stats
