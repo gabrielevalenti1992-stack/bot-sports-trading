@@ -4427,6 +4427,23 @@ def processa_partita(fixture, notifiche_attive=True):
 
         log(f"  ✅ {home} vs {away} - {minuto}' ({league_name})")
 
+        # Se il minuto segnalato ora dall'API è drasticamente PIÙ BASSO dell'ultimo minuto visto per
+        # questo stesso fixture_id (es. 124' -> 0', visto in produzione su una partita verosimilmente
+        # già conclusa ai supplementari/rigori), è un segnale che l'API ha corretto/resettato i dati
+        # di questa partita, non un normale ritardo del ciclo (quello sposta il minuto di poco, non di
+        # decine di minuti all'indietro). Continuare ad accumulare sullo stato vecchio (history,
+        # snapshot, cartellini già notificati...) produrrebbe confronti e notifiche senza senso - es.
+        # un "recupero concluso" fasullo o un grafico che mischia dati di due fasi diverse della
+        # partita. Si azzera lo stato per questo fixture_id e si riparte puliti, come se fosse la
+        # prima volta che lo si vede (stessa logica poco più sotto per un fixture_id mai visto).
+        stato_esistente = stato_partite.get(fixture_id)
+        if stato_esistente is not None:
+            minuto_precedente = stato_esistente.get("last_minute")
+            if minuto_precedente is not None and minuto < minuto_precedente - 20:
+                log(f"    ⚠️ Minuto retrocesso da {minuto_precedente}' a {minuto}' per {home}-{away}: "
+                    f"reset dello stato accumulato (probabile correzione dati dell'API)")
+                stato_partite[fixture_id] = {}
+
         stato_precedente = stato_partite.get(fixture_id, {})
         prev_score_home = stato_precedente.get("score_home", score_home)
         prev_score_away = stato_precedente.get("score_away", score_away)
