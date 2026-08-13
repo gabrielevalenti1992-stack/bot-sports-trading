@@ -303,6 +303,16 @@ LEGHE_CON_STATISTICHE = [
     # ulteriore match esatto, nel dubbio che qualche endpoint le usi ancora così.
     "UEFA Champions League", "UEFA Europa League", "UEFA Europa Conference League",
     "Champions League", "Europa League", "Conference League", "UEFA Super Cup",
+    # Rete di sicurezza per i turni di qualificazione: da conferma empirica (una notifica reale
+    # su una partita del 3° turno di qualificazione) l'API-Football usa lo STESSO nome della fase
+    # a gironi/knockout anche per le qualificazioni (es. "UEFA Europa Conference League" anche per
+    # Drita-Tre Fiori, 3° turno). Queste varianti "Qualifying"/"Qualification" restano qui per
+    # coprire l'eventualità che l'API le usi in qualche caso - se non vengono mai restituite non
+    # cambia nulla, è un'aggiunta innocua.
+    "UEFA Champions League Qualifying", "UEFA Europa League Qualifying",
+    "UEFA Europa Conference League Qualifying",
+    "UEFA Champions League Qualification", "UEFA Europa League Qualification",
+    "UEFA Europa Conference League Qualification",
     "World Cup", "Euro Championship", "Copa America", "Copa Libertadores",
     # Supercoppe di lega nazionali (l'equivalente locale della Community Shield inglese)
     "Community Shield", "Supercoppa Italiana", "Supercopa de Espana", "DFL-Supercup",
@@ -336,6 +346,10 @@ COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
     "uefa champions league", "uefa europa league", "uefa europa conference league",
     "champions league", "europa league", "conference league", "uefa super cup",
     "world cup", "euro championship", "copa america", "copa libertadores",
+    "uefa champions league qualifying", "uefa europa league qualifying",
+    "uefa europa conference league qualifying",
+    "uefa champions league qualification", "uefa europa league qualification",
+    "uefa europa conference league qualification",
 }
 
 try:
