@@ -558,6 +558,28 @@ def save_favorites(favs):
 FAVORITE_MATCHES = load_favorites()
 
 # =============================================================================
+# OFFSET GETUPDATES TELEGRAM: deve sopravvivere ai riavvii, altrimenti dopo ogni
+# restart (redeploy, crash, riavvio Render) poll_callbacks() ripartiva da offset=0
+# e Telegram (che tiene in coda gli update non confermati fino a 24h) rimandava
+# indietro vecchi callback_query/comandi gia' gestiti in una vita precedente del
+# processo - rieseguendo bottoni (es. "Momentum") o comandi MAI ricliccati/inviati
+# in quel momento, a insaputa dell'utente.
+# =============================================================================
+TELEGRAM_OFFSET_FILE = data_path("telegram_offset.json")
+
+def carica_telegram_offset():
+    if os.path.exists(TELEGRAM_OFFSET_FILE):
+        try:
+            with open(TELEGRAM_OFFSET_FILE, 'r') as f:
+                return json.load(f).get("offset", 0)
+        except Exception as e:
+            print(f"Errore lettura {TELEGRAM_OFFSET_FILE}: {e}", flush=True)
+    return 0
+
+def salva_telegram_offset(offset):
+    salva_json_atomico(TELEGRAM_OFFSET_FILE, {"offset": offset})
+
+# =============================================================================
 # STORICO MINUTAGGI (analisi pre-partita /analisi)
 # =============================================================================
 STORICO_MINUTAGGI_FILE = data_path("storico_minutaggi.json")
@@ -702,7 +724,7 @@ def esegui_comando_sicuro(chat_id, funzione, *args):
 # THREAD: ASCOLTA CLICK SUI BOTTONI + COMANDI MANUALI
 # =============================================================================
 def poll_callbacks():
-    offset = 0
+    offset = carica_telegram_offset()
     while True:
         if not TELEGRAM_BOT_TOKEN:
             time.sleep(10)
@@ -713,6 +735,11 @@ def poll_callbacks():
             updates = r.json().get("result", [])
             for upd in updates:
                 offset = upd["update_id"] + 1
+                # Salvato SUBITO, prima di eseguire l'azione: se il processo viene ucciso a
+                # metà (redeploy, OOM) l'update risulta gia' "consumato" e non verra' rimandato
+                # indietro da Telegram al prossimo avvio - meglio perdere un'azione rara che
+                # rieseguirla a sorpresa.
+                salva_telegram_offset(offset)
 
                 cq = upd.get("callback_query")
                 if cq:
