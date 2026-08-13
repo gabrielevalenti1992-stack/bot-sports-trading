@@ -1677,15 +1677,21 @@ def recupera_andata_precedente(fixture_id, team_home_id, team_away_id, league_id
     con un riferimento diretto, quindi va cercata tra i precedenti recenti delle stesse due
     squadre. Filtra per stessa competizione (league_id) e giocata negli ultimi 20 giorni prima del
     ritorno, per non prendere per sbaglio un vecchio precedente in un'altra stagione/torneo.
-    Va chiamata UNA sola volta per fixture_id (il chiamante mette in cache il risultato)."""
+    Va chiamata UNA sola volta per fixture_id, MA SOLO SE LA CHIAMATA RIESCE (il chiamante mette
+    in cache il risultato): ritorna (chiamata_riuscita, andata_info) - chiamata_riuscita è False
+    se la chiamata API è fallita (rate-limit/timeout/rete), cosa ben diversa da "chiamata riuscita
+    ma nessuna andata trovata". Confondere le due cose (com'era prima) faceva sì che una singola
+    chiamata sfortunata - probabile proprio nel momento in cui iniziano insieme tante partite di
+    ritorno - disattivasse per sempre la ricerca per quella partita, facendola risultare come se
+    non avesse un'andata invece di riprovare al ciclo successivo."""
     if not API_FOOTBALL_KEY:
-        return None
+        return False, None
     url = "https://v3.football.api-sports.io/fixtures/headtohead"
     data, _, _ = get_api_football(
         url, {"h2h": f"{team_home_id}-{team_away_id}", "last": 5}, timeout=10,
         contesto=f"recupera_andata_precedente({fixture_id})")
     if data is None:
-        return None
+        return False, None
     for f in data.get("response", []):
         if f.get("fixture", {}).get("id") == fixture_id:
             continue
@@ -1697,13 +1703,13 @@ def recupera_andata_precedente(fixture_id, team_home_id, team_away_id, league_id
         ts_partita = (f.get("fixture", {}) or {}).get("timestamp")
         if not ts_partita or not (0 < ts_ritorno - ts_partita <= 20 * 24 * 3600):
             continue
-        return {
+        return True, {
             "home": f["teams"]["home"]["name"],
             "away": f["teams"]["away"]["name"],
             "score_home": f["goals"]["home"],
             "score_away": f["goals"]["away"],
         }
-    return None
+    return True, None
 
 
 # Statistiche ed eventi non supportano un fetch "bulk" su più partite (a differenza di /fixtures,
@@ -4555,8 +4561,10 @@ def processa_partita(fixture, notifiche_attive=True):
         # fixture_id e salvata in cache, non ripetuta ad ogni ciclo - vedi
         # recupera_andata_precedente(). Serve ad avere subito il quadro aggregato (chi era in casa
         # all'andata, che risultato c'è stato) senza doverlo cercare altrove.
+        # "andata_controllata" scatta a True SOLO se la chiamata è andata a buon fine (trovata o
+        # no): se fallisce (rate-limit/timeout/rete) resta False apposta, per riprovare al ciclo
+        # successivo invece di rinunciare per sempre alla prima chiamata sfortunata.
         if not stato_partite[fixture_id].get("andata_controllata"):
-            andata_info = None
             league_id = league.get("id")
             round_corrente = league.get("round", "")
             if league_id and league_name.lower() in COMPETIZIONI_UEFA_ANDATA_RITORNO \
@@ -4565,10 +4573,19 @@ def processa_partita(fixture, notifiche_attive=True):
                 away_id = fixture["teams"]["away"].get("id")
                 if home_id and away_id:
                     ts_ritorno = fixture["fixture"].get("timestamp") or time.time()
-                    andata_info = recupera_andata_precedente(fixture_id, home_id, away_id, league_id, ts_ritorno)
+                    chiamata_riuscita, andata_info = recupera_andata_precedente(
+                        fixture_id, home_id, away_id, league_id, ts_ritorno)
                     time.sleep(1)
-            stato_partite[fixture_id]["andata_controllata"] = True
-            stato_partite[fixture_id]["andata_info"] = andata_info
+                    stato_partite[fixture_id]["andata_controllata"] = chiamata_riuscita
+                    stato_partite[fixture_id]["andata_info"] = andata_info
+                else:
+                    # Niente id squadra, non c'è nulla da riprovare: non ha senso ritentare.
+                    stato_partite[fixture_id]["andata_controllata"] = True
+                    stato_partite[fixture_id]["andata_info"] = None
+            else:
+                # Non è un turno andata-ritorno UEFA: non ha senso ritentare ad ogni ciclo.
+                stato_partite[fixture_id]["andata_controllata"] = True
+                stato_partite[fixture_id]["andata_info"] = None
 
         events = fetch_fixture_events(fixture_id)
         goals = extract_goals(events)
