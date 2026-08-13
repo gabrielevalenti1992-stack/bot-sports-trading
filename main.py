@@ -1130,7 +1130,16 @@ def campionato_valido(league_name, league_type, league_country=""):
             return False
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
         return False
-    if lega_esclusa_per_mancanza_statistiche(league_country, league_name):
+    # Le competizioni internazionali a match esatto (Champions/Europa/Conference League, Mondiali,
+    # ecc.) NON sono soggette a questa esclusione globale per lega: sono un pugno di voci scelte a
+    # mano che vogliamo sempre tracciare, e nei turni di qualificazione mescolano federazioni con
+    # copertura statistiche molto diversa partita per partita (es. Conference League 3° turno:
+    # Kosovo-San Marino con dati parziali, altre partite dello stesso turno magari complete) - non
+    # è un problema "a livello di intera competizione". Se una singola partita poco coperta facesse
+    # scattare l'esclusione, TUTTA la competizione sparirebbe per 24h (anche le partite ben coperte
+    # di squadre più note), senza nessuna indicazione visibile del motivo - nemmeno /diagnostica lo
+    # segnala, perché filtra anch'essa tramite campionato_valido().
+    if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
         # Solo whitelist statica curata: fino a poco fa si passava anche qualunque campionato
