@@ -216,7 +216,28 @@ ULTIMA_DIAGNOSTICA_AUTOMATICA = 0
 # statistiche generava lo stesso avviso, legenda inclusa, per tutti i 90 minuti). Si notifica al
 # primo rilevamento; se l'anomalia rientra, la voce viene tolta e un'eventuale ricomparsa torna a
 # essere notificabile. Ripulita a fine partita da pulisci_partite_terminate().
-ANOMALIE_DIAGNOSTICA_NOTIFICATE = {}
+# Persistita su disco (stesso motivo del resto dello stato partite): tenerla solo in memoria
+# significava che ad ogni riavvio del bot (redeploy, crash) la deduplica si azzerava, e la STESSA
+# anomalia - condizione mai cambiata sulla partita - veniva rimandata in chat come se fosse nuova.
+ANOMALIE_DIAGNOSTICA_FILE = data_path("anomalie_diagnostica_notificate.json")
+
+
+def carica_anomalie_diagnostica_notificate():
+    if os.path.exists(ANOMALIE_DIAGNOSTICA_FILE):
+        try:
+            with open(ANOMALIE_DIAGNOSTICA_FILE, 'r') as f:
+                dati = json.load(f)
+            return {int(fid): set(categorie) for fid, categorie in dati.items()}
+        except Exception as e:
+            print(f"Errore lettura {ANOMALIE_DIAGNOSTICA_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_anomalie_diagnostica_notificate(dati):
+    salva_json_atomico(ANOMALIE_DIAGNOSTICA_FILE, {str(fid): sorted(categorie) for fid, categorie in dati.items()})
+
+
+ANOMALIE_DIAGNOSTICA_NOTIFICATE = carica_anomalie_diagnostica_notificate()
 
 # Storico minutaggi (analisi pre-partita /analisi): ogni quanto (secondi) ricontrollare le leghe
 # whitelist per nuove partite terminate da processare, e quante partite nuove processare al
@@ -3732,6 +3753,7 @@ def _anomalie_nuove(fixture_id, trovate, registra=True):
             ANOMALIE_DIAGNOSTICA_NOTIFICATE[fixture_id] = set(trovate.keys())
         else:
             ANOMALIE_DIAGNOSTICA_NOTIFICATE.pop(fixture_id, None)
+        salva_anomalie_diagnostica_notificate(ANOMALIE_DIAGNOSTICA_NOTIFICATE)
     return nuove
 
 
@@ -4977,8 +4999,11 @@ def pulisci_partite_terminate(fixture_ids_live):
     # Stesso motivo per lo storico delle anomalie già notificate: senza pulizia crescerebbe per
     # tutta la vita del processo e, se lo stesso fixture_id tornasse live (partita sospesa e
     # ripresa), si porterebbe dietro anomalie vecchie facendole considerare "già viste".
-    for fid in [f for f in ANOMALIE_DIAGNOSTICA_NOTIFICATE if f not in fixture_ids_live]:
-        del ANOMALIE_DIAGNOSTICA_NOTIFICATE[fid]
+    fid_da_rimuovere = [f for f in ANOMALIE_DIAGNOSTICA_NOTIFICATE if f not in fixture_ids_live]
+    if fid_da_rimuovere:
+        for fid in fid_da_rimuovere:
+            del ANOMALIE_DIAGNOSTICA_NOTIFICATE[fid]
+        salva_anomalie_diagnostica_notificate(ANOMALIE_DIAGNOSTICA_NOTIFICATE)
 
 
 # =============================================================================
