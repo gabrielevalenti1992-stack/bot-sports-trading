@@ -373,6 +373,26 @@ COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
     "uefa europa conference league qualification",
 }
 
+# Sottoinsieme delle competizioni UEFA sopra per cui ha senso cercare l'andata (fase di
+# qualificazione/playoff andata-ritorno delle 3 coppe per club): esclude Mondiali/Europei/Copa
+# America/Libertadores/Supercoppe, che non sono andata-ritorno tra le stesse due squadre.
+COMPETIZIONI_UEFA_ANDATA_RITORNO = {
+    "uefa champions league", "champions league",
+    "uefa champions league qualifying", "uefa champions league qualification",
+    "uefa europa league", "europa league",
+    "uefa europa league qualifying", "uefa europa league qualification",
+    "uefa europa conference league", "conference league",
+    "uefa europa conference league qualifying", "uefa europa conference league qualification",
+}
+
+# Controllo largo (non un match esatto) sul campo "round" restituito dall'API per capire se il
+# turno è di quelli giocati andata/ritorno: meglio provare la ricerca dell'andata anche quando la
+# dicitura esatta del round non è quella prevista (rischio: una chiamata H2H in più, a vuoto) che
+# non provarla mai per una dicitura leggermente diversa da quella immaginata.
+def _e_round_andata_ritorno(round_str):
+    r = (round_str or "").lower()
+    return any(parola in r for parola in ("leg", "qualif", "play-off", "playoff"))
+
 try:
     config_path = os.path.join(os.path.dirname(__file__), 'config.json')
     with open(config_path, 'r') as f:
@@ -1649,6 +1669,41 @@ def testo_quote_1x2(quote):
         return ""
     return (f"\nQuote 1X2 iniziali ({quote['bookmaker']}): "
             f"1 {quote['casa']:.2f} - X {quote['pareggio']:.2f} - 2 {quote['ospite']:.2f}\n")
+
+
+def recupera_andata_precedente(fixture_id, team_home_id, team_away_id, league_id, ts_ritorno):
+    """Cerca la partita di ANDATA di un turno di qualificazione UEFA andata-ritorno, tramite
+    l'endpoint head-to-head: l'API non lega esplicitamente i due fixture_id di andata e ritorno
+    con un riferimento diretto, quindi va cercata tra i precedenti recenti delle stesse due
+    squadre. Filtra per stessa competizione (league_id) e giocata negli ultimi 20 giorni prima del
+    ritorno, per non prendere per sbaglio un vecchio precedente in un'altra stagione/torneo.
+    Va chiamata UNA sola volta per fixture_id (il chiamante mette in cache il risultato)."""
+    if not API_FOOTBALL_KEY:
+        return None
+    url = "https://v3.football.api-sports.io/fixtures/headtohead"
+    data, _, _ = get_api_football(
+        url, {"h2h": f"{team_home_id}-{team_away_id}", "last": 5}, timeout=10,
+        contesto=f"recupera_andata_precedente({fixture_id})")
+    if data is None:
+        return None
+    for f in data.get("response", []):
+        if f.get("fixture", {}).get("id") == fixture_id:
+            continue
+        if (f.get("league", {}) or {}).get("id") != league_id:
+            continue
+        status_short = ((f.get("fixture", {}) or {}).get("status", {}) or {}).get("short")
+        if status_short not in ("FT", "AET", "PEN"):
+            continue
+        ts_partita = (f.get("fixture", {}) or {}).get("timestamp")
+        if not ts_partita or not (0 < ts_ritorno - ts_partita <= 20 * 24 * 3600):
+            continue
+        return {
+            "home": f["teams"]["home"]["name"],
+            "away": f["teams"]["away"]["name"],
+            "score_home": f["goals"]["home"],
+            "score_away": f["goals"]["away"],
+        }
+    return None
 
 
 # Statistiche ed eventi non supportano un fetch "bulk" su più partite (a differenza di /fixtures,
@@ -4496,6 +4551,25 @@ def processa_partita(fixture, notifiche_attive=True):
             "league_country": league_country,
         })
 
+        # Andata (solo qualificazioni/playoff UEFA andata-ritorno): cercata UNA sola volta per
+        # fixture_id e salvata in cache, non ripetuta ad ogni ciclo - vedi
+        # recupera_andata_precedente(). Serve ad avere subito il quadro aggregato (chi era in casa
+        # all'andata, che risultato c'è stato) senza doverlo cercare altrove.
+        if not stato_partite[fixture_id].get("andata_controllata"):
+            andata_info = None
+            league_id = league.get("id")
+            round_corrente = league.get("round", "")
+            if league_id and league_name.lower() in COMPETIZIONI_UEFA_ANDATA_RITORNO \
+                    and _e_round_andata_ritorno(round_corrente):
+                home_id = fixture["teams"]["home"].get("id")
+                away_id = fixture["teams"]["away"].get("id")
+                if home_id and away_id:
+                    ts_ritorno = fixture["fixture"].get("timestamp") or time.time()
+                    andata_info = recupera_andata_precedente(fixture_id, home_id, away_id, league_id, ts_ritorno)
+                    time.sleep(1)
+            stato_partite[fixture_id]["andata_controllata"] = True
+            stato_partite[fixture_id]["andata_info"] = andata_info
+
         events = fetch_fixture_events(fixture_id)
         goals = extract_goals(events)
         goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
@@ -4941,10 +5015,22 @@ def processa_partita(fixture, notifiche_attive=True):
         # sopra il momentum per i preferiti) - non serve ripeterlo anche in testo.
         quote_iniziali = quote_1x2_per_fixture(fixture_id)
         quote_text = testo_quote_1x2(quote_iniziali)
+
+        # Andata (se trovata, vedi il blocco di ricerca più sopra): mostrata subito in cima, prima
+        # ancora del risultato del ritorno, per avere subito il quadro aggregato della qualificazione.
+        andata_info = stato_partite.get(fixture_id, {}).get("andata_info")
+        andata_text = ""
+        if andata_info:
+            andata_text = (
+                f"🔄 Andata: {andata_info['home']} {andata_info['score_home']} - "
+                f"{andata_info['score_away']} {andata_info['away']}\n\n"
+            )
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
+            f"{andata_text}"
             f"Risultato: {score_home} - {score_away}\n"
             f"{quote_text}"
             f"{goals_text}"
