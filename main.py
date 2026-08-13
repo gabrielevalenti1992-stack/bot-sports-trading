@@ -5035,16 +5035,22 @@ def processa_partita(fixture, notifiche_attive=True):
 
         # Andata (se trovata, vedi il blocco di ricerca più sopra): mostrata subito in cima, prima
         # ancora del risultato del ritorno, per avere subito il quadro aggregato della qualificazione.
+        # Se è stata trovata un'andata, PER DEFINIZIONE la partita di QUESTA notifica è il ritorno
+        # (altrimenti la ricerca non l'avrebbe trovata) - va marcato esplicitamente nel titolo,
+        # altrimenti la riga "Andata: ..." da sola può far pensare che sia l'andata quella
+        # descritta nel resto del messaggio, invece del ritorno in corso.
         andata_info = stato_partite.get(fixture_id, {}).get("andata_info")
         andata_text = ""
+        titolo_ritorno = ""
         if andata_info:
+            titolo_ritorno = " (RITORNO)"
             andata_text = (
                 f"🔄 Andata: {andata_info['home']} {andata_info['score_home']} - "
                 f"{andata_info['score_away']} {andata_info['away']}\n\n"
             )
 
         messaggio = (
-            f"{home} vs {away}\n"
+            f"{home} vs {away}{titolo_ritorno}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"Minuto: {minuto}' | Stato: {status_short}\n\n"
             f"{andata_text}"
