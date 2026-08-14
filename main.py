@@ -1,3 +1,4 @@
+import collections
 import json
 import re
 import time
@@ -1236,6 +1237,38 @@ RATE_LIMIT_COOLDOWN_SECONDI = 65
 PROSSIMA_CHIAMATA_API_CONSENTITA = 0
 
 # =============================================================================
+# LIMITATORE GLOBALE PROATTIVO (finestra scorrevole): il raffreddamento sopra è REATTIVO, scatta
+# SOLO dopo che un rate-limit è già stato rifiutato dall'API. Non basta più con tanti campionati
+# attivi insieme: il time.sleep(1) tra le due chiamate di ogni singola partita (vedi
+# processa_partita) è un ritmo LOCALE a quella funzione, ma non tiene conto di cosa fanno
+# CONTEMPORANEAMENTE gli altri thread del bot (ciclo principale, comandi Telegram manuali, refresh
+# quote in background) - ognuno rispetta il proprio ritmo locale, ma nessuno guardava il totale
+# reale di chiamate/minuto su TUTTO il bot insieme. Con una trentina di partite live in
+# contemporanea (sabato con più campionati minori tutti in corso) la somma tra i thread può
+# comunque superare le 100/minuto pur restando ognuno "educato" per conto proprio - infatti
+# succede anche con 0 partite live nel ciclo, segno che il picco arriva da altrove (refresh quote,
+# comandi manuali, cambio di finestra col piano giornata).
+# Questo limitatore mette in coda (aspetta, non salta) la chiamata se negli ultimi 60s il bot ne ha
+# già fatte LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA - un margine di sicurezza sotto le 100/minuto reali
+# dell'abbonamento, per lasciare spazio a chiamate concorrenti di altri thread nello stesso istante.
+LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA = 90
+_LOCK_RATE_LIMIT_GLOBALE = threading.Lock()
+_TIMESTAMP_CHIAMATE_RECENTI = collections.deque()
+
+
+def _attendi_slot_rate_limit_globale():
+    while True:
+        with _LOCK_RATE_LIMIT_GLOBALE:
+            ora = time.time()
+            while _TIMESTAMP_CHIAMATE_RECENTI and ora - _TIMESTAMP_CHIAMATE_RECENTI[0] >= 60:
+                _TIMESTAMP_CHIAMATE_RECENTI.popleft()
+            if len(_TIMESTAMP_CHIAMATE_RECENTI) < LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA:
+                _TIMESTAMP_CHIAMATE_RECENTI.append(ora)
+                return
+            attesa = 60 - (ora - _TIMESTAMP_CHIAMATE_RECENTI[0]) + 0.05
+        time.sleep(max(attesa, 0.05))
+
+# =============================================================================
 # CONTATORE CHIAMATE API-FOOTBALL: quante richieste il bot fa davvero, per farsi un'idea concreta
 # della quota usata al giorno e valutare se il piano attivo (limite giornaliero/al minuto) è
 # adeguato - vedi /apiusage. Persistito su disco (stesso pattern del resto dello stato) per poter
@@ -1317,7 +1350,12 @@ def get_api_football(url, params, timeout, contesto):
     Rispetta il raffreddamento globale dopo un rate-limit (vedi PROSSIMA_CHIAMATA_API_CONSENTITA):
     se ancora attivo, salta del tutto la chiamata di rete invece di rischiare di allungare il
     rate-limit stesso - il limite è "al minuto", quindi ogni chiamata in più mentre è già superato
-    non fa che ritardare quando tornerà a funzionare."""
+    non fa che ritardare quando tornerà a funzionare.
+
+    Rispetta ANCHE il limitatore proattivo (_attendi_slot_rate_limit_globale): a differenza del
+    raffreddamento sopra, questo non salta la chiamata ma la mette in coda - conta le chiamate di
+    TUTTI i thread del bot insieme, non solo quelle di chi chiama in questo momento, per evitare di
+    arrivare al rate-limit prima ancora che scatti la protezione reattiva."""
     global PROSSIMA_CHIAMATA_API_CONSENTITA
     if not API_FOOTBALL_KEY:
         return None, "config", "API_FOOTBALL_KEY mancante"
@@ -1326,6 +1364,7 @@ def get_api_football(url, params, timeout, contesto):
         attesa = int(PROSSIMA_CHIAMATA_API_CONSENTITA - now)
         log(f"[{contesto}] Rate-limit ancora in raffreddamento, chiamata saltata (riprova tra {attesa}s)")
         return None, "rate_limit", "raffreddamento dopo un rate-limit recente, chiamata saltata"
+    _attendi_slot_rate_limit_globale()
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
     # Contata qui, non dopo: la chiamata sta per partire davvero (passato il controllo del
     # raffreddamento sopra), quindi consuma quota a prescindere dall'esito - successo, errore
