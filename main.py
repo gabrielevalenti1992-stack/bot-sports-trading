@@ -5418,7 +5418,17 @@ if __name__ == "__main__":
                     preferito_live = True
                 intervallo_minimo = INTERVALLO_CICLO_MOMENTUM if e_preferita else INTERVALLO_CICLO_ATTIVO
                 ultimo_controllo = stato_partite.get(fid, {}).get("ultimo_controllo", 0) if fid is not None else 0
-                if time.time() - ultimo_controllo < intervallo_minimo:
+                # "ultimo_controllo" è persistito su disco: sopravvive ai riavvii. Se un redeploy è
+                # più veloce di intervallo_minimo (180s), al primo ciclo dopo il riavvio quel
+                # timestamp risulta ancora "recente" per l'orologio reale, e la partita verrebbe
+                # SALTATA proprio nel giro in cui più serve un controllo fresco - lasciando
+                # last_minute fermo al valore pre-riavvio mentre l'API è già andata avanti (visto in
+                # produzione: la diagnostica lo segnalava come falsa anomalia "TRACCIAMENTO", perché
+                # confronta lo stesso minuto fresco dell'API con uno stato_partite non ancora
+                # aggiornato). Il primo ciclo dopo l'avvio del processo ignora sempre questa soglia,
+                # per ricontrollare subito ogni partita live indipendentemente da quanto tempo reale
+                # sia passato dal riavvio.
+                if ciclo_numero > 1 and time.time() - ultimo_controllo < intervallo_minimo:
                     continue
                 processa_partita(fixture, notifiche_attive)
                 if fid is not None:
