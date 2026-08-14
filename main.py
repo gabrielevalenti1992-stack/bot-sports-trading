@@ -4625,7 +4625,8 @@ def processa_partita(fixture, notifiche_attive=True):
         away = fixture["teams"]["away"]["name"]
         score_home = fixture["goals"]["home"] or 0
         score_away = fixture["goals"]["away"] or 0
-        minuto = fixture["fixture"]["status"].get("elapsed") or 0
+        elapsed_raw = fixture["fixture"]["status"].get("elapsed")
+        minuto = elapsed_raw or 0
         status_short = fixture["fixture"]["status"].get("short", "LIVE")
         extra_corrente = fixture["fixture"]["status"].get("extra")
 
@@ -4640,11 +4641,19 @@ def processa_partita(fixture, notifiche_attive=True):
         # un "recupero concluso" fasullo o un grafico che mischia dati di due fasi diverse della
         # partita. Si azzera lo stato per questo fixture_id e si riparte puliti, come se fosse la
         # prima volta che lo si vede (stessa logica poco più sotto per un fixture_id mai visto).
+        #
+        # IMPORTANTE: il confronto usa elapsed_raw (non "minuto", già convertito con "or 0"), perché
+        # l'API a volte non riporta affatto un "elapsed" numerico - es. status "HT", dove il tempo è
+        # fermo - e in quel caso "elapsed" è None, non un vero 0. Confondere i due casi (bug trovato
+        # in produzione dopo un Manual Deploy) faceva scattare il reset SEMPRE che una partita fosse
+        # ferma all'intervallo proprio nel momento di un riavvio del bot, cancellando storico e
+        # confronto 1°T/2°T di partite perfettamente in corso, non solo il caso reale originale
+        # (un vero "0" esplicito restituito dall'API su una partita già conclusa).
         stato_esistente = stato_partite.get(fixture_id)
         if stato_esistente is not None:
             minuto_precedente = stato_esistente.get("last_minute")
-            if minuto_precedente is not None and minuto < minuto_precedente - 20:
-                log(f"    ⚠️ Minuto retrocesso da {minuto_precedente}' a {minuto}' per {home}-{away}: "
+            if elapsed_raw is not None and minuto_precedente is not None and elapsed_raw < minuto_precedente - 20:
+                log(f"    ⚠️ Minuto retrocesso da {minuto_precedente}' a {elapsed_raw}' per {home}-{away}: "
                     f"reset dello stato accumulato (probabile correzione dati dell'API)")
                 stato_partite[fixture_id] = {}
 
