@@ -1043,6 +1043,9 @@ def poll_callbacks():
 
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
+
+                    elif cmd == "/apiusage":
+                        esegui_comando_sicuro(chat_id, cmd_apiusage)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -1232,6 +1235,50 @@ INTERVALLO_NOTIFICA_ERRORE_API = 1800  # 30 minuti: non ripetere la stessa notif
 RATE_LIMIT_COOLDOWN_SECONDI = 65
 PROSSIMA_CHIAMATA_API_CONSENTITA = 0
 
+# =============================================================================
+# CONTATORE CHIAMATE API-FOOTBALL: quante richieste il bot fa davvero, per farsi un'idea concreta
+# della quota usata al giorno e valutare se il piano attivo (limite giornaliero/al minuto) è
+# adeguato - vedi /apiusage. Persistito su disco (stesso pattern del resto dello stato) per poter
+# calcolare una media sugli ultimi giorni, non solo sulla giornata in corso che si azzera a
+# mezzanotte. Tenute solo le ultime CHIAMATE_API_GIORNI_STORICO giornate, altrimenti crescerebbe
+# per sempre.
+# =============================================================================
+CHIAMATE_API_FILE = data_path("chiamate_api_giornaliere.json")
+CHIAMATE_API_GIORNI_STORICO = 30
+# Quota residua vista nell'header dell'ultima risposta API (x-ratelimit-requests-*): un dato più
+# autorevole del nostro conteggio per "quanto mi resta OGGI", perché viene da API-Football stessa.
+ULTIMA_QUOTA_API = {"limite": None, "residuo": None, "aggiornata": 0}
+
+
+def carica_chiamate_api():
+    if os.path.exists(CHIAMATE_API_FILE):
+        try:
+            with open(CHIAMATE_API_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {CHIAMATE_API_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_chiamate_api(dati):
+    salva_json_atomico(CHIAMATE_API_FILE, dati)
+
+
+CHIAMATE_API_PER_GIORNO = carica_chiamate_api()
+
+
+def registra_chiamata_api():
+    """Incrementa il contatore per la data odierna (fuso Italia, coerente col resto del bot) e
+    tiene solo le ultime CHIAMATE_API_GIORNI_STORICO giornate. Va chiamata una volta per ogni
+    chiamata di rete davvero effettuata verso API-Football (non per quelle saltate dal
+    raffreddamento rate-limit, che non consumano quota)."""
+    oggi = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+    CHIAMATE_API_PER_GIORNO[oggi] = CHIAMATE_API_PER_GIORNO.get(oggi, 0) + 1
+    if len(CHIAMATE_API_PER_GIORNO) > CHIAMATE_API_GIORNI_STORICO:
+        for vecchia in sorted(CHIAMATE_API_PER_GIORNO)[:-CHIAMATE_API_GIORNI_STORICO]:
+            del CHIAMATE_API_PER_GIORNO[vecchia]
+    salva_chiamate_api(CHIAMATE_API_PER_GIORNO)
+
 
 def _e_errore_rate_limit(errori):
     """True se 'errori' (il campo "errors" della risposta API-Football, dict o lista a seconda
@@ -1241,12 +1288,16 @@ def _e_errore_rate_limit(errori):
 
 
 def _log_quota_headers(response):
-    """Logga la quota residua che l'API restituisce già negli header di ogni risposta,
-    senza bisogno di una chiamata dedicata per controllarla."""
+    """Logga la quota residua che l'API restituisce già negli header di ogni risposta, e la tiene
+    anche in ULTIMA_QUOTA_API (usata da /apiusage) - senza bisogno di una chiamata dedicata per
+    controllarla."""
     limite = response.headers.get("x-ratelimit-requests-limit")
     residuo = response.headers.get("x-ratelimit-requests-remaining")
     if limite or residuo:
         log(f"    [quota API-Football] {residuo}/{limite} richieste rimaste oggi")
+        ULTIMA_QUOTA_API["limite"] = limite
+        ULTIMA_QUOTA_API["residuo"] = residuo
+        ULTIMA_QUOTA_API["aggiornata"] = time.time()
 
 
 def _classifica_errore_http(status_code):
@@ -1276,6 +1327,11 @@ def get_api_football(url, params, timeout, contesto):
         log(f"[{contesto}] Rate-limit ancora in raffreddamento, chiamata saltata (riprova tra {attesa}s)")
         return None, "rate_limit", "raffreddamento dopo un rate-limit recente, chiamata saltata"
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
+    # Contata qui, non dopo: la chiamata sta per partire davvero (passato il controllo del
+    # raffreddamento sopra), quindi consuma quota a prescindere dall'esito - successo, errore
+    # applicativo o addirittura un'eccezione di rete (la richiesta può comunque essere arrivata al
+    # server anche se la risposta non torna indietro in tempo).
+    registra_chiamata_api()
     try:
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
     except Exception as e:
@@ -1966,6 +2022,7 @@ def cmd_help(chat_id):
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
+        "/apiusage - Quante chiamate API-Football il bot fa al giorno (storico e quota residua)\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -2521,6 +2578,53 @@ def cmd_diagnostica(chat_id):
             json={"chat_id": chat_id, "text": pezzo}, timeout=10)
         if risposta.status_code != 200:
             log(f"Errore invio diagnostica: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
+def cmd_apiusage(chat_id):
+    """Quante chiamate il bot fa davvero verso API-Football, per farsi un'idea concreta della
+    quota usata al giorno e valutare se il piano attivo è adeguato. Combina il conteggio del bot
+    (storico su più giorni, persistito - vedi registra_chiamata_api) con la quota residua vista
+    nell'header dell'ultima risposta API (dato più autorevole per "quanto resta OGGI", perché
+    viene direttamente da API-Football, non da un nostro conteggio parallelo)."""
+    if not CHIAMATE_API_PER_GIORNO:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessuna chiamata API ancora registrata."}, timeout=5)
+        return
+
+    tz_italia = ZoneInfo("Europe/Rome")
+    adesso = datetime.datetime.now(tz_italia)
+    oggi = adesso.strftime("%Y-%m-%d")
+    ieri = (adesso - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    righe = ["📊 Utilizzo API-Football\n", f"Oggi ({oggi}): {CHIAMATE_API_PER_GIORNO.get(oggi, 0)} chiamate"]
+    if ieri in CHIAMATE_API_PER_GIORNO:
+        righe.append(f"Ieri ({ieri}): {CHIAMATE_API_PER_GIORNO[ieri]} chiamate")
+
+    # Media calcolata SOLO sui giorni completi (esclude oggi, ancora in corso): includerlo
+    # abbasserebbe artificialmente la media nelle prime ore della giornata.
+    giorni_completi = sorted((d, n) for d, n in CHIAMATE_API_PER_GIORNO.items() if d != oggi)
+    if giorni_completi:
+        media_tutti = sum(n for _, n in giorni_completi) / len(giorni_completi)
+        righe.append(f"\nMedia sugli ultimi {len(giorni_completi)} giorni completi: {media_tutti:.0f} chiamate/giorno")
+
+        ultimi_7 = giorni_completi[-7:]
+        if len(ultimi_7) >= 2:
+            media_7 = sum(n for _, n in ultimi_7) / len(ultimi_7)
+            righe.append(f"Media ultimi {len(ultimi_7)} giorni: {media_7:.0f} chiamate/giorno")
+
+        giorno_picco, chiamate_picco = max(giorni_completi, key=lambda x: x[1])
+        righe.append(f"Giorno di picco: {giorno_picco} con {chiamate_picco} chiamate")
+
+    if ULTIMA_QUOTA_API["residuo"] is not None:
+        eta = int(time.time() - ULTIMA_QUOTA_API["aggiornata"])
+        righe.append(
+            f"\nQuota residua secondo API-Football ({eta}s fa): "
+            f"{ULTIMA_QUOTA_API['residuo']}/{ULTIMA_QUOTA_API['limite']} oggi")
+
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=5)
 
 
 def cmd_funzioni(chat_id):
@@ -5156,6 +5260,7 @@ def imposta_comandi_telegram():
         {"command": "shadowlogstrategie", "description": "Dati raccolti in background sull'efficacia delle strategie"},
         {"command": "diagnostica", "description": "Controllo dal vivo di ogni partita live"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
+        {"command": "apiusage", "description": "Chiamate API-Football fatte al giorno"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
