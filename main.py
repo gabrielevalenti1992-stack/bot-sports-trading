@@ -4796,12 +4796,23 @@ def processa_partita(fixture, notifiche_attive=True):
         # quali sono nuovi. Se stato_precedente è vuoto (prima volta che vediamo la partita) il
         # default fa combaciare le due liste, cosi' non si notifica un cartellino/rigore già
         # avvenuto prima che il bot iniziasse a monitorarla (stesso criterio usato per i gol).
+        #
+        # Il confronto usa una CHIAVE STABILE (minuto, squadra, dettaglio/esito) invece
+        # dell'uguaglianza sull'intero dizionario: il campo "player" può essere "Sconosciuto" nei
+        # primi cicli e risolto dall'API in un nome vero più tardi (visto in produzione), e prima
+        # confrontare i dizionari interi faceva risultare lo STESSO cartellino "diverso" da quello
+        # già notificato, rimandandolo una seconda volta solo perché nel frattempo era comparso il
+        # nome del giocatore - un duplicato, non una notizia nuova.
         cartellini_rossi = extract_cartellini_rossi(events)
         rigori = extract_rigori(events)
         prev_cartellini_rossi = stato_precedente.get("cartellini_rossi", cartellini_rossi)
         prev_rigori = stato_precedente.get("rigori", rigori)
-        nuovi_cartellini_rossi = [c for c in cartellini_rossi if c not in prev_cartellini_rossi]
-        nuovi_rigori = [r for r in rigori if r not in prev_rigori]
+        chiavi_prev_cartellini = {(c["minute"], c["team"], c.get("dettaglio")) for c in prev_cartellini_rossi}
+        chiavi_prev_rigori = {(r["minute"], r["team"], r.get("esito")) for r in prev_rigori}
+        nuovi_cartellini_rossi = [
+            c for c in cartellini_rossi if (c["minute"], c["team"], c.get("dettaglio")) not in chiavi_prev_cartellini]
+        nuovi_rigori = [
+            r for r in rigori if (r["minute"], r["team"], r.get("esito")) not in chiavi_prev_rigori]
         if nuovi_cartellini_rossi:
             log(f"    🟥 Nuovo cartellino rosso: {nuovi_cartellini_rossi}")
         if nuovi_rigori:
