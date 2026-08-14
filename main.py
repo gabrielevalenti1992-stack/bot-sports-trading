@@ -4681,12 +4681,40 @@ def processa_partita(fixture, notifiche_attive=True):
         # confronto 1°T/2°T di partite perfettamente in corso, non solo il caso reale originale
         # (un vero "0" esplicito restituito dall'API su una partita già conclusa).
         stato_esistente = stato_partite.get(fixture_id)
+        reset_appena_avvenuto = False
         if stato_esistente is not None:
             minuto_precedente = stato_esistente.get("last_minute")
             if elapsed_raw is not None and minuto_precedente is not None and elapsed_raw < minuto_precedente - 20:
                 log(f"    ⚠️ Minuto retrocesso da {minuto_precedente}' a {elapsed_raw}' per {home}-{away}: "
                     f"reset dello stato accumulato (probabile correzione dati dell'API)")
                 stato_partite[fixture_id] = {}
+                reset_appena_avvenuto = True
+                # Il backup (vedi sotto) deve sparire insieme allo stato: contiene lo storico della
+                # partita PRIMA della correzione dati, esattamente quello che il reset vuole
+                # abbandonare. Senza questo svuotamento, il ripristino da backup qui sotto
+                # rimetterebbe subito lo storico vecchio, vanificando il reset appena fatto (bug
+                # trovato con un controllo incrociato tra le due fix, mai capitato finora in
+                # produzione solo perché non si erano ancora sovrapposte).
+                if str(fixture_id) in BACKUP_HISTORY_MOMENTUM:
+                    del BACKUP_HISTORY_MOMENTUM[str(fixture_id)]
+                    salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
+
+        # Ripristino da backup: se lo storico momentum di questa partita risulta vuoto/più corto di
+        # quello salvato nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM sopra) - tipicamente
+        # dopo un riavvio che ha perso stato_partite ma non il backup - lo si ripristina da lì invece
+        # di ripartire da zero. MAI subito dopo un reset per regresso minuto appena avvenuto in
+        # questo stesso ciclo (vedi sopra): quel reset esiste apposta per abbandonare uno storico che
+        # non corrisponde più alla partita corretta, e il backup è stato svuotato insieme per lo
+        # stesso motivo. Non fa mai perdere punti: si applica solo quando il backup è STRETTAMENTE
+        # più lungo dello storico attuale.
+        if not reset_appena_avvenuto:
+            backup_fixture = BACKUP_HISTORY_MOMENTUM.get(str(fixture_id))
+            if backup_fixture:
+                history_attuale = stato_partite.get(fixture_id, {}).get("history", [])
+                if len(backup_fixture) > len(history_attuale):
+                    stato_partite.setdefault(fixture_id, {})["history"] = list(backup_fixture)
+                    log(f"    ♻️ Storico momentum ripristinato dal backup per {home}-{away}: "
+                        f"{len(backup_fixture)} punti recuperati")
 
         # Ripristino da backup: se lo storico momentum di questa partita risulta vuoto/più corto di
         # quello salvato nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM sopra) - tipicamente
