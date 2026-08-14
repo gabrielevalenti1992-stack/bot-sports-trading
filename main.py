@@ -568,6 +568,37 @@ stato_partite = carica_stato_partite()
 print(f"stato_partite recuperato da disco: {len(stato_partite)} partite (0 = primo avvio o disco non persistente)", flush=True)
 ciclo_numero = 0
 
+# =============================================================================
+# BACKUP DELLO STORICO MOMENTUM: copia indipendente di stato_partite[fixture_id]["history"], in un
+# file separato che NESSUN reset di stato_partite (es. il reset per regresso minuto, vedi
+# processa_partita) può cancellare. Nato da un caso reale: una partita preferita con un grafico
+# momentum già completo (dal calcio d'inizio) l'ha perso del tutto dopo un riavvio del bot,
+# ripartendo "dal 45'" - i punti storici raccolti fino a quel momento non erano recuperabili da
+# nessun'altra parte (l'API-Football espone solo i totali CORRENTI, non uno storico minuto per
+# minuto: una volta persa la lista di stato_partite non c'è modo di ricostruirla chiedendola di
+# nuovo all'API). Con questa copia indipendente, se stato_partite[fixture_id]["history"] risulta
+# vuota ma esiste un backup più lungo per lo stesso fixture_id, il grafico momentum può ripartire
+# da dove era rimasto invece che da zero.
+# =============================================================================
+BACKUP_HISTORY_MOMENTUM_FILE = data_path("backup_history_momentum.json")
+
+
+def carica_backup_history_momentum():
+    if os.path.exists(BACKUP_HISTORY_MOMENTUM_FILE):
+        try:
+            with open(BACKUP_HISTORY_MOMENTUM_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {BACKUP_HISTORY_MOMENTUM_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_backup_history_momentum(dati):
+    salva_json_atomico(BACKUP_HISTORY_MOMENTUM_FILE, dati)
+
+
+BACKUP_HISTORY_MOMENTUM = carica_backup_history_momentum()
+
 # Storico dei 15 minuti usato da /status, separato da stato_partite: quest'ultimo viene ripulito
 # ad ogni ciclo per le partite non più whitelist (pulisci_partite_terminate), quindi una partita
 # fuori whitelist (es. una coppa) controllata a mano con /status perderebbe subito lo storico se
@@ -4657,6 +4688,19 @@ def processa_partita(fixture, notifiche_attive=True):
                     f"reset dello stato accumulato (probabile correzione dati dell'API)")
                 stato_partite[fixture_id] = {}
 
+        # Ripristino da backup: se lo storico momentum di questa partita risulta vuoto/più corto di
+        # quello salvato nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM sopra) - tipicamente
+        # dopo un reset appena sopra, o dopo un riavvio che ha perso stato_partite ma non il backup -
+        # lo si ripristina da lì invece di ripartire da zero. Non fa mai perdere punti: si applica
+        # solo quando il backup è STRETTAMENTE più lungo dello storico attuale.
+        backup_fixture = BACKUP_HISTORY_MOMENTUM.get(str(fixture_id))
+        if backup_fixture:
+            history_attuale = stato_partite.get(fixture_id, {}).get("history", [])
+            if len(backup_fixture) > len(history_attuale):
+                stato_partite.setdefault(fixture_id, {})["history"] = list(backup_fixture)
+                log(f"    ♻️ Storico momentum ripristinato dal backup per {home}-{away}: "
+                    f"{len(backup_fixture)} punti recuperati")
+
         stato_precedente = stato_partite.get(fixture_id, {})
         prev_score_home = stato_precedente.get("score_home", score_home)
         prev_score_away = stato_precedente.get("score_away", score_away)
@@ -4821,6 +4865,10 @@ def processa_partita(fixture, notifiche_attive=True):
             stato_partite[fixture_id]["history"] = history
             stato_partite[fixture_id]["stats_ultimo_esito"] = "ok"
             stato_partite[fixture_id]["stats_vuote_consecutive"] = 0
+            # Copia nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM) ad ogni nuovo punto, cosi'
+            # un eventuale reset di stato_partite più avanti non fa perdere quanto già raccolto.
+            BACKUP_HISTORY_MOMENTUM[str(fixture_id)] = history
+            salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
             registra_esito_statistiche(league_country, league_name, True)
             if fine_1h_appena_avvenuta:
                 stato_partite[fixture_id]["stats_fine_1h"] = current_stats
@@ -5282,6 +5330,16 @@ def pulisci_partite_terminate(fixture_ids_live):
         for fid in fid_da_rimuovere:
             del ANOMALIE_DIAGNOSTICA_NOTIFICATE[fid]
         salva_anomalie_diagnostica_notificate(ANOMALIE_DIAGNOSTICA_NOTIFICATE)
+
+    # Stesso motivo per il backup dello storico momentum (vedi BACKUP_HISTORY_MOMENTUM): a fine
+    # partita non serve più, e senza pulizia crescerebbe per sempre. Chiavi stringa (JSON), da
+    # confrontare con fixture_ids_live (interi) convertendo questi ultimi.
+    fixture_ids_live_str = {str(f) for f in fixture_ids_live}
+    backup_da_rimuovere = [f for f in BACKUP_HISTORY_MOMENTUM if f not in fixture_ids_live_str]
+    if backup_da_rimuovere:
+        for f in backup_da_rimuovere:
+            del BACKUP_HISTORY_MOMENTUM[f]
+        salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
 
 
 # =============================================================================
