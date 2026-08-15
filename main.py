@@ -35,8 +35,12 @@ def data_path(nome_file):
 def salva_json_atomico(path, obj):
     """Scrive prima su un file temporaneo e poi rinomina, cosi' un crash a metà scrittura
     (es. il processo ucciso durante un redeploy) non lascia un JSON troncato/corrotto sul disco
-    persistente - os.replace() è atomico sullo stesso filesystem."""
-    tmp_path = f"{path}.tmp"
+    persistente - os.replace() è atomico sullo stesso filesystem. Il nome del file temporaneo
+    include pid+thread id: più thread (loop live, worker quote, comandi Telegram) possono
+    chiamare questa funzione sullo stesso path nello stesso momento, e con un nome fisso
+    un thread può rinominare via il tmp file di un altro thread ancora in scrittura,
+    causando un FileNotFoundError su os.replace()."""
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_path, 'w') as f:
         json.dump(obj, f)
     os.replace(tmp_path, path)
@@ -1282,7 +1286,12 @@ PROSSIMA_CHIAMATA_API_CONSENTITA = 0
 # Questo limitatore mette in coda (aspetta, non salta) la chiamata se negli ultimi 60s il bot ne ha
 # già fatte LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA - un margine di sicurezza sotto le 100/minuto reali
 # dell'abbonamento, per lasciare spazio a chiamate concorrenti di altri thread nello stesso istante.
-LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA = 90
+# Il margine è stato abbassato da 90 a 70 dopo aver verificato sui log Render che con 90 il bot
+# toccava comunque "Too many requests" dall'API: soprattutto durante i redeploy (Render tiene per
+# qualche secondo DUE istanze vive in parallelo durante il rolling restart, ognuna col proprio
+# limitatore indipendente in memoria - la somma delle due può superare il limite reale anche se
+# ciascuna resta sotto 90), ma anche a bot fermo su una sola istanza nelle ore di punta.
+LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA = 70
 _LOCK_RATE_LIMIT_GLOBALE = threading.Lock()
 _TIMESTAMP_CHIAMATE_RECENTI = collections.deque()
 
@@ -1329,19 +1338,23 @@ def salva_chiamate_api(dati):
 
 
 CHIAMATE_API_PER_GIORNO = carica_chiamate_api()
+_LOCK_CHIAMATE_API = threading.Lock()
 
 
 def registra_chiamata_api():
     """Incrementa il contatore per la data odierna (fuso Italia, coerente col resto del bot) e
     tiene solo le ultime CHIAMATE_API_GIORNI_STORICO giornate. Va chiamata una volta per ogni
     chiamata di rete davvero effettuata verso API-Football (non per quelle saltate dal
-    raffreddamento rate-limit, che non consumano quota)."""
-    oggi = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
-    CHIAMATE_API_PER_GIORNO[oggi] = CHIAMATE_API_PER_GIORNO.get(oggi, 0) + 1
-    if len(CHIAMATE_API_PER_GIORNO) > CHIAMATE_API_GIORNI_STORICO:
-        for vecchia in sorted(CHIAMATE_API_PER_GIORNO)[:-CHIAMATE_API_GIORNI_STORICO]:
-            del CHIAMATE_API_PER_GIORNO[vecchia]
-    salva_chiamate_api(CHIAMATE_API_PER_GIORNO)
+    raffreddamento rate-limit, che non consumano quota). Il lock serve perché più thread (loop
+    live, worker quote iniziali, comandi Telegram) chiamano questa funzione in parallelo:
+    senza lock l'incremento letto-modificato-scritto sul dict condiviso può perdere aggiornamenti."""
+    with _LOCK_CHIAMATE_API:
+        oggi = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+        CHIAMATE_API_PER_GIORNO[oggi] = CHIAMATE_API_PER_GIORNO.get(oggi, 0) + 1
+        if len(CHIAMATE_API_PER_GIORNO) > CHIAMATE_API_GIORNI_STORICO:
+            for vecchia in sorted(CHIAMATE_API_PER_GIORNO)[:-CHIAMATE_API_GIORNI_STORICO]:
+                del CHIAMATE_API_PER_GIORNO[vecchia]
+        salva_chiamate_api(CHIAMATE_API_PER_GIORNO)
 
 
 def _e_errore_rate_limit(errori):
