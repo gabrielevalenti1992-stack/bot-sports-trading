@@ -4777,19 +4777,6 @@ def processa_partita(fixture, notifiche_attive=True):
                     log(f"    ♻️ Storico momentum ripristinato dal backup per {home}-{away}: "
                         f"{len(backup_fixture)} punti recuperati")
 
-        # Ripristino da backup: se lo storico momentum di questa partita risulta vuoto/più corto di
-        # quello salvato nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM sopra) - tipicamente
-        # dopo un reset appena sopra, o dopo un riavvio che ha perso stato_partite ma non il backup -
-        # lo si ripristina da lì invece di ripartire da zero. Non fa mai perdere punti: si applica
-        # solo quando il backup è STRETTAMENTE più lungo dello storico attuale.
-        backup_fixture = BACKUP_HISTORY_MOMENTUM.get(str(fixture_id))
-        if backup_fixture:
-            history_attuale = stato_partite.get(fixture_id, {}).get("history", [])
-            if len(backup_fixture) > len(history_attuale):
-                stato_partite.setdefault(fixture_id, {})["history"] = list(backup_fixture)
-                log(f"    ♻️ Storico momentum ripristinato dal backup per {home}-{away}: "
-                    f"{len(backup_fixture)} punti recuperati")
-
         stato_precedente = stato_partite.get(fixture_id, {})
         prev_score_home = stato_precedente.get("score_home", score_home)
         prev_score_away = stato_precedente.get("score_away", score_away)
