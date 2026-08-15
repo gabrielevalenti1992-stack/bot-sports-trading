@@ -35,8 +35,12 @@ def data_path(nome_file):
 def salva_json_atomico(path, obj):
     """Scrive prima su un file temporaneo e poi rinomina, cosi' un crash a metà scrittura
     (es. il processo ucciso durante un redeploy) non lascia un JSON troncato/corrotto sul disco
-    persistente - os.replace() è atomico sullo stesso filesystem."""
-    tmp_path = f"{path}.tmp"
+    persistente - os.replace() è atomico sullo stesso filesystem. Il nome del file temporaneo
+    include pid+thread id: più thread (loop live, worker quote, comandi Telegram) possono
+    chiamare questa funzione sullo stesso path nello stesso momento, e con un nome fisso
+    un thread può rinominare via il tmp file di un altro thread ancora in scrittura,
+    causando un FileNotFoundError su os.replace()."""
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_path, 'w') as f:
         json.dump(obj, f)
     os.replace(tmp_path, path)
@@ -494,12 +498,28 @@ DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
 MINUTO_MINIMO_VERDETTO_STATISTICHE = 15
 
 
+# I contatori salvati prima di questa versione contavano CICLI (una risposta vuota qualunque),
+# non PARTITE che non pubblicano statistiche: valori accumulati con la vecchia regola sono molto
+# più alti a parità di situazione reale, e riusarli farebbe ri-escludere subito leghe coperte
+# appena scade l'esclusione in corso. Alla prima esecuzione con la regola nuova il file viene
+# quindi ricostruito da zero: si perdono le esclusioni in essere (comprese quelle sbagliate) e le
+# leghe davvero senza statistiche vengono re-imparate in poche partite.
+VERSIONE_REGOLA_SENZA_STATISTICHE = 2
+
+
 def carica_leghe_senza_statistiche():
     if os.path.exists(LEGHE_SENZA_STATISTICHE_FILE):
         try:
             with open(LEGHE_SENZA_STATISTICHE_FILE, 'r') as f:
-                voci = json.load(f)
-            return {(v["country"], v["name"]): v["stato"] for v in voci}
+                contenuto = json.load(f)
+            if isinstance(contenuto, dict):
+                if contenuto.get("versione") == VERSIONE_REGOLA_SENZA_STATISTICHE:
+                    return {(v["country"], v["name"]): v["stato"] for v in contenuto.get("voci", [])}
+                print("leghe_senza_statistiche: formato di una versione diversa, riparto da zero", flush=True)
+                return {}
+            print(f"leghe_senza_statistiche: {len(contenuto)} voci con la vecchia regola "
+                  f"(contava i cicli invece delle partite), scartate e riparto da zero", flush=True)
+            return {}
         except Exception as e:
             print(f"Errore lettura {LEGHE_SENZA_STATISTICHE_FILE}: {e}", flush=True)
     return {}
@@ -507,7 +527,8 @@ def carica_leghe_senza_statistiche():
 
 def salva_leghe_senza_statistiche(dati):
     voci = [{"country": paese, "name": nome, "stato": stato} for (paese, nome), stato in dati.items()]
-    salva_json_atomico(LEGHE_SENZA_STATISTICHE_FILE, voci)
+    salva_json_atomico(LEGHE_SENZA_STATISTICHE_FILE,
+                       {"versione": VERSIONE_REGOLA_SENZA_STATISTICHE, "voci": voci})
 
 
 LEGHE_SENZA_STATISTICHE = carica_leghe_senza_statistiche()
@@ -518,17 +539,31 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
     """Va chiamata SOLO quando l'API ha davvero risposto (dati presenti o risposta vuota):
     disponibili=False significa "l'API ha risposto e per questa partita non ci sono statistiche",
     non "la chiamata è fallita". Passare qui anche i fallimenti (rate-limit, timeout, errori di
-    rete) faceva escludere per 24h campionati coperti dopo 3 cicli sfortunati di seguito."""
+    rete) faceva escludere per 24h campionati coperti dopo 3 cicli sfortunati di seguito.
+
+    disponibili=False va passato UNA SOLA VOLTA per partita, e solo da una partita che ha già
+    accumulato da sola SOGLIA_SENZA_STATISTICHE risposte vuote consecutive (vedi il chiamante):
+    qui ogni chiamata vale come "una partita intera di questa lega non ha statistiche", non come
+    "un singolo controllo andato a vuoto"."""
     chiave = (league_country.lower(), league_name.lower())
     stato = LEGHE_SENZA_STATISTICHE.get(chiave, {"senza_stats_consecutive": 0, "esclusa_fino": 0})
     if disponibili:
-        stato = {"senza_stats_consecutive": 0, "esclusa_fino": 0}
-    else:
-        stato["senza_stats_consecutive"] += 1
-        if stato["senza_stats_consecutive"] >= SOGLIA_SENZA_STATISTICHE and not stato["esclusa_fino"]:
-            stato["esclusa_fino"] = time.time() + DURATA_ESCLUSIONE_SENZA_STATISTICHE
-            log(f"  Lega '{league_name}' ({league_country}) esclusa per {DURATA_ESCLUSIONE_SENZA_STATISTICHE // 3600}h: "
-                f"nessuna statistica in {stato['senza_stats_consecutive']} controlli consecutivi")
+        # Nessun motivo di tenere in memoria (e su disco) una lega che le statistiche le pubblica:
+        # lasciarci una voce azzerata faceva crescere il file all'infinito, una riga per ogni lega
+        # mai vista almeno una volta.
+        if chiave in LEGHE_SENZA_STATISTICHE:
+            del LEGHE_SENZA_STATISTICHE[chiave]
+            salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
+        return
+    stato["senza_stats_consecutive"] += 1
+    # esclusa_fino già passato = esclusione vecchia e scaduta, si può riarmare. Il vecchio
+    # "not stato['esclusa_fino']" guardava solo se il campo fosse valorizzato, quindi dopo la prima
+    # esclusione una lega non veniva MAI più esclusa (il timestamp restava lì, scaduto ma non nullo)
+    # finché non tornava a pubblicare statistiche.
+    if stato["senza_stats_consecutive"] >= SOGLIA_SENZA_STATISTICHE and stato.get("esclusa_fino", 0) <= time.time():
+        stato["esclusa_fino"] = time.time() + DURATA_ESCLUSIONE_SENZA_STATISTICHE
+        log(f"  Lega '{league_name}' ({league_country}) esclusa per {DURATA_ESCLUSIONE_SENZA_STATISTICHE // 3600}h: "
+            f"{stato['senza_stats_consecutive']} partite senza statistiche")
     LEGHE_SENZA_STATISTICHE[chiave] = stato
     salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
 
@@ -612,12 +647,21 @@ STATUS_HISTORY = {}
 SILENCED_FILE = data_path("silenced_matches.json")
 
 def load_silenced():
+    # try/except come tutti gli altri caricatori da disco: questa funzione gira a livello di
+    # modulo, quindi un file illeggibile o troncato non farebbe partire il bot per niente
+    # (il processo muore prima ancora di collegarsi a Telegram, e su Render riparte in loop).
+    # Meglio ripartire con la lista vuota che restare giù.
     if os.path.exists(SILENCED_FILE):
-        with open(SILENCED_FILE, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(SILENCED_FILE, 'r') as f:
+                data = json.load(f)
             if isinstance(data, list):
                 return {str(fid): {"score_home": 0, "score_away": 0} for fid in data}
-            return data
+            if isinstance(data, dict):
+                return data
+            return {}
+        except Exception as e:
+            print(f"Errore lettura {SILENCED_FILE}: {e}", flush=True)
     return {}
 
 def save_silenced(silenced):
@@ -631,12 +675,17 @@ SILENCED_MATCHES = load_silenced()
 FAVORITES_FILE = data_path("favorite_matches.json")
 
 def load_favorites():
+    # Stesso motivo di load_silenced(): gira a livello di modulo, un file illeggibile bloccherebbe
+    # l'avvio del bot invece di far perdere solo la lista dei preferiti.
     if os.path.exists(FAVORITES_FILE):
-        with open(FAVORITES_FILE, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(FAVORITES_FILE, 'r') as f:
+                data = json.load(f)
             if isinstance(data, list):
                 return set(str(x) for x in data)
             return set()
+        except Exception as e:
+            print(f"Errore lettura {FAVORITES_FILE}: {e}", flush=True)
     return set()
 
 def save_favorites(favs):
@@ -1282,7 +1331,12 @@ PROSSIMA_CHIAMATA_API_CONSENTITA = 0
 # Questo limitatore mette in coda (aspetta, non salta) la chiamata se negli ultimi 60s il bot ne ha
 # già fatte LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA - un margine di sicurezza sotto le 100/minuto reali
 # dell'abbonamento, per lasciare spazio a chiamate concorrenti di altri thread nello stesso istante.
-LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA = 90
+# Il margine è stato abbassato da 90 a 70 dopo aver verificato sui log Render che con 90 il bot
+# toccava comunque "Too many requests" dall'API: soprattutto durante i redeploy (Render tiene per
+# qualche secondo DUE istanze vive in parallelo durante il rolling restart, ognuna col proprio
+# limitatore indipendente in memoria - la somma delle due può superare il limite reale anche se
+# ciascuna resta sotto 90), ma anche a bot fermo su una sola istanza nelle ore di punta.
+LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA = 70
 _LOCK_RATE_LIMIT_GLOBALE = threading.Lock()
 _TIMESTAMP_CHIAMATE_RECENTI = collections.deque()
 
@@ -1329,19 +1383,23 @@ def salva_chiamate_api(dati):
 
 
 CHIAMATE_API_PER_GIORNO = carica_chiamate_api()
+_LOCK_CHIAMATE_API = threading.Lock()
 
 
 def registra_chiamata_api():
     """Incrementa il contatore per la data odierna (fuso Italia, coerente col resto del bot) e
     tiene solo le ultime CHIAMATE_API_GIORNI_STORICO giornate. Va chiamata una volta per ogni
     chiamata di rete davvero effettuata verso API-Football (non per quelle saltate dal
-    raffreddamento rate-limit, che non consumano quota)."""
-    oggi = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
-    CHIAMATE_API_PER_GIORNO[oggi] = CHIAMATE_API_PER_GIORNO.get(oggi, 0) + 1
-    if len(CHIAMATE_API_PER_GIORNO) > CHIAMATE_API_GIORNI_STORICO:
-        for vecchia in sorted(CHIAMATE_API_PER_GIORNO)[:-CHIAMATE_API_GIORNI_STORICO]:
-            del CHIAMATE_API_PER_GIORNO[vecchia]
-    salva_chiamate_api(CHIAMATE_API_PER_GIORNO)
+    raffreddamento rate-limit, che non consumano quota). Il lock serve perché più thread (loop
+    live, worker quote iniziali, comandi Telegram) chiamano questa funzione in parallelo:
+    senza lock l'incremento letto-modificato-scritto sul dict condiviso può perdere aggiornamenti."""
+    with _LOCK_CHIAMATE_API:
+        oggi = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+        CHIAMATE_API_PER_GIORNO[oggi] = CHIAMATE_API_PER_GIORNO.get(oggi, 0) + 1
+        if len(CHIAMATE_API_PER_GIORNO) > CHIAMATE_API_GIORNI_STORICO:
+            for vecchia in sorted(CHIAMATE_API_PER_GIORNO)[:-CHIAMATE_API_GIORNI_STORICO]:
+                del CHIAMATE_API_PER_GIORNO[vecchia]
+        salva_chiamate_api(CHIAMATE_API_PER_GIORNO)
 
 
 def _e_errore_rate_limit(errori):
@@ -3926,7 +3984,10 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 # COPERTURA STATISTICHE: get_statistiche_partita() risponde ma ha_statistiche_disponibili() è
 #   False da almeno SOGLIA_SENZA_STATISTICHE cicli: l'API non ha dati per quella partita (vedi
 #   leghe_senza_statistiche.json per l'esclusione lega, che scatta solo dal
-#   MINUTO_MINIMO_VERDETTO_STATISTICHE in poi). Non è un bug del bot.
+#   MINUTO_MINIMO_VERDETTO_STATISTICHE in poi e solo dopo che SOGLIA_SENZA_STATISTICHE PARTITE
+#   diverse della stessa lega hanno ognuna accumulato SOGLIA_SENZA_STATISTICHE risposte vuote
+#   consecutive - una singola partita sfortunata, o tante partite nello stesso ciclo a inizio
+#   turno, non bastano più a escludere il campionato). Non è un bug del bot.
 # xG e QUOTA: non generano anomalie automatiche (mancano spesso per motivi normali: lega non
 #   coperta per l'xG, bookmaker senza quota su quella partita) - restano visibili solo lanciando
 #   /diagnostica a mano.
@@ -4716,19 +4777,6 @@ def processa_partita(fixture, notifiche_attive=True):
                     log(f"    ♻️ Storico momentum ripristinato dal backup per {home}-{away}: "
                         f"{len(backup_fixture)} punti recuperati")
 
-        # Ripristino da backup: se lo storico momentum di questa partita risulta vuoto/più corto di
-        # quello salvato nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM sopra) - tipicamente
-        # dopo un reset appena sopra, o dopo un riavvio che ha perso stato_partite ma non il backup -
-        # lo si ripristina da lì invece di ripartire da zero. Non fa mai perdere punti: si applica
-        # solo quando il backup è STRETTAMENTE più lungo dello storico attuale.
-        backup_fixture = BACKUP_HISTORY_MOMENTUM.get(str(fixture_id))
-        if backup_fixture:
-            history_attuale = stato_partite.get(fixture_id, {}).get("history", [])
-            if len(backup_fixture) > len(history_attuale):
-                stato_partite.setdefault(fixture_id, {})["history"] = list(backup_fixture)
-                log(f"    ♻️ Storico momentum ripristinato dal backup per {home}-{away}: "
-                    f"{len(backup_fixture)} punti recuperati")
-
         stato_precedente = stato_partite.get(fixture_id, {})
         prev_score_home = stato_precedente.get("score_home", score_home)
         prev_score_away = stato_precedente.get("score_away", score_away)
@@ -4904,6 +4952,9 @@ def processa_partita(fixture, notifiche_attive=True):
             stato_partite[fixture_id]["history"] = history
             stato_partite[fixture_id]["stats_ultimo_esito"] = "ok"
             stato_partite[fixture_id]["stats_vuote_consecutive"] = 0
+            # La partita è tornata a dare statistiche: se più avanti dovesse tornare vuota per
+            # altri 3 cicli di fila, potrà di nuovo contribuire al verdetto sulla lega.
+            stato_partite[fixture_id]["verdetto_lega_registrato"] = False
             # Copia nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM) ad ogni nuovo punto, cosi'
             # un eventuale reset di stato_partite più avanti non fa perdere quanto già raccolto.
             BACKUP_HISTORY_MOMENTUM[str(fixture_id)] = history
@@ -4928,7 +4979,20 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
                 stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
                 log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
-                if minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE:
+                # Il verdetto sulla LEGA lo dà solo una partita che da sola ha già collezionato
+                # SOGLIA_SENZA_STATISTICHE risposte vuote di fila (~3 cicli, diversi minuti di
+                # tempo dato all'API), e conta una volta sola per partita. Prima bastava una
+                # risposta vuota qualsiasi: con più partite della stessa lega live insieme
+                # (sabato di campionato, 10+ gare in contemporanea) la soglia dei "3 controlli
+                # consecutivi" veniva raggiunta da 3 PARTITE DIVERSE nello stesso ciclo, cioè in
+                # pochi secondi, e bastava il normale ritardo con cui l'API pubblica le
+                # statistiche a inizio turno per escludere per 24h campionati perfettamente
+                # coperti (visto in produzione su League One/League Two inglesi, Ekstraklasa,
+                # K League, J League, Liga I romena).
+                if (minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE
+                        and vuote >= SOGLIA_SENZA_STATISTICHE
+                        and not stato_partite[fixture_id].get("verdetto_lega_registrato")):
+                    stato_partite[fixture_id]["verdetto_lega_registrato"] = True
                     registra_esito_statistiche(league_country, league_name, False)
 
         if status_short in ("FT", "AET", "PEN"):
@@ -5116,8 +5180,31 @@ def processa_partita(fixture, notifiche_attive=True):
         # cosi' questo stesso ciclo segue già le regole normali invece di restare agganciato a
         # soglie più permissive per sempre.
         if str(fixture_id) in FAVORITE_MATCHES:
-            ultimo_invio_fav = stato_partite.get(fixture_id, {}).get("timestamp_notifica", 0)
-            if ultimo_invio_fav and (time.time() - ultimo_invio_fav) > DURATA_MAX_SENZA_NOTIFICA_PREFERITI:
+            stato_fav = stato_partite.setdefault(fixture_id, {})
+            ultimo_invio_fav = stato_fav.get("timestamp_notifica", 0)
+            # Il tempo di silenzio va misurato in minuti GIOCATI, non di orologio: durante
+            # l'intervallo (status "HT", elapsed assente) non arrivano notifiche semplicemente
+            # perché non si sta giocando, e DURATA_MAX_SENZA_NOTIFICA_PREFERITI vale esattamente
+            # 15 minuti - quanto dura l'intervallo. Col solo orologio, un preferito la cui ultima
+            # notifica cadeva poco prima del 45' veniva rimosso durante l'intervallo o al primo
+            # ciclo del secondo tempo, cioè proprio quando serve continuare a seguirlo. Stessa
+            # logica già applicata al caso "fuori orario" qui sotto, dove lo stato viene aggiornato
+            # come se avessimo notificato per non far scadere il preferito di notte.
+            minuto_ultima_notifica = stato_fav.get("minuto_ultima_notifica")
+            if ultimo_invio_fav and minuto_ultima_notifica is None and elapsed_raw is not None:
+                # Stato salvato da una versione precedente (senza questo campo): si riparte da ora
+                # invece di rimuovere subito il preferito.
+                minuto_ultima_notifica = elapsed_raw
+                stato_fav["minuto_ultima_notifica"] = elapsed_raw
+            minuti_giocati_da_notifica = (
+                elapsed_raw - minuto_ultima_notifica
+                if elapsed_raw is not None and minuto_ultima_notifica is not None else None
+            )
+            if (ultimo_invio_fav
+                    and elapsed_raw is not None
+                    and minuti_giocati_da_notifica is not None
+                    and minuti_giocati_da_notifica >= DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
+                    and (time.time() - ultimo_invio_fav) > DURATA_MAX_SENZA_NOTIFICA_PREFERITI):
                 FAVORITE_MATCHES.discard(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
                 minuti_senza_notifica = DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
@@ -5325,12 +5412,19 @@ def processa_partita(fixture, notifiche_attive=True):
         # davvero (vedi DURATA_MAX_SENZA_NOTIFICA_PREFERITI più sopra).
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
-        stato_partite[fixture_id].update({
+        aggiornamento_notifica = {
             "tiri_casa": tiri_casa,
             "tiri_ospite": tiri_ospite,
             "timestamp_notifica": time.time(),
             "notified_final": prev_notified,
-        })
+        }
+        # Minuto di gioco dell'ultima notifica: serve alla rimozione automatica dei preferiti per
+        # misurare il silenzio in minuti giocati invece che di orologio (vedi sopra). Non si
+        # sovrascrive con None quando l'API non espone il minuto (pausa), altrimenti si perderebbe
+        # il riferimento buono registrato poco prima.
+        if elapsed_raw is not None:
+            aggiornamento_notifica["minuto_ultima_notifica"] = elapsed_raw
+        stato_partite[fixture_id].update(aggiornamento_notifica)
 
         if foto_path and os.path.exists(foto_path):
             try:
@@ -5379,6 +5473,18 @@ def pulisci_partite_terminate(fixture_ids_live):
         for f in backup_da_rimuovere:
             del BACKUP_HISTORY_MOMENTUM[f]
         salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
+
+    # Anche i preferiti vanno ripuliti a fine partita: restavano dentro per sempre, quindi
+    # favorite_matches.json cresceva ad ogni partita mai messa nei preferiti (a mano o
+    # dall'auto-preferiti) e /favorites si riempiva di righe "ID 12345 (non live)" che non
+    # sparivano più. Le partite non ancora iniziate non passano di qui (i preferiti si aggiungono
+    # solo da una notifica live), quindi non si rischia di rimuovere un preferito "in attesa".
+    preferiti_da_rimuovere = [f for f in FAVORITE_MATCHES if f not in fixture_ids_live_str]
+    if preferiti_da_rimuovere:
+        for f in preferiti_da_rimuovere:
+            FAVORITE_MATCHES.discard(f)
+        save_favorites(FAVORITE_MATCHES)
+        log(f"Preferiti di partite terminate rimossi: {len(preferiti_da_rimuovere)}")
 
 
 # =============================================================================
@@ -5532,7 +5638,20 @@ if __name__ == "__main__":
                     stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
                 time.sleep(1)
 
-            pulisci_partite_terminate(fixture_ids_live)
+            # La pulizia si basa su "questa partita non è più tra le live", ma get_partite_live()
+            # restituisce una lista vuota SIA quando non c'è nessuna partita in corso SIA quando la
+            # chiamata è fallita (rate-limit, quota giornaliera esaurita, timeout): i due casi sono
+            # indistinguibili dal valore di ritorno. Senza questa guardia, un singolo rate-limit
+            # sulla chiamata live faceva passare un set vuoto e cancellava in un colpo solo lo stato
+            # di TUTTE le partite in corso - storico momentum compreso, backup indipendente
+            # incluso (BACKUP_HISTORY_MOMENTUM viene ripulito qui dentro), che era stato aggiunto
+            # proprio per sopravvivere ai reset. I rate-limit su get_partite_live sono documentati
+            # nei log di produzione, quindi non è un caso teorico.
+            if chiamata_partite_live_fallita:
+                log("Chiamata partite live fallita: salto la pulizia delle partite terminate "
+                    "(un elenco vuoto qui non significa che le partite siano finite)")
+            else:
+                pulisci_partite_terminate(fixture_ids_live)
             salva_stato_partite(stato_partite)
             invia_report_intensita_automatico(partite_valide, notifiche_attive)
             esegui_diagnostica_automatica(partite_valide, notifiche_attive)
