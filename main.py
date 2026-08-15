@@ -647,12 +647,21 @@ STATUS_HISTORY = {}
 SILENCED_FILE = data_path("silenced_matches.json")
 
 def load_silenced():
+    # try/except come tutti gli altri caricatori da disco: questa funzione gira a livello di
+    # modulo, quindi un file illeggibile o troncato non farebbe partire il bot per niente
+    # (il processo muore prima ancora di collegarsi a Telegram, e su Render riparte in loop).
+    # Meglio ripartire con la lista vuota che restare giù.
     if os.path.exists(SILENCED_FILE):
-        with open(SILENCED_FILE, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(SILENCED_FILE, 'r') as f:
+                data = json.load(f)
             if isinstance(data, list):
                 return {str(fid): {"score_home": 0, "score_away": 0} for fid in data}
-            return data
+            if isinstance(data, dict):
+                return data
+            return {}
+        except Exception as e:
+            print(f"Errore lettura {SILENCED_FILE}: {e}", flush=True)
     return {}
 
 def save_silenced(silenced):
@@ -666,12 +675,17 @@ SILENCED_MATCHES = load_silenced()
 FAVORITES_FILE = data_path("favorite_matches.json")
 
 def load_favorites():
+    # Stesso motivo di load_silenced(): gira a livello di modulo, un file illeggibile bloccherebbe
+    # l'avvio del bot invece di far perdere solo la lista dei preferiti.
     if os.path.exists(FAVORITES_FILE):
-        with open(FAVORITES_FILE, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(FAVORITES_FILE, 'r') as f:
+                data = json.load(f)
             if isinstance(data, list):
                 return set(str(x) for x in data)
             return set()
+        except Exception as e:
+            print(f"Errore lettura {FAVORITES_FILE}: {e}", flush=True)
     return set()
 
 def save_favorites(favs):
@@ -5179,8 +5193,31 @@ def processa_partita(fixture, notifiche_attive=True):
         # cosi' questo stesso ciclo segue già le regole normali invece di restare agganciato a
         # soglie più permissive per sempre.
         if str(fixture_id) in FAVORITE_MATCHES:
-            ultimo_invio_fav = stato_partite.get(fixture_id, {}).get("timestamp_notifica", 0)
-            if ultimo_invio_fav and (time.time() - ultimo_invio_fav) > DURATA_MAX_SENZA_NOTIFICA_PREFERITI:
+            stato_fav = stato_partite.setdefault(fixture_id, {})
+            ultimo_invio_fav = stato_fav.get("timestamp_notifica", 0)
+            # Il tempo di silenzio va misurato in minuti GIOCATI, non di orologio: durante
+            # l'intervallo (status "HT", elapsed assente) non arrivano notifiche semplicemente
+            # perché non si sta giocando, e DURATA_MAX_SENZA_NOTIFICA_PREFERITI vale esattamente
+            # 15 minuti - quanto dura l'intervallo. Col solo orologio, un preferito la cui ultima
+            # notifica cadeva poco prima del 45' veniva rimosso durante l'intervallo o al primo
+            # ciclo del secondo tempo, cioè proprio quando serve continuare a seguirlo. Stessa
+            # logica già applicata al caso "fuori orario" qui sotto, dove lo stato viene aggiornato
+            # come se avessimo notificato per non far scadere il preferito di notte.
+            minuto_ultima_notifica = stato_fav.get("minuto_ultima_notifica")
+            if ultimo_invio_fav and minuto_ultima_notifica is None and elapsed_raw is not None:
+                # Stato salvato da una versione precedente (senza questo campo): si riparte da ora
+                # invece di rimuovere subito il preferito.
+                minuto_ultima_notifica = elapsed_raw
+                stato_fav["minuto_ultima_notifica"] = elapsed_raw
+            minuti_giocati_da_notifica = (
+                elapsed_raw - minuto_ultima_notifica
+                if elapsed_raw is not None and minuto_ultima_notifica is not None else None
+            )
+            if (ultimo_invio_fav
+                    and elapsed_raw is not None
+                    and minuti_giocati_da_notifica is not None
+                    and minuti_giocati_da_notifica >= DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
+                    and (time.time() - ultimo_invio_fav) > DURATA_MAX_SENZA_NOTIFICA_PREFERITI):
                 FAVORITE_MATCHES.discard(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
                 minuti_senza_notifica = DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
@@ -5388,12 +5425,19 @@ def processa_partita(fixture, notifiche_attive=True):
         # davvero (vedi DURATA_MAX_SENZA_NOTIFICA_PREFERITI più sopra).
 
         prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
-        stato_partite[fixture_id].update({
+        aggiornamento_notifica = {
             "tiri_casa": tiri_casa,
             "tiri_ospite": tiri_ospite,
             "timestamp_notifica": time.time(),
             "notified_final": prev_notified,
-        })
+        }
+        # Minuto di gioco dell'ultima notifica: serve alla rimozione automatica dei preferiti per
+        # misurare il silenzio in minuti giocati invece che di orologio (vedi sopra). Non si
+        # sovrascrive con None quando l'API non espone il minuto (pausa), altrimenti si perderebbe
+        # il riferimento buono registrato poco prima.
+        if elapsed_raw is not None:
+            aggiornamento_notifica["minuto_ultima_notifica"] = elapsed_raw
+        stato_partite[fixture_id].update(aggiornamento_notifica)
 
         if foto_path and os.path.exists(foto_path):
             try:
@@ -5442,6 +5486,18 @@ def pulisci_partite_terminate(fixture_ids_live):
         for f in backup_da_rimuovere:
             del BACKUP_HISTORY_MOMENTUM[f]
         salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
+
+    # Anche i preferiti vanno ripuliti a fine partita: restavano dentro per sempre, quindi
+    # favorite_matches.json cresceva ad ogni partita mai messa nei preferiti (a mano o
+    # dall'auto-preferiti) e /favorites si riempiva di righe "ID 12345 (non live)" che non
+    # sparivano più. Le partite non ancora iniziate non passano di qui (i preferiti si aggiungono
+    # solo da una notifica live), quindi non si rischia di rimuovere un preferito "in attesa".
+    preferiti_da_rimuovere = [f for f in FAVORITE_MATCHES if f not in fixture_ids_live_str]
+    if preferiti_da_rimuovere:
+        for f in preferiti_da_rimuovere:
+            FAVORITE_MATCHES.discard(f)
+        save_favorites(FAVORITE_MATCHES)
+        log(f"Preferiti di partite terminate rimossi: {len(preferiti_da_rimuovere)}")
 
 
 # =============================================================================
@@ -5595,7 +5651,20 @@ if __name__ == "__main__":
                     stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
                 time.sleep(1)
 
-            pulisci_partite_terminate(fixture_ids_live)
+            # La pulizia si basa su "questa partita non è più tra le live", ma get_partite_live()
+            # restituisce una lista vuota SIA quando non c'è nessuna partita in corso SIA quando la
+            # chiamata è fallita (rate-limit, quota giornaliera esaurita, timeout): i due casi sono
+            # indistinguibili dal valore di ritorno. Senza questa guardia, un singolo rate-limit
+            # sulla chiamata live faceva passare un set vuoto e cancellava in un colpo solo lo stato
+            # di TUTTE le partite in corso - storico momentum compreso, backup indipendente
+            # incluso (BACKUP_HISTORY_MOMENTUM viene ripulito qui dentro), che era stato aggiunto
+            # proprio per sopravvivere ai reset. I rate-limit su get_partite_live sono documentati
+            # nei log di produzione, quindi non è un caso teorico.
+            if chiamata_partite_live_fallita:
+                log("Chiamata partite live fallita: salto la pulizia delle partite terminate "
+                    "(un elenco vuoto qui non significa che le partite siano finite)")
+            else:
+                pulisci_partite_terminate(fixture_ids_live)
             salva_stato_partite(stato_partite)
             invia_report_intensita_automatico(partite_valide, notifiche_attive)
             esegui_diagnostica_automatica(partite_valide, notifiche_attive)
