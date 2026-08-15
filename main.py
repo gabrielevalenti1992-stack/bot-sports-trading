@@ -498,12 +498,28 @@ DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
 MINUTO_MINIMO_VERDETTO_STATISTICHE = 15
 
 
+# I contatori salvati prima di questa versione contavano CICLI (una risposta vuota qualunque),
+# non PARTITE che non pubblicano statistiche: valori accumulati con la vecchia regola sono molto
+# più alti a parità di situazione reale, e riusarli farebbe ri-escludere subito leghe coperte
+# appena scade l'esclusione in corso. Alla prima esecuzione con la regola nuova il file viene
+# quindi ricostruito da zero: si perdono le esclusioni in essere (comprese quelle sbagliate) e le
+# leghe davvero senza statistiche vengono re-imparate in poche partite.
+VERSIONE_REGOLA_SENZA_STATISTICHE = 2
+
+
 def carica_leghe_senza_statistiche():
     if os.path.exists(LEGHE_SENZA_STATISTICHE_FILE):
         try:
             with open(LEGHE_SENZA_STATISTICHE_FILE, 'r') as f:
-                voci = json.load(f)
-            return {(v["country"], v["name"]): v["stato"] for v in voci}
+                contenuto = json.load(f)
+            if isinstance(contenuto, dict):
+                if contenuto.get("versione") == VERSIONE_REGOLA_SENZA_STATISTICHE:
+                    return {(v["country"], v["name"]): v["stato"] for v in contenuto.get("voci", [])}
+                print("leghe_senza_statistiche: formato di una versione diversa, riparto da zero", flush=True)
+                return {}
+            print(f"leghe_senza_statistiche: {len(contenuto)} voci con la vecchia regola "
+                  f"(contava i cicli invece delle partite), scartate e riparto da zero", flush=True)
+            return {}
         except Exception as e:
             print(f"Errore lettura {LEGHE_SENZA_STATISTICHE_FILE}: {e}", flush=True)
     return {}
@@ -511,7 +527,8 @@ def carica_leghe_senza_statistiche():
 
 def salva_leghe_senza_statistiche(dati):
     voci = [{"country": paese, "name": nome, "stato": stato} for (paese, nome), stato in dati.items()]
-    salva_json_atomico(LEGHE_SENZA_STATISTICHE_FILE, voci)
+    salva_json_atomico(LEGHE_SENZA_STATISTICHE_FILE,
+                       {"versione": VERSIONE_REGOLA_SENZA_STATISTICHE, "voci": voci})
 
 
 LEGHE_SENZA_STATISTICHE = carica_leghe_senza_statistiche()
@@ -522,17 +539,31 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
     """Va chiamata SOLO quando l'API ha davvero risposto (dati presenti o risposta vuota):
     disponibili=False significa "l'API ha risposto e per questa partita non ci sono statistiche",
     non "la chiamata è fallita". Passare qui anche i fallimenti (rate-limit, timeout, errori di
-    rete) faceva escludere per 24h campionati coperti dopo 3 cicli sfortunati di seguito."""
+    rete) faceva escludere per 24h campionati coperti dopo 3 cicli sfortunati di seguito.
+
+    disponibili=False va passato UNA SOLA VOLTA per partita, e solo da una partita che ha già
+    accumulato da sola SOGLIA_SENZA_STATISTICHE risposte vuote consecutive (vedi il chiamante):
+    qui ogni chiamata vale come "una partita intera di questa lega non ha statistiche", non come
+    "un singolo controllo andato a vuoto"."""
     chiave = (league_country.lower(), league_name.lower())
     stato = LEGHE_SENZA_STATISTICHE.get(chiave, {"senza_stats_consecutive": 0, "esclusa_fino": 0})
     if disponibili:
-        stato = {"senza_stats_consecutive": 0, "esclusa_fino": 0}
-    else:
-        stato["senza_stats_consecutive"] += 1
-        if stato["senza_stats_consecutive"] >= SOGLIA_SENZA_STATISTICHE and not stato["esclusa_fino"]:
-            stato["esclusa_fino"] = time.time() + DURATA_ESCLUSIONE_SENZA_STATISTICHE
-            log(f"  Lega '{league_name}' ({league_country}) esclusa per {DURATA_ESCLUSIONE_SENZA_STATISTICHE // 3600}h: "
-                f"nessuna statistica in {stato['senza_stats_consecutive']} controlli consecutivi")
+        # Nessun motivo di tenere in memoria (e su disco) una lega che le statistiche le pubblica:
+        # lasciarci una voce azzerata faceva crescere il file all'infinito, una riga per ogni lega
+        # mai vista almeno una volta.
+        if chiave in LEGHE_SENZA_STATISTICHE:
+            del LEGHE_SENZA_STATISTICHE[chiave]
+            salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
+        return
+    stato["senza_stats_consecutive"] += 1
+    # esclusa_fino già passato = esclusione vecchia e scaduta, si può riarmare. Il vecchio
+    # "not stato['esclusa_fino']" guardava solo se il campo fosse valorizzato, quindi dopo la prima
+    # esclusione una lega non veniva MAI più esclusa (il timestamp restava lì, scaduto ma non nullo)
+    # finché non tornava a pubblicare statistiche.
+    if stato["senza_stats_consecutive"] >= SOGLIA_SENZA_STATISTICHE and stato.get("esclusa_fino", 0) <= time.time():
+        stato["esclusa_fino"] = time.time() + DURATA_ESCLUSIONE_SENZA_STATISTICHE
+        log(f"  Lega '{league_name}' ({league_country}) esclusa per {DURATA_ESCLUSIONE_SENZA_STATISTICHE // 3600}h: "
+            f"{stato['senza_stats_consecutive']} partite senza statistiche")
     LEGHE_SENZA_STATISTICHE[chiave] = stato
     salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
 
@@ -3939,7 +3970,10 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 # COPERTURA STATISTICHE: get_statistiche_partita() risponde ma ha_statistiche_disponibili() è
 #   False da almeno SOGLIA_SENZA_STATISTICHE cicli: l'API non ha dati per quella partita (vedi
 #   leghe_senza_statistiche.json per l'esclusione lega, che scatta solo dal
-#   MINUTO_MINIMO_VERDETTO_STATISTICHE in poi). Non è un bug del bot.
+#   MINUTO_MINIMO_VERDETTO_STATISTICHE in poi e solo dopo che SOGLIA_SENZA_STATISTICHE PARTITE
+#   diverse della stessa lega hanno ognuna accumulato SOGLIA_SENZA_STATISTICHE risposte vuote
+#   consecutive - una singola partita sfortunata, o tante partite nello stesso ciclo a inizio
+#   turno, non bastano più a escludere il campionato). Non è un bug del bot.
 # xG e QUOTA: non generano anomalie automatiche (mancano spesso per motivi normali: lega non
 #   coperta per l'xG, bookmaker senza quota su quella partita) - restano visibili solo lanciando
 #   /diagnostica a mano.
@@ -4917,6 +4951,9 @@ def processa_partita(fixture, notifiche_attive=True):
             stato_partite[fixture_id]["history"] = history
             stato_partite[fixture_id]["stats_ultimo_esito"] = "ok"
             stato_partite[fixture_id]["stats_vuote_consecutive"] = 0
+            # La partita è tornata a dare statistiche: se più avanti dovesse tornare vuota per
+            # altri 3 cicli di fila, potrà di nuovo contribuire al verdetto sulla lega.
+            stato_partite[fixture_id]["verdetto_lega_registrato"] = False
             # Copia nel backup indipendente (vedi BACKUP_HISTORY_MOMENTUM) ad ogni nuovo punto, cosi'
             # un eventuale reset di stato_partite più avanti non fa perdere quanto già raccolto.
             BACKUP_HISTORY_MOMENTUM[str(fixture_id)] = history
@@ -4941,7 +4978,20 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
                 stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
                 log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
-                if minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE:
+                # Il verdetto sulla LEGA lo dà solo una partita che da sola ha già collezionato
+                # SOGLIA_SENZA_STATISTICHE risposte vuote di fila (~3 cicli, diversi minuti di
+                # tempo dato all'API), e conta una volta sola per partita. Prima bastava una
+                # risposta vuota qualsiasi: con più partite della stessa lega live insieme
+                # (sabato di campionato, 10+ gare in contemporanea) la soglia dei "3 controlli
+                # consecutivi" veniva raggiunta da 3 PARTITE DIVERSE nello stesso ciclo, cioè in
+                # pochi secondi, e bastava il normale ritardo con cui l'API pubblica le
+                # statistiche a inizio turno per escludere per 24h campionati perfettamente
+                # coperti (visto in produzione su League One/League Two inglesi, Ekstraklasa,
+                # K League, J League, Liga I romena).
+                if (minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE
+                        and vuote >= SOGLIA_SENZA_STATISTICHE
+                        and not stato_partite[fixture_id].get("verdetto_lega_registrato")):
+                    stato_partite[fixture_id]["verdetto_lega_registrato"] = True
                     registra_esito_statistiche(league_country, league_name, False)
 
         if status_short in ("FT", "AET", "PEN"):
