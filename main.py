@@ -4109,7 +4109,16 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             # regolarmente ma per questa partita non ha statistiche, non c'è niente da riparare
             # nel bot (stessa natura di xG e quota mancanti); se invece la chiamata fallisce, o
             # non è mai stata fatta, quello sì è un problema di pipeline.
-            if esito_stats == "vuote" and stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE:
+            # Il verdetto "l'API non copre questa partita" lo dà stats_vuote_consecutive, che si
+            # accumula solo su risposte vuote vere e si azzera al primo esito buono. Un fallimento
+            # TRANSITORIO (rate-limit, timeout, rete) non lo azzera - apposta, vedi processa_partita
+            # - quindi non deve nemmeno annullarlo qui: altrimenti una partita già classificata
+            # COPERTURA STATISTICHE tornava a STATISTICHE al primo skip da raffreddamento, e siccome
+            # il dedup di _anomalie_nuove() lavora per categoria, il cambio di categoria la faceva
+            # risegnalare in chat come se fosse un'anomalia nuova. Con un raffreddamento che salta
+            # tutte le chiamate rimaste nel ciclo, il rimbalzo colpiva molte partite insieme.
+            evidenza_non_copertura = stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE
+            if esito_stats in ("vuote", "errore") and evidenza_non_copertura:
                 trovate["COPERTURA STATISTICHE"] = (
                     f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
                     f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
