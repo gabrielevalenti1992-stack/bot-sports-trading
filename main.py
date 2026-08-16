@@ -1435,6 +1435,9 @@ def poll_callbacks():
                     elif cmd == "/coperturaleghe":
                         esegui_comando_sicuro(chat_id, cmd_coperturaleghe)
 
+                    elif cmd == "/dominio":
+                        esegui_comando_sicuro(chat_id, cmd_dominio)
+
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
 
@@ -2488,6 +2491,8 @@ def cmd_help(chat_id):
         "di sei condizioni di gioco (non più esposte come comandi live)\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
+        "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
+        "rispecchia ancora (in cima le partite che dominano e perdono). Nessuna chiamata API\n"
         "/coperturaleghe - Quali campionati pubblicano statistiche reali e quante giornate senza "
         "dati ha accumulato ciascuno (da quale giornata è partita la verifica)\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
@@ -2948,6 +2953,67 @@ def cmd_shadowlogstrategie(chat_id):
                 files={"document": f}, timeout=30)
     except Exception as e:
         log(f"Errore invio file shadow_log_strategie.jsonl: {e}")
+
+
+def cmd_dominio(chat_id):
+    """Cruscotto: tutte le partite seguite, ordinate per quanto il risultato tradisce il campo.
+
+    Zero chiamate API - legge solo stato_partite, già aggiornato dal ciclo principale (a differenza
+    di /intensita, che ne fa una per partita e va aspettata). Serve a rispondere in un colpo
+    d'occhio a "dove sta succedendo qualcosa che il punteggio non dice ancora"."""
+    righe_sotto, righe_bloccate, righe_avanti, senza_dominio = [], [], [], 0
+    for fid, stato in stato_partite.items():
+        history = stato.get("history", [])
+        if not history:
+            continue
+        current_stats = history[-1].get("stats")
+        score_h = stato.get("score_home", 0)
+        score_a = stato.get("score_away", 0)
+        dominio = calcola_dominio(current_stats, score_h, score_a)
+        if not dominio:
+            senza_dominio += 1
+            continue
+        home = stato.get("home", "?")
+        away = stato.get("away", "?")
+        chi = home if dominio["lato"] == 0 else away
+        minuto = stato.get("last_minute", "?")
+        tiri = current_stats.get("Tiri totali", (0, 0))
+        porta = current_stats.get("Tiri in porta", (0, 0))
+        if dominio["lato"] == 1:
+            tiri, porta = (tiri[1], tiri[0]), (porta[1], porta[0])
+        # Due righe secche, senza ripetere quello che dice già l'intestazione del gruppo: la prima
+        # inquadra la partita, la seconda dice chi comanda e con quali numeri.
+        blocco = (
+            f"{home} {score_h}-{score_a} {away} · {minuto}'\n"
+            f"{barra_dominio(dominio['quota'])} {dominio['quota']}% {chi} · "
+            f"{tiri[0]}-{tiri[1]} tiri, {porta[0]}-{porta[1]} in porta"
+        )
+        destinazione = {0: righe_sotto, 1: righe_bloccate, 2: righe_avanti}[dominio["priorita"]]
+        destinazione.append((dominio["quota"], blocco))
+
+    if not (righe_sotto or righe_bloccate or righe_avanti):
+        invia_messaggio_telegram(
+            "Nessuna partita con un dominio netto in questo momento.\n\n"
+            f"{senza_dominio} partite seguite sono equilibrate, o non hanno ancora abbastanza "
+            "gioco per dare un verdetto.", chat_id=chat_id)
+        return
+
+    def ordina(voci):
+        return [b for _, b in sorted(voci, key=lambda v: -v[0])]
+
+    parti = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato"]
+    if righe_sotto:
+        parti.append("🔥 *DOMINA E PERDE*\n" + "\n\n".join(ordina(righe_sotto)))
+    if righe_bloccate:
+        parti.append("⚡ *DOMINA E NON SEGNA*\n" + "\n\n".join(ordina(righe_bloccate)))
+    if righe_avanti:
+        parti.append("▪️ *DOMINA ED È AVANTI* (il risultato rispecchia)\n" + "\n\n".join(ordina(righe_avanti)))
+    if senza_dominio:
+        parti.append(f"_Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco._"
+                     if senza_dominio > 1 else
+                     "_Un'altra partita seguita: equilibrata o con troppo poco gioco._")
+
+    invia_messaggio_telegram("\n\n".join(parti), chat_id=chat_id)
 
 
 def cmd_coperturaleghe(chat_id):
@@ -3581,6 +3647,91 @@ def calcola_indice_intensita(delta_stats):
         + (d_porta[0] + d_porta[1]) * PESO_INTENSITA_PORTA
         + (d_corner[0] + d_corner[1]) * PESO_INTENSITA_CORNER
     )
+
+
+# =============================================================================
+# DOMINIO: chi sta facendo la partita, e se il risultato lo rispecchia
+# =============================================================================
+# L'indice di intensità qui sopra SOMMA le due squadre: dice quanto si gioca, non chi comanda.
+# Un 10-9 di tiri è intensissimo ma equilibrato, e non indica da che parte stare; un 9-1 è la
+# stessa quantità di gioco ma tutta da una parte sola. Per il trading serve il secondo.
+#
+# Il segnale che conta davvero non è però il dominio in sé: è la DIVERGENZA fra dominio e
+# risultato. Una squadra che domina e vince 3-0 non offre niente, il mercato l'ha già capito.
+# Una che domina e non segna, o peggio sta perdendo, è la situazione in cui il punteggio racconta
+# una partita diversa da quella che si sta giocando.
+PESO_DOMINIO_TIRI = 1
+PESO_DOMINIO_PORTA = 3    # un tiro in porta pesa quanto tre tiri qualunque
+PESO_DOMINIO_CORNER = 1
+PESO_DOMINIO_AREA = 2     # tiri dentro l'area: la statistica più vicina a un'occasione vera
+# Sotto questa quota le due squadre si equivalgono abbastanza da non parlare di dominio.
+SOGLIA_QUOTA_DOMINIO = 65
+# Con pochissimo gioco le percentuali impazziscono (1 tiro a 0 fa "100%"): serve un minimo di
+# materiale prima di dare un verdetto.
+VOLUME_MINIMO_DOMINIO = 8
+
+
+def _peso_offensivo(stats, lato):
+    def v(chiave):
+        return stats.get(chiave, (0, 0))[lato] or 0
+    return (v("Tiri totali") * PESO_DOMINIO_TIRI
+            + v("Tiri in porta") * PESO_DOMINIO_PORTA
+            + v("Corner") * PESO_DOMINIO_CORNER
+            + v("Tiri in area") * PESO_DOMINIO_AREA)
+
+
+def calcola_dominio(current_stats, score_home, score_away):
+    """Ritorna chi domina, con quanta parte dell'azione e cosa dice il risultato.
+
+    None quando non c'è un dominio da dichiarare: statistiche assenti, troppo poco gioco per
+    giudicare, oppure squadre sostanzialmente pari."""
+    if not current_stats:
+        return None
+    peso_casa = _peso_offensivo(current_stats, 0)
+    peso_ospite = _peso_offensivo(current_stats, 1)
+    totale = peso_casa + peso_ospite
+    if totale < VOLUME_MINIMO_DOMINIO:
+        return None
+
+    lato = 0 if peso_casa >= peso_ospite else 1
+    quota = round(max(peso_casa, peso_ospite) / totale * 100)
+    if quota < SOGLIA_QUOTA_DOMINIO:
+        return None
+
+    gol_pro = score_home if lato == 0 else score_away
+    gol_contro = score_away if lato == 0 else score_home
+    if gol_pro > gol_contro:
+        situazione, priorita = "avanti", 2      # il risultato rispecchia il campo: niente da dire
+    elif gol_pro == gol_contro:
+        situazione, priorita = "bloccata", 1    # domina e non segna
+    else:
+        situazione, priorita = "sotto", 0       # domina e sta perdendo: divergenza massima
+    return {"lato": lato, "quota": quota, "situazione": situazione, "priorita": priorita}
+
+
+def barra_dominio(quota):
+    """Barra a dieci tacche: la quota si legge prima del numero."""
+    pieni = max(0, min(10, round(quota / 10)))
+    return "▓" * pieni + "░" * (10 - pieni)
+
+
+def riga_dominio(dominio, home, away, current_stats):
+    """Una riga sola che risponde a 'chi comanda e conviene guardarla?'."""
+    if not dominio:
+        return ""
+    chi = home if dominio["lato"] == 0 else away
+    tiri = current_stats.get("Tiri totali", (0, 0))
+    porta = current_stats.get("Tiri in porta", (0, 0))
+    if dominio["lato"] == 1:
+        tiri, porta = (tiri[1], tiri[0]), (porta[1], porta[0])
+    coda = {
+        "sotto": "e sta perdendo",
+        "bloccata": "e non segna",
+        "avanti": "ed è avanti",
+    }[dominio["situazione"]]
+    emoji = {"sotto": "🔥", "bloccata": "⚡", "avanti": "▪️"}[dominio["situazione"]]
+    return (f"{emoji} {chi} comanda {dominio['quota']}% {coda} "
+            f"({tiri[0]}-{tiri[1]} tiri, {porta[0]}-{porta[1]} in porta)")
 
 
 def descrivi_motivazioni_intensita(delta_stats):
@@ -5963,6 +6114,15 @@ def processa_partita(fixture, notifiche_attive=True):
         # Confronto 1°T/2°T: solo nel 2° tempo. Se manca lo snapshot di fine 1°T (il bot ha
         # iniziato a monitorare la partita dopo l'intervallo, es. per un riavvio nel mezzo) lo
         # dice esplicitamente, invece di lasciare intuire una sezione sparita per errore.
+        # Dominio sui totali di partita, non sul blocco 15 min: la domanda è "chi sta facendo la
+        # partita", che è una cosa cumulativa. Si calcola una volta e finisce sia in notifica sia
+        # nel log, così a colpo d'occhio si legge chi comanda senza confrontare due colonne.
+        dominio_partita = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
+        riga_dominio_notifica = ""
+        if dominio_partita:
+            riga_dominio_notifica = riga_dominio(dominio_partita, home, away, current_stats) + "\n"
+            log(f"  {riga_dominio(dominio_partita, home, away, current_stats)}")
+
         tempi_text = ""
         stats_1h_salvate = stato_partite.get(fixture_id, {}).get("stats_fine_1h")
         if status_short == "2H" and current_stats:
@@ -6010,6 +6170,7 @@ def processa_partita(fixture, notifiche_attive=True):
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
             f"- Corner: {corner_line}\n"
+            f"{riga_dominio_notifica}"
             f"{tempi_text}"
             f"{nota_momentum}"
         ).rstrip()
