@@ -5169,17 +5169,19 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
 
     gol_totali = score_home + score_away
     scarto = abs(score_home - score_away)
+    # I motivi non ripetono punteggio e minuto: chi chiama li ha già e li stampa accanto, e nel
+    # messaggio di ingresso finivano scritti due volte nella stessa riga.
     if gol_totali < SOGLIA_GOL_AUTO_PREFERITI:
-        return False, f"{gol_totali} gol al {minuto}' (ne servono {SOGLIA_GOL_AUTO_PREFERITI})"
+        return False, f"{gol_totali} gol (ne servono {SOGLIA_GOL_AUTO_PREFERITI})"
     if minuto > MINUTO_GOL_AUTO_PREFERITI:
         return False, f"i {gol_totali} gol sono arrivati dopo il {MINUTO_GOL_AUTO_PREFERITI}'"
     # Lo scarto decide se la partita è ancora aperta: con 2 gol passa l'1-1 ma non il 2-0, con 3
     # gol passa il 2-1. Un 2-0 al 20' non è una partita viva, è una partita che si sta chiudendo.
     # Copre da sé anche la goleada: con al massimo un gol di scarto non ci si arriva mai.
     if scarto > SCARTO_MAX_AUTO_PREFERITI:
-        return False, f"{score_home}-{score_away} al {minuto}': partita già indirizzata"
-    return True, (f"{score_home}-{score_away} al {minuto}': {gol_totali} gol entro il "
-                  f"{MINUTO_GOL_AUTO_PREFERITI}' con la partita ancora aperta")
+        return False, f"{scarto} gol di scarto, partita già indirizzata"
+    return True, (f"{gol_totali} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' "
+                  f"con la partita ancora aperta")
 
 
 def _appendi_shadow_log(percorso_file, riga):
@@ -5975,10 +5977,10 @@ def processa_partita(fixture, notifiche_attive=True):
                     quote_ingresso = quote_1x2_per_fixture(fixture_id)
                     righe_ingresso = [
                         f"⭐ ENTRA NEI PREFERITI · {minuto}'",
-                        f"{home} - {away}",
+                        f"{home} {score_home}-{score_away} {away}",
                         f"{formatta_lega(league_name, league_country)}",
                         "",
-                        f"{score_home}-{score_away} — {motivo}",
+                        motivo,
                     ]
                     if goals:
                         marcatori = [f"{g['minute']}' {g['player']} ({g['team']})" for g in goals]
