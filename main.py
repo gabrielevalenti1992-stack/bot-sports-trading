@@ -190,6 +190,13 @@ SHADOW_LOG_STRATEGIE_FILE = data_path("shadow_log_strategie.jsonl")
 # non mandare nessun grafico piuttosto che mandarne uno inutile/fuorviante.
 MOMENTUM_MIN_STORICO = 6
 
+# Quante didascalie di notifica tenere per partita (vedi "didascalie_notifiche" in processa_partita):
+# servono a far ritrovare al bottone Momentum il testo esatto gia' mandato con quella notifica. Un
+# preferito viene notificato ogni INTERVALLO_CICLO_MOMENTUM (60s) per tutta la gara, quindi senza un
+# tetto se ne accumulerebbe un centinaio per fixture, tutte riscritte su disco ad ogni ciclo.
+# Momentum si clicca sulle notifiche recenti: le piu' vecchie sono peso morto.
+MAX_DIDASCALIE_RICORDATE = 30
+
 # Pesi per l'indice di intensità (usato dal comando /intensita e dal report automatico)
 PESO_INTENSITA_TIRI = 1
 PESO_INTENSITA_PORTA = 2
@@ -3459,7 +3466,13 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
             # gol, tutto quello che c'era) - si perde solo se il bot è stato riavviato tra
             # l'invio e il click (stato in memoria perso), nel qual caso si ricostruisce una
             # versione minima piuttosto che lasciare senza didascalia.
-            caption = stato.get("didascalie_notifiche", {}).get(message_id)
+            # Chiave stringa: stato_partite finisce su disco in JSON, che le chiavi le forza a
+            # stringa, e carica_stato_partite() riconverte solo quelle di primo livello (i
+            # fixture_id). Scritta e letta come intero, la didascalia risultava introvabile dopo
+            # ogni riavvio del bot e la notifica perdeva quote, statistiche e gol appena si
+            # cliccava Momentum. Si vedeva soprattutto nel canale preferiti, dove le notifiche
+            # arrivano ogni 60s ed e' li' che si clicca Momentum piu' spesso.
+            caption = stato.get("didascalie_notifiche", {}).get(str(message_id))
             if not caption:
                 caption = (f"{home} {stato.get('score_home', '?')}-{stato.get('score_away', '?')} {away}\n"
                            f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
@@ -5853,7 +5866,18 @@ def processa_partita(fixture, notifiche_attive=True):
                 # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
                 # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
                 # resta quello originale, invece di essere rimpiazzato da un testo minimo.
-                stato_partite[fixture_id].setdefault("didascalie_notifiche", {})[message_id_inviato] = messaggio
+                # Chiave stringa, la stessa forma con cui JSON la riscrive su disco: vedi il
+                # commento in cmd_momentum_da_bottone. Scritta come intero, dopo un riavvio non
+                # veniva piu' ritrovata.
+                didascalie = stato_partite[fixture_id].setdefault("didascalie_notifiche", {})
+                didascalie[str(message_id_inviato)] = messaggio
+                # Un preferito viene notificato ogni 60s per tutta la partita: senza un tetto qui
+                # si accumulano un centinaio di didascalie intere per fixture, riscritte su disco ad
+                # ogni ciclo. Momentum si clicca sulle notifiche recenti, le piu' vecchie non
+                # servono piu'.
+                if len(didascalie) > MAX_DIDASCALIE_RICORDATE:
+                    for vecchia in list(didascalie)[:-MAX_DIDASCALIE_RICORDATE]:
+                        del didascalie[vecchia]
         # Fuori orario: niente invio, ma lo stato sotto viene comunque aggiornato come se avessimo
         # notificato (timestamp_notifica azzerato, notified_final marcato) - altrimenti un
         # preferito verrebbe rimosso automaticamente solo perché è notte, non perché si è spento
