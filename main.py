@@ -626,7 +626,7 @@ RAPPORTO_VUOTE_SU_OK_PER_AVARIA = 2
 OSSERVAZIONI_STATISTICHE = []  # [(timestamp, (paese, lega), disponibili)]
 
 
-def registra_osservazione_statistiche(league_country, league_name, disponibili):
+def registra_osservazione_statistiche(league_country, league_name, disponibili, giornata=""):
     """Annota l'esito statistiche di UNA partita, per avere il quadro d'insieme del momento.
 
     Diversa da registra_esito_statistiche(): quella riceve un verdetto per lega (raro, pesato,
@@ -637,6 +637,9 @@ def registra_osservazione_statistiche(league_country, league_name, disponibili):
     taglio = adesso - FINESTRA_OSSERVAZIONI_STATISTICHE
     while OSSERVAZIONI_STATISTICHE and OSSERVAZIONI_STATISTICHE[0][0] < taglio:
         OSSERVAZIONI_STATISTICHE.pop(0)
+    # Dopo la potatura: registra_giornata_statistiche() interroga avaria_statistiche_diffusa(),
+    # che deve vedere anche l'osservazione appena aggiunta.
+    registra_giornata_statistiche(league_country, league_name, giornata, disponibili)
 
 
 def avaria_statistiche_diffusa():
@@ -656,6 +659,153 @@ def avaria_statistiche_diffusa():
     leghe_vuote = leghe_viste - leghe_ok
     return (len(leghe_vuote) >= LEGHE_VUOTE_MINIME_PER_AVARIA
             and len(leghe_vuote) >= RAPPORTO_VUOTE_SU_OK_PER_AVARIA * len(leghe_ok))
+
+
+# =============================================================================
+# ESCLUSIONE DEFINITIVA DALLA WHITELIST: leghe che non pubblicano MAI statistiche reali
+# =============================================================================
+# L'esclusione a 24h qui sopra è una misura di risparmio: smette di pagare due chiamate a vuoto per
+# una lega che oggi non dà dati, ma la riammette il giorno dopo. Serve anche un verdetto
+# definitivo, perché il bot non serve a sapere il risultato - quello si trova ovunque - ma a
+# leggere tiri, tiri in porta, corner e tiri in area mentre la partita è in corso. Un campionato
+# che quei quattro numeri non li pubblica mai occupa quota API e spazio in chat senza poter far
+# scattare una sola strategia: tanto vale toglierlo dalla whitelist e liberare le chiamate per i
+# campionati che i dati li danno.
+#
+# "Statistiche reali" = le stesse quattro di STATISTICHE_USATE, cioè esattamente ciò che
+# ha_statistiche_disponibili() controlla: una risposta con solo possesso palla e falli non conta
+# come copertura (vedi il caso Djurgardens del 16/08).
+#
+# Si contano GIORNATE DI CAMPIONATO, non giorni di calendario né partite né cicli, ed è la
+# differenza che rende la regola solida:
+#  - contare le PARTITE farebbe arrivare cinque "prove" in un pomeriggio solo, che è la stessa
+#    osservazione ripetuta - l'errore già costato le esclusioni sbagliate di MLS e K League;
+#  - contare i GIORNI di calendario non è la stessa cosa di contare i turni: una giornata di Serie
+#    A si gioca fra sabato, domenica e lunedì, quindi cinque giorni solari sono meno di due turni
+#    veri. Cinque giornate di campionato sono invece cinque turni, tipicamente più di un mese.
+# La giornata è quella dichiarata dall'API nel campo "round" del fixture (es. "Regular Season -
+# 1"), quindi è il turno vero del campionato e non una nostra approssimazione. Il conteggio parte
+# da quando il bot comincia a osservare quella lega: le giornate giocate prima non esistono.
+GIORNATE_SENZA_STATISTICHE_FILE = data_path("giornate_senza_statistiche.json")
+SOGLIA_GIORNATE_SENZA_STATISTICHE = 5
+# Le giornate osservate si tengono in memoria per lega: oltre questo numero le più vecchie si
+# buttano, tanto il verdetto guarda solo se si arriva a SOGLIA_GIORNATE_SENZA_STATISTICHE.
+MAX_GIORNATE_RICORDATE = 30
+VERSIONE_REGOLA_GIORNATE_SENZA_STATISTICHE = 1
+
+
+def carica_giornate_senza_statistiche():
+    if os.path.exists(GIORNATE_SENZA_STATISTICHE_FILE):
+        try:
+            with open(GIORNATE_SENZA_STATISTICHE_FILE, 'r') as f:
+                contenuto = json.load(f)
+            if (isinstance(contenuto, dict)
+                    and contenuto.get("versione") == VERSIONE_REGOLA_GIORNATE_SENZA_STATISTICHE):
+                return {(v["country"], v["name"]): v["stato"] for v in contenuto.get("voci", [])}
+            print("giornate_senza_statistiche: formato di una versione diversa, riparto da zero", flush=True)
+            return {}
+        except Exception as e:
+            print(f"Errore lettura {GIORNATE_SENZA_STATISTICHE_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_giornate_senza_statistiche(dati):
+    voci = [{"country": paese, "name": nome, "stato": stato} for (paese, nome), stato in dati.items()]
+    salva_json_atomico(GIORNATE_SENZA_STATISTICHE_FILE,
+                       {"versione": VERSIONE_REGOLA_GIORNATE_SENZA_STATISTICHE, "voci": voci})
+
+
+GIORNATE_SENZA_STATISTICHE = carica_giornate_senza_statistiche()
+print(f"giornate_senza_statistiche recuperate da disco: {len(GIORNATE_SENZA_STATISTICHE)} leghe "
+      f"({sum(1 for s in GIORNATE_SENZA_STATISTICHE.values() if s.get('esclusa_definitivamente'))} "
+      f"escluse dalla whitelist)", flush=True)
+
+
+def _giornate_senza_statistiche_contate(stato):
+    """Giornate CHIUSE in cui la lega non ha pubblicato niente e il dato è attendibile.
+
+    Una giornata ancora aperta non conta: il 16/08 diverse leghe sono rimaste vuote per oltre 40
+    minuti di gioco e poi hanno pubblicato tutto (Beveren, Bielefeld). Finché il turno è in corso
+    non si sa ancora com'è andato, e aspettare non costa niente."""
+    return [nome for nome, g in stato.get("giornate", {}).items()
+            if g.get("chiusa") and not g.get("pubblicato") and not g.get("inattendibile")]
+
+
+def registra_giornata_statistiche(league_country, league_name, giornata, disponibili):
+    """Tiene il conto delle giornate di campionato senza una sola statistica reale.
+
+    `giornata` è il campo "round" del fixture. Se l'API non lo fornisce si ripiega sulla data: la
+    regola resta valida, solo un po' più severa (più giornate a parità di turni)."""
+    chiave = (league_country.lower(), league_name.lower())
+    stato = GIORNATE_SENZA_STATISTICHE.get(
+        chiave, {"giornate": {}, "esclusa_definitivamente": 0})
+    if stato.get("esclusa_definitivamente"):
+        return
+
+    giornata = (giornata or "").strip()
+    if not giornata:
+        giornata = "data " + datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+
+    giornate = stato.setdefault("giornate", {})
+    corrente = giornate.setdefault(giornata, {"pubblicato": False, "inattendibile": False,
+                                              "chiusa": False})
+    # Vedere una giornata diversa significa che le altre sono finite: da quel momento possono
+    # essere giudicate. Chi è già chiusa resta chiusa, così un recupero giocato fuori turno non
+    # riapre (né fa ri-contare) un turno già archiviato.
+    for nome, altra in giornate.items():
+        if nome != giornata:
+            altra["chiusa"] = True
+
+    if disponibili:
+        # Un solo tiro pubblicato basta: la lega i dati li dà. Si azzera tutto lo storico, non solo
+        # la giornata in corso - le giornate vuote di prima erano evidentemente un problema
+        # passeggero dell'API, non una lacuna di copertura.
+        stato["giornate"] = {giornata: {"pubblicato": True, "inattendibile": False, "chiusa": False}}
+        GIORNATE_SENZA_STATISTICHE[chiave] = stato
+        salva_giornate_senza_statistiche(GIORNATE_SENZA_STATISTICHE)
+        return
+
+    if avaria_statistiche_diffusa():
+        corrente["inattendibile"] = True
+        # L'avaria si riconosce solo dopo aver visto abbastanza leghe: le prime osservate a
+        # finestra fredda (primo ciclo dopo un riavvio) passerebbero di qui con l'avaria ancora
+        # invisibile, e quella giornata risulterebbe una prova valida contro la loro lega.
+        # Siccome un guasto riguarda tutti, si marcano inattendibili tutte le giornate aperte.
+        for altro in GIORNATE_SENZA_STATISTICHE.values():
+            for altra in altro.get("giornate", {}).values():
+                if not altra.get("chiusa"):
+                    altra["inattendibile"] = True
+
+    senza = _giornate_senza_statistiche_contate(stato)
+    if len(senza) >= SOGLIA_GIORNATE_SENZA_STATISTICHE:
+        stato["esclusa_definitivamente"] = time.time()
+        log(f"  Lega '{league_name}' ({league_country}) ESCLUSA DALLA WHITELIST: "
+            f"{len(senza)} giornate di campionato senza statistiche reali ({', '.join(sorted(senza))})")
+        invia_messaggio_telegram(
+            f"🚫 Campionato tolto dalla whitelist\n\n"
+            f"{league_name} ({league_country})\n\n"
+            f"In {len(senza)} giornate di campionato non ha mai pubblicato una statistica reale "
+            f"(tiri, tiri in porta, corner, tiri in area): solo risultati. Non verrà più seguito, "
+            f"così la quota API resta ai campionati che i dati li danno.\n\n"
+            f"Giornate: {', '.join(sorted(senza))}\n\n"
+            f"Le giornate in cui l'API era guasta su molti campionati insieme non sono state "
+            f"conteggiate.")
+    elif len(giornate) > MAX_GIORNATE_RICORDATE:
+        # Si buttano le più vecchie fra quelle che non fanno testo (pubblicate o inattendibili):
+        # quelle che contano vanno tenute tutte, sono al massimo SOGLIA_GIORNATE_SENZA_STATISTICHE.
+        da_tenere = set(senza) | {giornata}
+        for nome in list(giornate)[:-MAX_GIORNATE_RICORDATE]:
+            if nome not in da_tenere:
+                del giornate[nome]
+
+    GIORNATE_SENZA_STATISTICHE[chiave] = stato
+    salva_giornate_senza_statistiche(GIORNATE_SENZA_STATISTICHE)
+
+
+def lega_esclusa_definitivamente(league_country, league_name):
+    stato = GIORNATE_SENZA_STATISTICHE.get((league_country.lower(), league_name.lower()))
+    return bool(stato and stato.get("esclusa_definitivamente"))
+
 
 # =============================================================================
 # STATO PARTITE LIVE: punteggi, storico statistiche (usato da /momentum e dal delta 15 min a
@@ -1362,6 +1512,14 @@ def campionato_valido(league_name, league_type, league_country=""):
     # di squadre più note), senza nessuna indicazione visibile del motivo - nemmeno /diagnostica lo
     # segnala, perché filtra anch'essa tramite campionato_valido().
     if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_per_mancanza_statistiche(league_country, league_name):
+        return False
+    # Esclusione definitiva: la lega ha attraversato SOGLIA_GIORNATE_SENZA_STATISTICHE giornate di
+    # campionato senza pubblicare un solo tiro. Vale la stessa deroga per le competizioni
+    # internazionali a match esatto spiegata qui sopra, e per lo stesso motivo: lì la copertura
+    # cambia partita per partita a seconda delle federazioni in campo, non è una proprietà della
+    # competizione. Per tornare a seguire una lega tolta di qui basta cancellare la sua voce da
+    # giornate_senza_statistiche.json (o il file intero).
+    if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_definitivamente(league_country, league_name):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
         # Solo whitelist statica curata: fino a poco fa si passava anche qualunque campionato
@@ -4822,6 +4980,9 @@ def processa_partita(fixture, notifiche_attive=True):
         league = fixture.get("league", {})
         league_name = league.get("name", "")
         league_country = league.get("country", "")
+        # Giornata di campionato dichiarata dall'API (es. "Regular Season - 1"): è il turno vero,
+        # usato per contare le giornate senza statistiche (vedi registra_giornata_statistiche).
+        league_round = league.get("round", "")
 
         home = fixture["teams"]["home"]["name"]
         away = fixture["teams"]["away"]["name"]
@@ -5070,7 +5231,7 @@ def processa_partita(fixture, notifiche_attive=True):
             BACKUP_HISTORY_MOMENTUM[str(fixture_id)] = history
             salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
             registra_esito_statistiche(league_country, league_name, True)
-            registra_osservazione_statistiche(league_country, league_name, True)
+            registra_osservazione_statistiche(league_country, league_name, True, league_round)
             if fine_1h_appena_avvenuta:
                 stato_partite[fixture_id]["stats_fine_1h"] = current_stats
                 log(f"    📸 Statistiche di fine 1° tempo salvate (confronto 1°T/2°T, strategia Rimonta)")
@@ -5090,7 +5251,7 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
                 stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
                 log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
-                registra_osservazione_statistiche(league_country, league_name, False)
+                registra_osservazione_statistiche(league_country, league_name, False, league_round)
                 # Il verdetto sulla LEGA lo dà solo una partita che da sola ha già collezionato
                 # SOGLIA_SENZA_STATISTICHE risposte vuote di fila (~3 cicli, diversi minuti di
                 # tempo dato all'API), e conta una volta sola per partita. Prima bastava una
