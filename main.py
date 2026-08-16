@@ -216,6 +216,16 @@ ULTIMO_REPORT_INTENSITA = 0
 DIAGNOSTICA_AUTOMATICA_ATTIVA = True
 INTERVALLO_DIAGNOSTICA_AUTOMATICA = 1800  # 30 minuti
 ULTIMA_DIAGNOSTICA_AUTOMATICA = 0
+# Da quanto tempo l'ultimo punto statistiche raccolto rende una partita "ferma". Serve perché tutti
+# i controlli sulle statistiche guardavano se lo storico fosse VUOTO, e lo storico è cumulativo:
+# bastava un solo punto raccolto al 5' perché una partita risultasse sana per il resto della gara,
+# anche con le statistiche ferme da un'ora. È esattamente il buco che il guasto del feed del 16/08
+# avrebbe reso invisibile su tutte le partite che avevano già raccolto qualcosa prima che l'API
+# smettesse di pubblicare. Il /diagnostica manuale l'età dell'ultimo punto la calcolava già
+# ("ultimo aggiornamento Ns fa"): mancava solo a quello automatico, che è quello che avvisa da solo.
+# 900s = 15 minuti, cioè cinque cicli attivi saltati di fila: abbastanza per non segnalare un
+# rate-limit passeggero, poco per accorgersi di uno stallo vero mentre la partita è ancora in corso.
+SOGLIA_STATISTICHE_FERME = 900
 # Anomalie già mandate in chat, per partita: {fixture_id: {"STATISTICHE", ...}}. Serve a NON
 # ripetere ogni 30 minuti la stessa identica anomalia sulla stessa partita (una partita senza
 # statistiche generava lo stesso avviso, legenda inclusa, per tutti i 90 minuti). Si notifica al
@@ -4335,6 +4345,10 @@ LEGENDA_DIAGNOSTICA = (
     "(rate-limit, timeout, errore di rete). È l'unico caso in cui le statistiche mancanti sono "
     "davvero un problema di pipeline: di solito rientra da solo al ciclo dopo, se persiste "
     "controllare quota giornaliera e stato dell'API.\n"
+    "STATISTICHE FERME: la partita le statistiche le aveva, e poi ha smesso di riceverne per un "
+    "pezzo (15 minuti o più). Diverso da STATISTICHE, che riguarda le partite che non ne hanno mai "
+    "avute: qui la pipeline ha funzionato e si è interrotta a metà, quindi i dati mostrati sono "
+    "vecchi anche se ci sono. Di solito è l'API che smette di pubblicare per un po'.\n"
     "COPERTURA STATISTICHE: l'API risponde regolarmente ma per quella partita non pubblica "
     "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita (gol, cartellini, "
     "rigori, recuperi) ma mostrerà N/D al posto di tiri/corner e non potrà far scattare le "
@@ -4424,6 +4438,20 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
 
         history = stato.get("history", [])
         esito_stats = stato.get("stats_ultimo_esito")
+        # Età dell'ultimo punto raccolto: "ci sono statistiche" non vuol dire "ne stanno arrivando".
+        eta_stats = (ora - history[-1]["timestamp"]) if history else None
+        stats_fresche = eta_stats is not None and eta_stats <= SOGLIA_STATISTICHE_FERME
+        if history and not stats_fresche and minuto_api > 10:
+            # La partita ha raccolto statistiche e poi si è fermata: non lo vedeva nessun controllo,
+            # perché tutti guardavano solo se lo storico fosse vuoto (vedi SOGLIA_STATISTICHE_FERME).
+            dettaglio_fermo = {
+                "vuote": f"l'API risponde ma non pubblica più statistiche "
+                         f"({stato.get('stats_vuote_consecutive', 0)} risposte vuote di fila)",
+                "errore": "le chiamate alle statistiche stanno fallendo (rate-limit/timeout/rete)",
+            }.get(esito_stats, "nessun nuovo dato dall'ultima raccolta")
+            trovate["STATISTICHE FERME"] = (
+                f"STATISTICHE FERME - {home}-{away}: ultime statistiche raccolte "
+                f"{int(eta_stats // 60)} min fa (al {minuto_api}' di gioco) - {dettaglio_fermo}")
         if not history and minuto_api > 10:
             # Due cose diverse che prima venivano dette con la stessa frase: se l'API risponde
             # regolarmente ma per questa partita non ha statistiche, non c'è niente da riparare
@@ -4456,14 +4484,25 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 f"SHADOW-LOG VALORE - {home}-{away}: quota presente ma nessuno snapshot scritto al {minuto_api}'")
 
         ultimo_strat = stato.get("ultimo_snapshot_strategie")
-        if history and not ultimo_strat and minuto_api > 16:
+        # Su stats_fresche e non su history: con lo storico ripristinato dal backup dopo un riavvio
+        # (vedi BACKUP_HISTORY_MOMENTUM) e le statistiche che nel frattempo falliscono, la condizione
+        # su history diceva "statistiche presenti ma nessuno snapshot" - una frase falsa, perché le
+        # statistiche in quel momento non ci sono affatto. Lo snapshot manca come conseguenza, non
+        # come causa: il problema vero è già segnalato da STATISTICHE FERME.
+        if stats_fresche and not ultimo_strat and minuto_api > 16:
             trovate["SHADOW-LOG STRATEGIE"] = (
                 f"SHADOW-LOG STRATEGIE - {home}-{away}: statistiche presenti ma nessuno snapshot scritto al {minuto_api}'")
 
         anomalie.extend(trovate.values())
         anomalie_nuove.extend(_anomalie_nuove(fid, trovate, registra=notifiche_attive))
 
-        stats_txt = "si" if history else f"no (esito API: {esito_stats or 'mai chiamata'})"
+        # L'età dell'ultimo punto va scritta anche quando è tutto a posto: è il dato che rende la
+        # riga verificabile a ritroso, invece di un "si" che non distingue "aggiornata adesso" da
+        # "ferma da un'ora".
+        if history:
+            stats_txt = f"si ({int(eta_stats // 60)} min fa)" if not stats_fresche else "si (fresche)"
+        else:
+            stats_txt = f"no (esito API: {esito_stats or 'mai chiamata'})"
         righe_log.append(
             f"{home}-{away} {minuto_api}': tracciata=si, stats={stats_txt}, "
             f"quota={'si' if isinstance(quote, dict) else 'no'}, "
