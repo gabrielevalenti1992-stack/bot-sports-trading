@@ -519,7 +519,15 @@ MINUTO_MINIMO_VERDETTO_STATISTICHE = 60
 # state prese su prove troppo deboli (vedi la MLS), e senza questo giro di versione resterebbero
 # valide su disco fino alla loro scadenza naturale, cioè fino a 24h dopo il deploy della
 # correzione. Azzerando il file, al primo avvio la lega esclusa per sbaglio torna subito visibile.
-VERSIONE_REGOLA_SENZA_STATISTICHE = 3
+#
+# Portata a 4 insieme al controllo sull'avaria diffusa (vedi avaria_statistiche_diffusa): le
+# esclusioni decise durante il guasto del feed del 16/08 - K League 1 e K League 2 alle 11:58, con
+# 12 partite vuote su 13 in sei campionati e quattro paesi - sono state prese su prove che il
+# controllo nuovo avrebbe scartato in blocco. Restando su disco resterebbero valide fino a 24h
+# dopo il deploy della correzione, cioè per quasi tutta la loro durata: tanto varrebbe non aver
+# corretto niente. Con questo giro di versione, al primo avvio i campionati esclusi per sbaglio
+# tornano subito visibili.
+VERSIONE_REGOLA_SENZA_STATISTICHE = 4
 
 
 def carica_leghe_senza_statistiche():
@@ -588,6 +596,66 @@ def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
     if not stato:
         return False
     return time.time() < stato.get("esclusa_fino", 0)
+
+
+# Una risposta vuota non distingue da sola due situazioni molto diverse: "questa lega non ha
+# statistiche" (verdetto giusto, la lega va esclusa) e "in questo momento l'API non sta pubblicando
+# statistiche per nessuno" (guasto esterno e temporaneo, escludere sarebbe un errore). Il segnale
+# che le separa il bot ce l'ha già e finora lo buttava via: quante ALTRE leghe, nello stesso
+# momento, stanno rispondendo vuote. Una lacuna di copertura riguarda una lega per volta; un
+# guasto del feed le spegne tutte insieme.
+#
+# Caso reale del 16/08 (log Render, istanza ...-bbwtp, ciclo delle 11:51:49): 12 partite su 13
+# vuote nello stesso ciclo, su 6 campionati in whitelist e 4 paesi diversi - Jupiler Pro League
+# (Belgio), 2. Bundesliga x3 (Germania), K League 1 x3 e K League 2 x4 (Corea del Sud), J League 2
+# (Giappone). L'unica a pubblicare era ADO Den Haag-Groningen (Olanda). Alle 11:58, sette minuti
+# dopo il deploy della soglia dei 60', K League 1 e K League 2 sono state comunque escluse per 24h
+# con le partite al 61', 62', 62' e 64': il minuto minimo non protegge da un guasto che dura piu'
+# di un'ora, perche' le partite ci arrivano lo stesso, al minuto giusto e ancora vuote.
+#
+# Le osservazioni si tengono su una finestra scorrevole invece che sul singolo ciclo: dentro un
+# ciclo le partite sono processate in fila, quindi la prima che vota vedrebbe un quadro ancora
+# quasi vuoto e il guasto risulterebbe invisibile proprio a chi decide.
+FINESTRA_OSSERVAZIONI_STATISTICHE = 900  # 15 min: ~5 cicli attivi
+# Sotto le 3 leghe osservate il campione e' troppo piccolo per parlare di "diffuso" (di notte
+# possono esserci due sole leghe live, entrambe davvero scoperte): in quel caso si lascia decidere
+# la regola normale. Sopra, si chiede che le leghe vuote siano almeno il doppio di quelle che
+# pubblicano - con 12 partite vuote su 13 il rapporto reale era 5 a 1.
+LEGHE_VUOTE_MINIME_PER_AVARIA = 3
+RAPPORTO_VUOTE_SU_OK_PER_AVARIA = 2
+OSSERVAZIONI_STATISTICHE = []  # [(timestamp, (paese, lega), disponibili)]
+
+
+def registra_osservazione_statistiche(league_country, league_name, disponibili):
+    """Annota l'esito statistiche di UNA partita, per avere il quadro d'insieme del momento.
+
+    Diversa da registra_esito_statistiche(): quella riceve un verdetto per lega (raro, pesato,
+    persistito su disco), questa riceve ogni singola risposta dell'API (frequente, solo in memoria)
+    e serve unicamente a capire se il feed statistiche sta funzionando in generale."""
+    adesso = time.time()
+    OSSERVAZIONI_STATISTICHE.append((adesso, (league_country.lower(), league_name.lower()), disponibili))
+    taglio = adesso - FINESTRA_OSSERVAZIONI_STATISTICHE
+    while OSSERVAZIONI_STATISTICHE and OSSERVAZIONI_STATISTICHE[0][0] < taglio:
+        OSSERVAZIONI_STATISTICHE.pop(0)
+
+
+def avaria_statistiche_diffusa():
+    """True se nella finestra recente le statistiche mancano su troppe leghe diverse insieme.
+
+    Una lega conta come "che pubblica" se ha dato statistiche almeno una volta nella finestra: le
+    partite appena iniziate sono vuote anche nei campionati coperti, e non devono far sembrare
+    guasto un feed sano."""
+    taglio = time.time() - FINESTRA_OSSERVAZIONI_STATISTICHE
+    leghe_ok, leghe_viste = set(), set()
+    for quando, chiave, disponibili in OSSERVAZIONI_STATISTICHE:
+        if quando < taglio:
+            continue
+        leghe_viste.add(chiave)
+        if disponibili:
+            leghe_ok.add(chiave)
+    leghe_vuote = leghe_viste - leghe_ok
+    return (len(leghe_vuote) >= LEGHE_VUOTE_MINIME_PER_AVARIA
+            and len(leghe_vuote) >= RAPPORTO_VUOTE_SU_OK_PER_AVARIA * len(leghe_ok))
 
 # =============================================================================
 # STATO PARTITE LIVE: punteggi, storico statistiche (usato da /momentum e dal delta 15 min a
@@ -2081,15 +2149,33 @@ def estrai_valore_stat(stats_team, nome_stat):
     return 0
 
 
+# Le uniche statistiche che il bot legge davvero (vedi estrai_current_stats): la disponibilità va
+# giudicata su queste, non su tutta la risposta.
+STATISTICHE_USATE = ("total shots", "shots on goal", "corner kicks", "shots insidebox")
+
+
 def ha_statistiche_disponibili(stats):
-    """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre."""
+    """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre.
+
+    Guarda SOLO le statistiche che il bot usa davvero. Prima bastava che una voce QUALUNQUE della
+    risposta fosse valorizzata - anche possesso palla, falli o cartellini, che il bot non legge mai
+    - per prendere per buona tutta la risposta. Ma l'API pubblica i dati generali prima di tiri e
+    corner: la risposta passava il controllo, poi estrai_valore_stat() traduceva in 0 i quattro
+    valori davvero mancanti (None -> 0), e in notifica finiva "Tiri totali: 0 - 0" presentato come
+    dato reale, sotto l'intestazione "Statistiche ultimi 15 min", invece del "N/D" previsto per il
+    dato mancante.
+
+    Visto il 16/08 su Djurgardens-AIK (Allsvenskan): gol al 10' e "0 - 0" tiri al 12'. Le due cose
+    insieme non possono stare, un gol un tiro lo richiede. Lo zero era un None travestito."""
     if not stats or len(stats) < 2:
         return False
     stats_home = stats[0].get("statistics", []) or []
     stats_away = stats[1].get("statistics", []) or []
     if not stats_home or not stats_away:
         return False
-    return any(s.get("value") is not None for s in stats_home + stats_away)
+    return any(s.get("value") is not None
+               for s in stats_home + stats_away
+               if s.get("type", "").lower() in STATISTICHE_USATE)
 
 
 def estrai_current_stats(stats_home, stats_away):
@@ -4984,6 +5070,7 @@ def processa_partita(fixture, notifiche_attive=True):
             BACKUP_HISTORY_MOMENTUM[str(fixture_id)] = history
             salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
             registra_esito_statistiche(league_country, league_name, True)
+            registra_osservazione_statistiche(league_country, league_name, True)
             if fine_1h_appena_avvenuta:
                 stato_partite[fixture_id]["stats_fine_1h"] = current_stats
                 log(f"    📸 Statistiche di fine 1° tempo salvate (confronto 1°T/2°T, strategia Rimonta)")
@@ -5003,6 +5090,7 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
                 stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
                 log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
+                registra_osservazione_statistiche(league_country, league_name, False)
                 # Il verdetto sulla LEGA lo dà solo una partita che da sola ha già collezionato
                 # SOGLIA_SENZA_STATISTICHE risposte vuote di fila (~3 cicli, diversi minuti di
                 # tempo dato all'API), e conta una volta sola per partita. Prima bastava una
@@ -5016,8 +5104,18 @@ def processa_partita(fixture, notifiche_attive=True):
                 if (minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE
                         and vuote >= SOGLIA_SENZA_STATISTICHE
                         and not stato_partite[fixture_id].get("verdetto_lega_registrato")):
-                    stato_partite[fixture_id]["verdetto_lega_registrato"] = True
-                    registra_esito_statistiche(league_country, league_name, False)
+                    # Ultimo filtro prima di condannare la lega: se in questo momento le
+                    # statistiche mancano su molte leghe diverse insieme, questa partita non sta
+                    # dimostrando niente sulla SUA lega - sta solo osservando un feed guasto (vedi
+                    # avaria_statistiche_diffusa). Il verdetto non viene registrato e nemmeno
+                    # marcato come dato: la partita potra' rivotare piu' avanti, quando il quadro
+                    # sara' tornato leggibile.
+                    if avaria_statistiche_diffusa():
+                        log("    ⏸️ Verdetto sulla lega sospeso: statistiche assenti su molte leghe "
+                            "insieme, sembra un guasto del feed e non una lega scoperta")
+                    else:
+                        stato_partite[fixture_id]["verdetto_lega_registrato"] = True
+                        registra_esito_statistiche(league_country, league_name, False)
 
         if status_short in ("FT", "AET", "PEN"):
             stato = stato_partite.get(fixture_id, {})
@@ -5141,14 +5239,6 @@ def processa_partita(fixture, notifiche_attive=True):
             }
             return
 
-        if str(fixture_id) in SILENCED_MATCHES:
-            muted_data = SILENCED_MATCHES[str(fixture_id)]
-            if "muted_at_minute" not in muted_data:
-                muted_data["muted_at_minute"] = minuto
-                save_silenced(SILENCED_MATCHES)
-            log(f"  -> Silenziata, skip")
-            return
-
         if current_stats:
             delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats, minuto)
             stats_dict = delta_stats
@@ -5198,6 +5288,32 @@ def processa_partita(fixture, notifiche_attive=True):
                     fixture_id, home, away, minuto, score_home, score_away,
                     probabilita_no_vig_snapshot, stats_dict)
                 stato_partite[fixture_id]["ultimo_snapshot_valore"] = time.time()
+
+        # Silenziare una partita è una scelta sulle NOTIFICHE, non sulla raccolta dati: da qui in
+        # giù si decide solo cosa mandare in chat, quindi il taglio va fatto qui e non prima.
+        # Stava sopra, prima dei due shadow-log, e li saltava entrambi - stesso identico problema
+        # già corretto per l'esito finale poco più sopra ("l'esito va registrato sempre, notifica o
+        # no: senza, gli snapshot già raccolti restano orfani per sempre"), che però era rimasto
+        # valido solo per il risultato e non per gli snapshot che lo precedono.
+        #
+        # Lo shadow-log serve a calibrare le strategie e nasce apposta per non avere bias di
+        # selezione (vedi INTERVALLO_SNAPSHOT_VALORE): perdere le partite silenziate lo reintroduce
+        # dalla porta di servizio, e per giunta filtrato da una scelta manuale.
+        #
+        # Visto in produzione il 16/08, ciclo #10 delle 12:22: Odense-AC Horsens al 22',
+        # SK Beveren-Anderlecht al 45' e Arminia Bielefeld-Energie Cottbus al 45' avevano tutte
+        # statistiche piene ("Tiri 3-2", "Tiri 1-6", "Tiri 8-2") e finivano su "-> Silenziata,
+        # skip" senza scrivere nulla, mentre Hannover 96-VfL Wolfsburg - stessa lega, stesso
+        # minuto, stesso ciclo, ma non silenziata - lo scriveva regolarmente. La diagnostica
+        # automatica le segnalava come anomalia "statistiche presenti ma nessuno snapshot scritto":
+        # aveva ragione, ed era anche l'unico modo in cui il buco si vedeva da fuori.
+        if str(fixture_id) in SILENCED_MATCHES:
+            muted_data = SILENCED_MATCHES[str(fixture_id)]
+            if "muted_at_minute" not in muted_data:
+                muted_data["muted_at_minute"] = minuto
+                save_silenced(SILENCED_MATCHES)
+            log(f"  -> Silenziata, skip")
+            return
 
         # Preferito "raffreddato": se sono passati troppi minuti dall'ultima notifica inviata,
         # la partita si è spenta - si rimuove dai preferiti PRIMA di valutare deve_notificare(),
