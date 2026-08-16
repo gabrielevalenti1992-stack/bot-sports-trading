@@ -134,6 +134,15 @@ MOMENTUM_CORNER = 4
 # porta o 1 corner in più negli ultimi 15 min.
 SOGLIA_MIN_CAMBIO_PREFERITI = 2
 
+# Salto di ritmo: il criterio sopra misura quanto è cambiato DALL'ULTIMA NOTIFICA, quindi in una
+# fase concitata fatta di tanti piccoli incrementi (un tiro per ciclo) non scatta mai, pur essendo
+# esattamente il momento in cui la partita merita attenzione. Questo secondo criterio guarda invece
+# il totale del blocco di 15 minuti corrente: se il blocco è caldo la notifica parte lo stesso.
+# Scatta al massimo una volta per blocco (vedi blocco_ultima_notifica in processa_partita), quindi
+# aggiunge al massimo ~6 messaggi in una partita intera e non può degenerare.
+SOGLIA_RITMO_NOTIFICA_PREFERITI = 4       # tiri combinati nel blocco
+SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = 2  # oppure tiri in porta combinati nel blocco
+
 # Preferiti "raffreddati": se passano questi secondi senza che parta nessuna notifica (nessun
 # evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove automaticamente
 # dai preferiti e torna alle regole normali, invece di restare agganciata per sempre a soglie più
@@ -462,6 +471,8 @@ try:
     MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
     SOGLIA_MIN_CAMBIO_PREFERITI = config.get("soglia_min_cambio_preferiti", SOGLIA_MIN_CAMBIO_PREFERITI)
+    SOGLIA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_ritmo_notifica_preferiti", SOGLIA_RITMO_NOTIFICA_PREFERITI)
+    SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_porta_ritmo_notifica_preferiti", SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI)
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
@@ -4965,6 +4976,26 @@ def cmd_aggiornastorico(chat_id):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
+def invia_messaggio_uscita_preferiti(home, away, minuto, score_home, score_away, motivo, stato):
+    """Chiude il filo di una partita nel canale preferiti, dicendo perché non se ne parla più.
+
+    Senza, il canale resta pieno di conversazioni senza finale: gli aggiornamenti si interrompono
+    e basta, e a distanza di ore non si capisce se la partita è finita, si è spenta o è stata
+    tolta. Va nel CANALE, non nella chat principale: è lì che la partita è vissuta."""
+    righe = [
+        f"🏁 ESCE DAI PREFERITI · {minuto}'",
+        f"{home} {score_home}-{score_away} {away}",
+        "",
+        motivo,
+    ]
+    # Confronto 1°T/2°T se disponibile: è il riepilogo che rende utile rileggere il filo dopo.
+    stats_1h = stato.get("stats_fine_1h")
+    history = stato.get("history", [])
+    if stats_1h and history:
+        righe.append("\n" + testo_confronto_tempi(stats_1h, history[-1]["stats"]))
+    invia_messaggio_telegram("\n".join(righe), chat_id=TELEGRAM_CHAT_ID_PREFERITI)
+
+
 def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away):
     """Partita che si sblocca presto restando aperta: due gol entro il 25' con al massimo un gol
     di scarto.
@@ -5149,6 +5180,18 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
                 return True
             if (d_corner[0] + d_corner[1]) >= SOGLIA_MIN_CAMBIO_PREFERITI:
                 return True
+            # Salto di ritmo: i controlli qui sopra misurano il cambiamento DALL'ULTIMA NOTIFICA,
+            # quindi una fase concitata fatta di tanti piccoli incrementi (un tiro per ciclo) non
+            # li supera mai, pur essendo il momento in cui la partita merita attenzione. Questo
+            # guarda il totale del blocco di 15 minuti, e scatta al massimo una volta per blocco:
+            # se in questo blocco una notifica è già partita - per un gol, per le soglie sopra, per
+            # qualunque motivo - non se ne aggiunge una seconda.
+            if stato.get("blocco_ultima_notifica") != _blocco_minuto(minuto):
+                tiri_blocco = sum(delta_stats.get("Tiri totali", (0, 0)))
+                porta_blocco = d_porta[0] + d_porta[1]
+                if (tiri_blocco >= SOGLIA_RITMO_NOTIFICA_PREFERITI
+                        or porta_blocco >= SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI):
+                    return True
         return False
 
     tiri_totali = tiri_casa + tiri_ospite
@@ -5701,6 +5744,29 @@ def processa_partita(fixture, notifiche_attive=True):
         # soglie più permissive per sempre.
         if str(fixture_id) in FAVORITE_MATCHES:
             stato_fav = stato_partite.setdefault(fixture_id, {})
+            # Preferito senza statistiche: esce. La regola d'ingresso guarda solo il punteggio,
+            # apposta per funzionare quando l'API tace, ma il canale serve a leggere tiri, tiri in
+            # porta e corner mentre si gioca - e senza quelli non può far scattare nessuna
+            # strategia, pur costando il triplo di chiamate (60s invece di 180s). Meglio liberare
+            # il posto per una partita che i dati li ha.
+            # Si guarda l'assenza CONFERMATA, non un buco passeggero: esito "vuote" ripetuto
+            # SOGLIA_SENZA_STATISTICHE volte, la stessa prova che usa la diagnostica per dire
+            # "l'API risponde ma non pubblica statistiche per questa partita". Un rate-limit o un
+            # timeout lasciano esito "errore" e non contano.
+            if (stato_fav.get("stats_ultimo_esito") == "vuote"
+                    and stato_fav.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE):
+                FAVORITE_MATCHES.discard(str(fixture_id))
+                save_favorites(FAVORITE_MATCHES)
+                # Non riproponibile: senza questo, la regola sui gol la rimetterebbe dentro al
+                # ciclo successivo, visto che il punteggio non è cambiato.
+                stato_fav["auto_preferito_processato"] = True
+                log("    ⭐➡️ Preferito rimosso: l'API non pubblica statistiche per questa partita")
+                if notifiche_attive:
+                    invia_messaggio_uscita_preferiti(
+                        home, away, minuto, score_home, score_away,
+                        "l'API non pubblica statistiche per questa partita",
+                        stato_fav)
+                return
             ultimo_invio_fav = stato_fav.get("timestamp_notifica", 0)
             # Il tempo di silenzio va misurato in minuti GIOCATI, non di orologio: durante
             # l'intervallo (status "HT", elapsed assente) non arrivano notifiche semplicemente
@@ -5730,9 +5796,10 @@ def processa_partita(fixture, notifiche_attive=True):
                 minuti_senza_notifica = DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
                 log(f"    ⭐➡️ Preferito rimosso automaticamente: nessuna notifica da oltre {minuti_senza_notifica} min")
                 if notifiche_attive:
-                    invia_messaggio_telegram(
-                        f"⭐➡️ {home} vs {away} rimossa automaticamente dai preferiti: nessuna notifica rilevante da {minuti_senza_notifica} minuti. Torna alle notifiche/soglie normali."
-                    )
+                    invia_messaggio_uscita_preferiti(
+                        home, away, minuto, score_home, score_away,
+                        f"si è spenta, nessun cambiamento da {minuti_senza_notifica} minuti giocati",
+                        stato_fav)
         elif not stato_partite.get(fixture_id, {}).get("auto_preferito_processato"):
             # Partita che parte già "a razzo" (tanti tiri o gol nei primissimi minuti): valutata
             # una sola volta per partita, cosi' se l'utente la rimuove in seguito non viene
@@ -5751,10 +5818,32 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["auto_preferito_processato"] = True
                 log(f"    ⭐ Aggiunta automaticamente ai preferiti al {minuto}': {motivo}")
                 if notifiche_attive:
-                    invia_messaggio_telegram(
-                        f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti al {minuto}': {motivo}.\n"
-                        f"Risultato {score_home}-{score_away}. Rimuovila dai preferiti se non ti interessa seguirla."
-                    )
+                    # Nel CANALE preferiti, non nella chat principale: è il messaggio che apre la
+                    # partita là dove poi vivrà. Prima finiva nella chat principale (chat_id
+                    # omesso), e il canale si ritrovava un flusso di aggiornamenti senza inizio.
+                    quote_ingresso = quote_1x2_per_fixture(fixture_id)
+                    righe_ingresso = [
+                        f"⭐ ENTRA NEI PREFERITI · {minuto}'",
+                        f"{home} - {away}",
+                        f"{formatta_lega(league_name, league_country)}",
+                        "",
+                        f"{score_home}-{score_away} — {motivo}",
+                    ]
+                    if goals:
+                        marcatori = [f"{g['minute']}' {g['player']} ({g['team']})" for g in goals]
+                        righe_ingresso.append("\nGol: " + " · ".join(marcatori))
+                    if isinstance(quote_ingresso, dict):
+                        righe_ingresso.append(
+                            f"Quote 1X2 iniziali: {quote_ingresso['casa']:.2f} - "
+                            f"{quote_ingresso['pareggio']:.2f} - {quote_ingresso['ospite']:.2f}")
+                    if current_stats:
+                        righe_ingresso.append(
+                            f"Statistiche: Tiri {tiri_casa}-{tiri_ospite} · "
+                            f"Porta {tiri_p_casa}-{tiri_p_ospite} · Corner {corner_casa}-{corner_ospite}")
+                    else:
+                        righe_ingresso.append("Statistiche: N/D (l'API non le pubblica per questa partita)")
+                    invia_messaggio_telegram("\n".join(righe_ingresso),
+                                             chat_id=TELEGRAM_CHAT_ID_PREFERITI)
                 registra_shadow_log_auto_preferiti(
                     fixture_id, home, away, league_name, league_country, minuto,
                     tiri_totali_partita, (tiri_p_casa + tiri_p_ospite) if current_stats else 0,
@@ -5959,6 +6048,10 @@ def processa_partita(fixture, notifiche_attive=True):
             "tiri_ospite": tiri_ospite,
             "timestamp_notifica": time.time(),
             "notified_final": prev_notified,
+            # Blocco di 15 minuti in cui è caduta questa notifica: il salto di ritmo dei preferiti
+            # (vedi deve_notificare) lo usa per non mandare un secondo messaggio nello stesso
+            # blocco, qualunque fosse il motivo del primo.
+            "blocco_ultima_notifica": _blocco_minuto(minuto),
         }
         # Minuto di gioco dell'ultima notifica: serve alla rimozione automatica dei preferiti per
         # misurare il silenzio in minuti giocati invece che di orologio (vedi sopra). Non si
