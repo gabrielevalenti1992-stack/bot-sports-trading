@@ -495,7 +495,17 @@ DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
 # lega: nei primissimi minuti l'API spesso non ha ancora pubblicato nulla anche per campionati
 # perfettamente coperti. Senza questa soglia bastava una partita sola, controllata 3 volte tra il
 # 1' e il 9', per escludere per 24h un intero campionato che le statistiche le pubblica eccome.
-MINUTO_MINIMO_VERDETTO_STATISTICHE = 15
+#
+# Era 15, e 15 non bastava. La regola chiede tre PARTITE diverse, cioè tre prove indipendenti, ma
+# in un turno di campionato le partite iniziano tutte insieme: arrivano al minuto di soglia nello
+# stesso ciclo, con lo stesso contatore, e i tre verdetti cadono nel giro di pochi secondi. Non
+# sono tre prove, è la stessa osservazione ripetuta - e presa mentre l'API può ancora non aver
+# pubblicato. Visto in produzione il 15/08 sulla MLS: cinque partite live insieme dal 1', tutte
+# vuote fino al 18', tre verdetti fra le 23:58:13 e le 23:58:16 e campionato spento per 24 ore.
+# Una partita che al 60' non ha ancora UNA statistica è invece una prova vera: il ritardo di
+# pubblicazione è un fenomeno di inizio gara, non dura un'ora. Il prezzo è continuare a chiedere
+# statistiche per una mezz'ora in più sulle leghe davvero scoperte, prima di escluderle.
+MINUTO_MINIMO_VERDETTO_STATISTICHE = 60
 
 
 # I contatori salvati prima di questa versione contavano CICLI (una risposta vuota qualunque),
@@ -504,7 +514,12 @@ MINUTO_MINIMO_VERDETTO_STATISTICHE = 15
 # appena scade l'esclusione in corso. Alla prima esecuzione con la regola nuova il file viene
 # quindi ricostruito da zero: si perdono le esclusioni in essere (comprese quelle sbagliate) e le
 # leghe davvero senza statistiche vengono re-imparate in poche partite.
-VERSIONE_REGOLA_SENZA_STATISTICHE = 2
+#
+# Portata a 3 insieme al minuto minimo qui sopra: le esclusioni decise con la soglia del 15' sono
+# state prese su prove troppo deboli (vedi la MLS), e senza questo giro di versione resterebbero
+# valide su disco fino alla loro scadenza naturale, cioè fino a 24h dopo il deploy della
+# correzione. Azzerando il file, al primo avvio la lega esclusa per sbaglio torna subito visibile.
+VERSIONE_REGOLA_SENZA_STATISTICHE = 3
 
 
 def carica_leghe_senza_statistiche():
@@ -4109,7 +4124,16 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             # regolarmente ma per questa partita non ha statistiche, non c'è niente da riparare
             # nel bot (stessa natura di xG e quota mancanti); se invece la chiamata fallisce, o
             # non è mai stata fatta, quello sì è un problema di pipeline.
-            if esito_stats == "vuote" and stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE:
+            # Il verdetto "l'API non copre questa partita" lo dà stats_vuote_consecutive, che si
+            # accumula solo su risposte vuote vere e si azzera al primo esito buono. Un fallimento
+            # TRANSITORIO (rate-limit, timeout, rete) non lo azzera - apposta, vedi processa_partita
+            # - quindi non deve nemmeno annullarlo qui: altrimenti una partita già classificata
+            # COPERTURA STATISTICHE tornava a STATISTICHE al primo skip da raffreddamento, e siccome
+            # il dedup di _anomalie_nuove() lavora per categoria, il cambio di categoria la faceva
+            # risegnalare in chat come se fosse un'anomalia nuova. Con un raffreddamento che salta
+            # tutte le chiamate rimaste nel ciclo, il rimbalzo colpiva molte partite insieme.
+            evidenza_non_copertura = stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE
+            if esito_stats in ("vuote", "errore") and evidenza_non_copertura:
                 trovate["COPERTURA STATISTICHE"] = (
                     f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
                     f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
