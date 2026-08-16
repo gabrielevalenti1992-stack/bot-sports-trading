@@ -167,8 +167,22 @@ SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 # già calcolato per le notifiche e per /intensita, quindi nessuna chiamata API in più), con un
 # filtro di contesto e un tetto ai preferiti simultanei.
 AUTO_PREFERITI_ATTIVO = True
-# Ritmo nel blocco 15 min corrente, somma delle due squadre. Tarati sui delta reali osservati:
-# 4 tiri in un blocco è ritmo alto ma non raro, 2 tiri in porta è il segnale più selettivo.
+# --- Rotta 1: i GOL. Non tocca le statistiche, quindi funziona anche quando l'API non le
+# pubblica - ed è il motivo per cui è la rotta principale. Il 16/08 l'endpoint statistiche è
+# rimasto muto per ore su mezzo mondo (Belgio, Germania, Corea, Giappone, Svezia) mentre i gol
+# continuavano ad arrivare regolarmente, col nome del marcatore: una regola che dipende solo dai
+# gol non si spegne insieme al feed.
+#
+# Due gol presto dicono che la partita è viva, ma solo se il punteggio la lascia APERTA: un 2-0 al
+# 20' è una partita che si sta chiudendo, un 1-1 è una partita da seguire. Per questo non basta
+# contare i gol, serve anche lo scarto (SCARTO_MAX_AUTO_PREFERITI qui sotto): con 2 gol passa solo
+# l'1-1, con 3 gol passa il 2-1.
+SOGLIA_GOL_AUTO_PREFERITI = 2
+MINUTO_GOL_AUTO_PREFERITI = 25
+# --- Rotta 2: il RITMO nel blocco 15 min corrente, somma delle due squadre. Richiede le
+# statistiche, quindi è la rotta che si spegne quando il feed è guasto. Tarati sui delta reali
+# osservati: 4 tiri in un blocco è ritmo alto ma non raro, 2 tiri in porta è il segnale più
+# selettivo. Serve a prendere le partite che si accendono senza segnare.
 SOGLIA_TIRI_RITMO_AUTO_PREFERITI = 4
 SOGLIA_PORTA_RITMO_AUTO_PREFERITI = 2
 # Contesto: dopo questo minuto la partita deve essere ancora in bilico per valere il canale
@@ -454,6 +468,8 @@ try:
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
+    SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
+    MINUTO_GOL_AUTO_PREFERITI = config.get("minuto_gol_auto_preferiti", MINUTO_GOL_AUTO_PREFERITI)
     SOGLIA_TIRI_RITMO_AUTO_PREFERITI = config.get("soglia_tiri_ritmo_auto_preferiti", SOGLIA_TIRI_RITMO_AUTO_PREFERITI)
     SOGLIA_PORTA_RITMO_AUTO_PREFERITI = config.get("soglia_porta_ritmo_auto_preferiti", SOGLIA_PORTA_RITMO_AUTO_PREFERITI)
     MINUTO_CONTESTO_AUTO_PREFERITI = config.get("minuto_contesto_auto_preferiti", MINUTO_CONTESTO_AUTO_PREFERITI)
@@ -490,7 +506,8 @@ try:
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
     print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} "
-          f"(ritmo 15 min: {SOGLIA_TIRI_RITMO_AUTO_PREFERITI} tiri o {SOGLIA_PORTA_RITMO_AUTO_PREFERITI} in porta; "
+          f"(gol: {SOGLIA_GOL_AUTO_PREFERITI} entro il {MINUTO_GOL_AUTO_PREFERITI}' a partita aperta; "
+          f"ritmo 15 min: {SOGLIA_TIRI_RITMO_AUTO_PREFERITI} tiri o {SOGLIA_PORTA_RITMO_AUTO_PREFERITI} in porta; "
           f"dal {MINUTO_CONTESTO_AUTO_PREFERITI}' max {SCARTO_MAX_AUTO_PREFERITI} gol di scarto; "
           f"max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)", flush=True)
 except Exception as e:
@@ -4969,6 +4986,32 @@ def deve_aggiungere_automaticamente_ai_preferiti(delta_stats, delta_reale, minut
         return False, "auto-preferiti disattivati"
     if minuto is None:
         return False, "minuto non disponibile"
+    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+        # Non si marca la partita come già valutata: appena si libera un posto torna in gioco.
+        return False, f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+
+    scarto = abs(score_home - score_away)
+    gol_totali = score_home + score_away
+    if scarto >= SOGLIA_GOLEADA_STOP_NOTIFICHE:
+        # Oltre questo scarto il bot smette comunque di notificare (goleada): metterla fra i
+        # preferiti significherebbe pagarne il costo API senza ricevere niente.
+        return False, f"goleada ({scarto} gol di scarto)"
+
+    # --- Rotta 1: i GOL. Volutamente PRIMA di ogni controllo che dipende dalle statistiche, e
+    # senza la guardia sull'avaria: è tutto il senso di questa rotta. I gol arrivano anche quando
+    # l'endpoint statistiche tace (16/08: mezzo mondo senza tiri per ore, gol regolari col nome del
+    # marcatore), quindi questa strada resta aperta proprio quando l'altra si chiude.
+    # Lo scarto decide se la partita è ancora aperta: con 2 gol passa l'1-1 ma non il 2-0, con 3
+    # gol passa il 2-1. Un 2-0 al 20' non è una partita viva, è una partita che si sta chiudendo.
+    if (gol_totali >= SOGLIA_GOL_AUTO_PREFERITI
+            and minuto <= MINUTO_GOL_AUTO_PREFERITI
+            and scarto <= SCARTO_MAX_AUTO_PREFERITI):
+        return True, (f"{score_home}-{score_away} al {minuto}': {gol_totali} gol entro il "
+                      f"{MINUTO_GOL_AUTO_PREFERITI}' con la partita ancora aperta")
+
+    # --- Rotta 2: il RITMO. Da qui in giù servono le statistiche.
+    if minuto >= MINUTO_CONTESTO_AUTO_PREFERITI and scarto > SCARTO_MAX_AUTO_PREFERITI:
+        return False, f"partita incanalata al {minuto}' ({scarto} gol di scarto)"
     if not delta_stats or not delta_reale:
         # "Primo rilevamento": un solo punto nel blocco, il delta sarebbe (0,0) per costruzione e
         # non direbbe niente sul ritmo (vedi _calcola_delta_15min_da_storico).
@@ -4976,18 +5019,7 @@ def deve_aggiungere_automaticamente_ai_preferiti(delta_stats, delta_reale, minut
     if avaria_statistiche_diffusa():
         # Durante un guasto del feed i delta valgono zero per tutti: promuovere (o scartare) in
         # base a numeri che l'API non sta pubblicando non ha senso. Vedi il 16/08.
-        return False, "statistiche assenti su molte leghe insieme, valutazione sospesa"
-    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
-        # Non si marca la partita come già valutata: appena si libera un posto torna in gioco.
-        return False, f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
-
-    scarto = abs(score_home - score_away)
-    if scarto >= SOGLIA_GOLEADA_STOP_NOTIFICHE:
-        # Oltre questo scarto il bot smette comunque di notificare (goleada): metterla fra i
-        # preferiti significherebbe pagarne il costo API senza ricevere niente.
-        return False, f"goleada ({scarto} gol di scarto)"
-    if minuto >= MINUTO_CONTESTO_AUTO_PREFERITI and scarto > SCARTO_MAX_AUTO_PREFERITI:
-        return False, f"partita incanalata al {minuto}' ({scarto} gol di scarto)"
+        return False, "statistiche assenti su molte leghe insieme, valutazione sul ritmo sospesa"
 
     tiri_ritmo = sum(delta_stats.get("Tiri totali", (0, 0)))
     porta_ritmo = sum(delta_stats.get("Tiri in porta", (0, 0)))
