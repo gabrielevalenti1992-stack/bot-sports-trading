@@ -589,6 +589,66 @@ def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     return time.time() < stato.get("esclusa_fino", 0)
 
+
+# Una risposta vuota non distingue da sola due situazioni molto diverse: "questa lega non ha
+# statistiche" (verdetto giusto, la lega va esclusa) e "in questo momento l'API non sta pubblicando
+# statistiche per nessuno" (guasto esterno e temporaneo, escludere sarebbe un errore). Il segnale
+# che le separa il bot ce l'ha già e finora lo buttava via: quante ALTRE leghe, nello stesso
+# momento, stanno rispondendo vuote. Una lacuna di copertura riguarda una lega per volta; un
+# guasto del feed le spegne tutte insieme.
+#
+# Caso reale del 16/08 (log Render, istanza ...-bbwtp, ciclo delle 11:51:49): 12 partite su 13
+# vuote nello stesso ciclo, su 6 campionati in whitelist e 4 paesi diversi - Jupiler Pro League
+# (Belgio), 2. Bundesliga x3 (Germania), K League 1 x3 e K League 2 x4 (Corea del Sud), J League 2
+# (Giappone). L'unica a pubblicare era ADO Den Haag-Groningen (Olanda). Alle 11:58, sette minuti
+# dopo il deploy della soglia dei 60', K League 1 e K League 2 sono state comunque escluse per 24h
+# con le partite al 61', 62', 62' e 64': il minuto minimo non protegge da un guasto che dura piu'
+# di un'ora, perche' le partite ci arrivano lo stesso, al minuto giusto e ancora vuote.
+#
+# Le osservazioni si tengono su una finestra scorrevole invece che sul singolo ciclo: dentro un
+# ciclo le partite sono processate in fila, quindi la prima che vota vedrebbe un quadro ancora
+# quasi vuoto e il guasto risulterebbe invisibile proprio a chi decide.
+FINESTRA_OSSERVAZIONI_STATISTICHE = 900  # 15 min: ~5 cicli attivi
+# Sotto le 3 leghe osservate il campione e' troppo piccolo per parlare di "diffuso" (di notte
+# possono esserci due sole leghe live, entrambe davvero scoperte): in quel caso si lascia decidere
+# la regola normale. Sopra, si chiede che le leghe vuote siano almeno il doppio di quelle che
+# pubblicano - con 12 partite vuote su 13 il rapporto reale era 5 a 1.
+LEGHE_VUOTE_MINIME_PER_AVARIA = 3
+RAPPORTO_VUOTE_SU_OK_PER_AVARIA = 2
+OSSERVAZIONI_STATISTICHE = []  # [(timestamp, (paese, lega), disponibili)]
+
+
+def registra_osservazione_statistiche(league_country, league_name, disponibili):
+    """Annota l'esito statistiche di UNA partita, per avere il quadro d'insieme del momento.
+
+    Diversa da registra_esito_statistiche(): quella riceve un verdetto per lega (raro, pesato,
+    persistito su disco), questa riceve ogni singola risposta dell'API (frequente, solo in memoria)
+    e serve unicamente a capire se il feed statistiche sta funzionando in generale."""
+    adesso = time.time()
+    OSSERVAZIONI_STATISTICHE.append((adesso, (league_country.lower(), league_name.lower()), disponibili))
+    taglio = adesso - FINESTRA_OSSERVAZIONI_STATISTICHE
+    while OSSERVAZIONI_STATISTICHE and OSSERVAZIONI_STATISTICHE[0][0] < taglio:
+        OSSERVAZIONI_STATISTICHE.pop(0)
+
+
+def avaria_statistiche_diffusa():
+    """True se nella finestra recente le statistiche mancano su troppe leghe diverse insieme.
+
+    Una lega conta come "che pubblica" se ha dato statistiche almeno una volta nella finestra: le
+    partite appena iniziate sono vuote anche nei campionati coperti, e non devono far sembrare
+    guasto un feed sano."""
+    taglio = time.time() - FINESTRA_OSSERVAZIONI_STATISTICHE
+    leghe_ok, leghe_viste = set(), set()
+    for quando, chiave, disponibili in OSSERVAZIONI_STATISTICHE:
+        if quando < taglio:
+            continue
+        leghe_viste.add(chiave)
+        if disponibili:
+            leghe_ok.add(chiave)
+    leghe_vuote = leghe_viste - leghe_ok
+    return (len(leghe_vuote) >= LEGHE_VUOTE_MINIME_PER_AVARIA
+            and len(leghe_vuote) >= RAPPORTO_VUOTE_SU_OK_PER_AVARIA * len(leghe_ok))
+
 # =============================================================================
 # STATO PARTITE LIVE: punteggi, storico statistiche (usato da /momentum e dal delta 15 min a
 # blocchi), snapshot di fine 1°T, cartellini/rigori già notificati. Persistito su disco (a
@@ -4984,6 +5044,7 @@ def processa_partita(fixture, notifiche_attive=True):
             BACKUP_HISTORY_MOMENTUM[str(fixture_id)] = history
             salva_backup_history_momentum(BACKUP_HISTORY_MOMENTUM)
             registra_esito_statistiche(league_country, league_name, True)
+            registra_osservazione_statistiche(league_country, league_name, True)
             if fine_1h_appena_avvenuta:
                 stato_partite[fixture_id]["stats_fine_1h"] = current_stats
                 log(f"    📸 Statistiche di fine 1° tempo salvate (confronto 1°T/2°T, strategia Rimonta)")
@@ -5003,6 +5064,7 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
                 stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
                 log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
+                registra_osservazione_statistiche(league_country, league_name, False)
                 # Il verdetto sulla LEGA lo dà solo una partita che da sola ha già collezionato
                 # SOGLIA_SENZA_STATISTICHE risposte vuote di fila (~3 cicli, diversi minuti di
                 # tempo dato all'API), e conta una volta sola per partita. Prima bastava una
@@ -5016,8 +5078,18 @@ def processa_partita(fixture, notifiche_attive=True):
                 if (minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE
                         and vuote >= SOGLIA_SENZA_STATISTICHE
                         and not stato_partite[fixture_id].get("verdetto_lega_registrato")):
-                    stato_partite[fixture_id]["verdetto_lega_registrato"] = True
-                    registra_esito_statistiche(league_country, league_name, False)
+                    # Ultimo filtro prima di condannare la lega: se in questo momento le
+                    # statistiche mancano su molte leghe diverse insieme, questa partita non sta
+                    # dimostrando niente sulla SUA lega - sta solo osservando un feed guasto (vedi
+                    # avaria_statistiche_diffusa). Il verdetto non viene registrato e nemmeno
+                    # marcato come dato: la partita potra' rivotare piu' avanti, quando il quadro
+                    # sara' tornato leggibile.
+                    if avaria_statistiche_diffusa():
+                        log("    ⏸️ Verdetto sulla lega sospeso: statistiche assenti su molte leghe "
+                            "insieme, sembra un guasto del feed e non una lega scoperta")
+                    else:
+                        stato_partite[fixture_id]["verdetto_lega_registrato"] = True
+                        registra_esito_statistiche(league_country, league_name, False)
 
         if status_short in ("FT", "AET", "PEN"):
             stato = stato_partite.get(fixture_id, {})
