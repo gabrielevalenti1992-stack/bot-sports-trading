@@ -519,7 +519,15 @@ MINUTO_MINIMO_VERDETTO_STATISTICHE = 60
 # state prese su prove troppo deboli (vedi la MLS), e senza questo giro di versione resterebbero
 # valide su disco fino alla loro scadenza naturale, cioè fino a 24h dopo il deploy della
 # correzione. Azzerando il file, al primo avvio la lega esclusa per sbaglio torna subito visibile.
-VERSIONE_REGOLA_SENZA_STATISTICHE = 3
+#
+# Portata a 4 insieme al controllo sull'avaria diffusa (vedi avaria_statistiche_diffusa): le
+# esclusioni decise durante il guasto del feed del 16/08 - K League 1 e K League 2 alle 11:58, con
+# 12 partite vuote su 13 in sei campionati e quattro paesi - sono state prese su prove che il
+# controllo nuovo avrebbe scartato in blocco. Restando su disco resterebbero valide fino a 24h
+# dopo il deploy della correzione, cioè per quasi tutta la loro durata: tanto varrebbe non aver
+# corretto niente. Con questo giro di versione, al primo avvio i campionati esclusi per sbaglio
+# tornano subito visibili.
+VERSIONE_REGOLA_SENZA_STATISTICHE = 4
 
 
 def carica_leghe_senza_statistiche():
