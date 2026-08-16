@@ -5231,14 +5231,6 @@ def processa_partita(fixture, notifiche_attive=True):
             }
             return
 
-        if str(fixture_id) in SILENCED_MATCHES:
-            muted_data = SILENCED_MATCHES[str(fixture_id)]
-            if "muted_at_minute" not in muted_data:
-                muted_data["muted_at_minute"] = minuto
-                save_silenced(SILENCED_MATCHES)
-            log(f"  -> Silenziata, skip")
-            return
-
         if current_stats:
             delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats, minuto)
             stats_dict = delta_stats
@@ -5288,6 +5280,32 @@ def processa_partita(fixture, notifiche_attive=True):
                     fixture_id, home, away, minuto, score_home, score_away,
                     probabilita_no_vig_snapshot, stats_dict)
                 stato_partite[fixture_id]["ultimo_snapshot_valore"] = time.time()
+
+        # Silenziare una partita è una scelta sulle NOTIFICHE, non sulla raccolta dati: da qui in
+        # giù si decide solo cosa mandare in chat, quindi il taglio va fatto qui e non prima.
+        # Stava sopra, prima dei due shadow-log, e li saltava entrambi - stesso identico problema
+        # già corretto per l'esito finale poco più sopra ("l'esito va registrato sempre, notifica o
+        # no: senza, gli snapshot già raccolti restano orfani per sempre"), che però era rimasto
+        # valido solo per il risultato e non per gli snapshot che lo precedono.
+        #
+        # Lo shadow-log serve a calibrare le strategie e nasce apposta per non avere bias di
+        # selezione (vedi INTERVALLO_SNAPSHOT_VALORE): perdere le partite silenziate lo reintroduce
+        # dalla porta di servizio, e per giunta filtrato da una scelta manuale.
+        #
+        # Visto in produzione il 16/08, ciclo #10 delle 12:22: Odense-AC Horsens al 22',
+        # SK Beveren-Anderlecht al 45' e Arminia Bielefeld-Energie Cottbus al 45' avevano tutte
+        # statistiche piene ("Tiri 3-2", "Tiri 1-6", "Tiri 8-2") e finivano su "-> Silenziata,
+        # skip" senza scrivere nulla, mentre Hannover 96-VfL Wolfsburg - stessa lega, stesso
+        # minuto, stesso ciclo, ma non silenziata - lo scriveva regolarmente. La diagnostica
+        # automatica le segnalava come anomalia "statistiche presenti ma nessuno snapshot scritto":
+        # aveva ragione, ed era anche l'unico modo in cui il buco si vedeva da fuori.
+        if str(fixture_id) in SILENCED_MATCHES:
+            muted_data = SILENCED_MATCHES[str(fixture_id)]
+            if "muted_at_minute" not in muted_data:
+                muted_data["muted_at_minute"] = minuto
+                save_silenced(SILENCED_MATCHES)
+            log(f"  -> Silenziata, skip")
+            return
 
         # Preferito "raffreddato": se sono passati troppi minuti dall'ultima notifica inviata,
         # la partita si è spenta - si rimuove dai preferiti PRIMA di valutare deve_notificare(),
