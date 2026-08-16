@@ -2141,15 +2141,33 @@ def estrai_valore_stat(stats_team, nome_stat):
     return 0
 
 
+# Le uniche statistiche che il bot legge davvero (vedi estrai_current_stats): la disponibilità va
+# giudicata su queste, non su tutta la risposta.
+STATISTICHE_USATE = ("total shots", "shots on goal", "corner kicks", "shots insidebox")
+
+
 def ha_statistiche_disponibili(stats):
-    """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre."""
+    """True se l'API ha restituito dati statistici reali (non solo liste vuote/nulle) per entrambe le squadre.
+
+    Guarda SOLO le statistiche che il bot usa davvero. Prima bastava che una voce QUALUNQUE della
+    risposta fosse valorizzata - anche possesso palla, falli o cartellini, che il bot non legge mai
+    - per prendere per buona tutta la risposta. Ma l'API pubblica i dati generali prima di tiri e
+    corner: la risposta passava il controllo, poi estrai_valore_stat() traduceva in 0 i quattro
+    valori davvero mancanti (None -> 0), e in notifica finiva "Tiri totali: 0 - 0" presentato come
+    dato reale, sotto l'intestazione "Statistiche ultimi 15 min", invece del "N/D" previsto per il
+    dato mancante.
+
+    Visto il 16/08 su Djurgardens-AIK (Allsvenskan): gol al 10' e "0 - 0" tiri al 12'. Le due cose
+    insieme non possono stare, un gol un tiro lo richiede. Lo zero era un None travestito."""
     if not stats or len(stats) < 2:
         return False
     stats_home = stats[0].get("statistics", []) or []
     stats_away = stats[1].get("statistics", []) or []
     if not stats_home or not stats_away:
         return False
-    return any(s.get("value") is not None for s in stats_home + stats_away)
+    return any(s.get("value") is not None
+               for s in stats_home + stats_away
+               if s.get("type", "").lower() in STATISTICHE_USATE)
 
 
 def estrai_current_stats(stats_home, stats_away):
