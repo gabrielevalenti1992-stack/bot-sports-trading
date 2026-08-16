@@ -1,6 +1,7 @@
 import collections
 import json
 import re
+import unicodedata
 import time
 import datetime
 from zoneinfo import ZoneInfo
@@ -404,6 +405,8 @@ LEGHE_CON_STATISTICHE = [
     # Supercoppe di lega nazionali (l'equivalente locale della Community Shield inglese)
     "Community Shield", "Supercoppa Italiana", "Supercopa de Espana", "DFL-Supercup",
     "Trophee des Champions", "Johan Cruijff Schaal", "Supertaca",
+    # Coppa nazionale seguita su richiesta (le altre restano in COPPE_NAZIONALI_ESCLUSE)
+    "Coppa Italia",
 ]
 
 # Nomi di campionato IDENTICI usati da paesi diversi nell'API (l'API-Football non li distingue
@@ -537,7 +540,8 @@ PAROLE_ESCLUSE = [
 # se in futuro cambia la logica del filtro, queste restano escluse di proposito, non per omissione.
 COPPE_NAZIONALI_ESCLUSE = [
     "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy",
-    "coppa italia",
+    # "coppa italia" tolta su richiesta: va seguita, quindi sta in LEGHE_CON_STATISTICHE. Le altre
+    # coppe nazionali restano escluse - qui si toglie solo quella chiesta, non la categoria.
     "copa del rey",
     "dfb-pokal", "dfb pokal",
     "coupe de france", "coupe de la ligue",
@@ -1549,6 +1553,24 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
         return None
 
 
+def _senza_accenti(testo):
+    """Nome confrontabile: minuscolo e senza segni diacritici.
+
+    API-Football restituisce i nomi accentati ("Trophée des Champions", "Supercopa de España",
+    "Supertaça Cândido de Oliveira") mentre in whitelist alcune voci erano scritte in ASCII: il
+    confronto a stringa grezza non le faceva mai combaciare, e quelle competizioni non comparivano
+    fra le partite live pur essendo state messe in elenco apposta. Si vedeva anche il rattoppo:
+    per Süper Lig e Primera División erano state aggiunte a mano ENTRAMBE le forme, accentata e no.
+    Normalizzando qui il problema sparisce per tutte, comprese quelle che verranno aggiunte dopo."""
+    return "".join(c for c in unicodedata.normalize("NFD", (testo or "").lower())
+                   if unicodedata.category(c) != "Mn")
+
+
+# Chiavi normalizzate anch'esse: "segunda división" nella mappa sopra è accentata, e senza questo
+# la guardia sul paese per quella lega smetterebbe di trovarla appena il nome viene normalizzato.
+PAESE_ATTESO_LEGA_AMBIGUA_NORM = {_senza_accenti(k): v for k, v in PAESE_ATTESO_LEGA_AMBIGUA.items()}
+
+
 def _lega_in_whitelist_statica(nome, league_country):
     """True se 'nome' (già lowercase) corrisponde a una voce della whitelist statica.
     Match a confine di parola (non sottostringa grezza): "NB I" non deve intercettare "NB III"
@@ -1557,15 +1579,16 @@ def _lega_in_whitelist_statica(nome, league_country):
     ambigui condivisi da più paesi (es. "Premier League" Inghilterra/Kazakistan) serve anche il
     paese giusto, altrimenti passerebbero tutte le leghe omonime prive di statistiche reali."""
     paese = (league_country or "").lower()
+    nome = _senza_accenti(nome)
     for lega in LEGHE_CON_STATISTICHE:
-        lega_lower = lega.lower()
+        lega_lower = _senza_accenti(lega)
         if lega_lower in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO:
             if nome == lega_lower:
                 return True
             continue
         if not re.search(rf"\b{re.escape(lega_lower)}\b", nome):
             continue
-        paese_atteso = PAESE_ATTESO_LEGA_AMBIGUA.get(lega_lower)
+        paese_atteso = PAESE_ATTESO_LEGA_AMBIGUA_NORM.get(lega_lower)
         if paese_atteso and paese != paese_atteso:
             continue
         return True
@@ -1573,15 +1596,18 @@ def _lega_in_whitelist_statica(nome, league_country):
 
 
 def campionato_valido(league_name, league_type, league_country=""):
-    nome = league_name.lower()
+    # Normalizzato su ENTRAMBI i lati del confronto: l'API manda i nomi accentati e alcune voci
+    # degli elenchi sono scritte in ASCII (vedi _senza_accenti). Normalizzare solo il nome della
+    # lega romperebbe le voci accentate degli elenchi, per esempio "taça de portugal".
+    nome = _senza_accenti(league_name)
     for parola in PAROLE_ESCLUSE:
-        if parola in nome:
+        if _senza_accenti(parola) in nome:
             return False
     for coppa in COPPE_NAZIONALI_ESCLUSE:
         # Confine di parola, non sottostringa grezza: "coppa italia" non deve intercettare
         # "Supercoppa Italiana" (whitelistata a parte) solo perché ne è una sottostringa - stesso
         # criterio già usato da _lega_in_whitelist_statica per lo stesso identico motivo.
-        if re.search(rf"\b{re.escape(coppa)}\b", nome):
+        if re.search(rf"\b{re.escape(_senza_accenti(coppa))}\b", nome):
             return False
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
         return False
