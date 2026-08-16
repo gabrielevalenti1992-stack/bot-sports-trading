@@ -746,6 +746,16 @@ def registra_giornata_statistiche(league_country, league_name, giornata, disponi
     if not giornata:
         giornata = "data " + datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
 
+    # Ancoraggio esplicito: il conteggio parte da qui, non da inizio stagione. La prima giornata
+    # vista dopo l'attivazione della regola è la "1ª giornata di test" di quel campionato, anche
+    # se il campionato è in corso da mesi - delle giornate precedenti non sappiamo niente e non
+    # devono pesare. Resta scritto su disco per poter sempre dire da quando lo si sta valutando.
+    if not stato.get("prima_giornata"):
+        stato["prima_giornata"] = giornata
+        stato["iniziato_il"] = time.time()
+        log(f"  Lega '{league_name}' ({league_country}): inizio verifica copertura statistiche, "
+            f"'{giornata}' conta come 1ª giornata di test")
+
     giornate = stato.setdefault("giornate", {})
     corrente = giornate.setdefault(giornata, {"pubblicato": False, "inattendibile": False,
                                               "chiusa": False})
@@ -1354,6 +1364,9 @@ def poll_callbacks():
 
                     elif cmd == "/diagnostica":
                         esegui_comando_sicuro(chat_id, cmd_diagnostica)
+
+                    elif cmd == "/coperturaleghe":
+                        esegui_comando_sicuro(chat_id, cmd_coperturaleghe)
 
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
@@ -2408,6 +2421,8 @@ def cmd_help(chat_id):
         "di sei condizioni di gioco (non più esposte come comandi live)\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
+        "/coperturaleghe - Quali campionati pubblicano statistiche reali e quante giornate senza "
+        "dati ha accumulato ciascuno (da quale giornata è partita la verifica)\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
         "/apiusage - Quante chiamate API-Football il bot fa al giorno (storico e quota residua)\n"
         "/setup - Menu comandi a bottoni"
@@ -2819,6 +2834,52 @@ def cmd_shadowlogstrategie(chat_id):
                 files={"document": f}, timeout=30)
     except Exception as e:
         log(f"Errore invio file shadow_log_strategie.jsonl: {e}")
+
+
+def cmd_coperturaleghe(chat_id):
+    """A che punto è ogni campionato nella verifica "pubblica statistiche reali o no".
+
+    Serve a vedere il conteggio mentre matura, invece di scoprire l'esito solo quando arriva la
+    notifica di esclusione: da quale giornata è cominciata la verifica di ciascun campionato e
+    quante giornate senza dati ha accumulato finora."""
+    if not GIORNATE_SENZA_STATISTICHE:
+        invia_messaggio_telegram(
+            "Nessun campionato ancora osservato.\n\n"
+            "Il conteggio parte dalla prima giornata vista dopo l'attivazione della regola: "
+            "appena passano delle partite live, quella giornata diventa la 1ª di test.",
+            chat_id=chat_id)
+        return
+
+    escluse, sorvegliate, pulite = [], [], []
+    for (paese, nome), stato in sorted(GIORNATE_SENZA_STATISTICHE.items()):
+        senza = _giornate_senza_statistiche_contate(stato)
+        etichetta = f"{nome.title()} ({paese.title()})"
+        prima = stato.get("prima_giornata") or "?"
+        if stato.get("esclusa_definitivamente"):
+            escluse.append(f"🚫 {etichetta} - fuori dalla whitelist ({len(senza)} giornate)")
+        elif senza:
+            sorvegliate.append(
+                f"⚠️ {etichetta} - {len(senza)}/{SOGLIA_GIORNATE_SENZA_STATISTICHE}"
+                f" - verifica dalla \"{prima}\"")
+        else:
+            pulite.append(f"✅ {etichetta} - verifica dalla \"{prima}\"")
+
+    righe = ["📊 *Copertura statistiche per campionato*\n",
+             f"Un campionato esce dalla whitelist dopo {SOGLIA_GIORNATE_SENZA_STATISTICHE} "
+             f"giornate di campionato senza mai pubblicare tiri, tiri in porta, corner e tiri in "
+             f"area. Le giornate in cui l'API è guasta su molti campionati insieme non contano.\n"]
+    if escluse:
+        righe.append("\n".join(escluse) + "\n")
+    if sorvegliate:
+        righe.append("*Con giornate senza dati:*\n" + "\n".join(sorvegliate) + "\n")
+    if pulite:
+        # Le leghe a posto sono la maggioranza e non aggiungono informazione: se ne mostra un
+        # campione, il totale basta a sapere che sono seguite.
+        mostrate = pulite[:15]
+        coda = f"\n…e altre {len(pulite) - len(mostrate)}" if len(pulite) > len(mostrate) else ""
+        righe.append(f"*Regolari ({len(pulite)}):*\n" + "\n".join(mostrate) + coda)
+
+    invia_messaggio_telegram("\n".join(righe), chat_id=chat_id)
 
 
 def cmd_diagnostica(chat_id):
