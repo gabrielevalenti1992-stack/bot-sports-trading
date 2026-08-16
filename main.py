@@ -2554,24 +2554,71 @@ def cmd_piano(chat_id):
     partite = sorted(PIANO_GIORNATA.get("partite", []), key=lambda p: p.get("kickoff_ts", 0))
     finestre = PIANO_GIORNATA.get("finestre_attive", [])
 
+    now_ts = time.time()
+    durata = DURATA_STIMATA_PARTITA_MINUTI * 60
+
+    # Il piano copre l'intera giornata, che comincia a notte fonda: mostrarlo sempre dall'inizio
+    # significava che dal pomeriggio in poi le prime 40 righe erano tutte partite finite da ore, e
+    # quelle in corso finivano nel "...e altre N". Letto a metà giornata deve rispondere a "cosa si
+    # gioca adesso e cosa viene dopo", non ripetere la notte appena passata.
+    in_corso, prossime, concluse = [], [], []
+    for p in partite:
+        kickoff = p.get("kickoff_ts", 0)
+        if kickoff > now_ts:
+            prossime.append(p)
+        elif now_ts <= kickoff + durata:
+            in_corso.append(p)
+        else:
+            concluse.append(p)
+
+    def riga_partita(p, suffisso=""):
+        ora = datetime.datetime.fromtimestamp(p["kickoff_ts"], tz_italia).strftime("%H:%M")
+        return f"- {ora} {p['home']} - {p['away']} ({p['lega']}){suffisso}"
+
+    adesso_txt = datetime.datetime.fromtimestamp(now_ts, tz_italia).strftime("%H:%M")
     righe = [
         f"Piano giornata {PIANO_GIORNATA.get('data')} (generato alle {generato.strftime('%H:%M')})\n"
         f"{len(partite)} partite whitelist previste, {len(finestre)} finestre attive\n"
+        f"Sono le {adesso_txt}: {len(in_corso)} in corso, {len(prossime)} ancora da giocare, "
+        f"{len(concluse)} concluse\n"
     ]
-    for p in partite[:40]:
-        ora = datetime.datetime.fromtimestamp(p["kickoff_ts"], tz_italia).strftime("%H:%M")
-        righe.append(f"- {ora} {p['home']} - {p['away']} ({p['lega']})")
-    if len(partite) > 40:
-        righe.append(f"... e altre {len(partite) - 40} partite")
+
+    if in_corso:
+        righe.append(f"IN CORSO ({len(in_corso)}):")
+        for p in in_corso:
+            da_quanto = int((now_ts - p["kickoff_ts"]) // 60)
+            righe.append(riga_partita(p, f" - iniziata {da_quanto} min fa"))
+        righe.append("")
+
+    if prossime:
+        MAX_PROSSIME = 30
+        righe.append(f"PROSSIME ({len(prossime)}):")
+        for p in prossime[:MAX_PROSSIME]:
+            manca = int((p["kickoff_ts"] - now_ts) // 60)
+            attesa = f" - fra {manca} min" if manca < 120 else ""
+            righe.append(riga_partita(p, attesa))
+        if len(prossime) > MAX_PROSSIME:
+            righe.append(f"... e altre {len(prossime) - MAX_PROSSIME} più tardi")
+        righe.append("")
+    elif not in_corso:
+        righe.append("Nessuna partita in corso né in programma per il resto della giornata.\n")
 
     if finestre:
-        righe.append("\nFinestre attive (ciclo veloce):")
+        righe.append("Finestre attive (ciclo veloce):")
+        giorno_piano = datetime.datetime.fromtimestamp(
+            partite[0]["kickoff_ts"] if partite else now_ts, tz_italia).date()
         for inizio, fine in finestre:
-            i = datetime.datetime.fromtimestamp(inizio, tz_italia).strftime("%H:%M")
-            f_ = datetime.datetime.fromtimestamp(fine, tz_italia).strftime("%H:%M")
-            righe.append(f"- {i} - {f_}")
+            dt_i = datetime.datetime.fromtimestamp(inizio, tz_italia)
+            dt_f = datetime.datetime.fromtimestamp(fine, tz_italia)
+            # Le finestre di una giornata che comincia a notte fonda possono chiudersi dopo la
+            # mezzanotte: con il solo orario risultavano a rovescio ("11:00 - 03:40", cioè una fine
+            # prima dell'inizio), che sembra un errore invece di essere il giorno dopo.
+            suffisso_i = " (ieri)" if dt_i.date() < giorno_piano else ""
+            suffisso_f = " (domani)" if dt_f.date() > dt_i.date() else ""
+            marcatore = " ← adesso" if inizio <= now_ts <= fine else ""
+            righe.append(f"- {dt_i.strftime('%H:%M')}{suffisso_i} - "
+                         f"{dt_f.strftime('%H:%M')}{suffisso_f}{marcatore}")
 
-    now_ts = time.time()
     if STATO_PAUSA.get("in_pausa"):
         stato = "IN PAUSA MANUALE (nessuna chiamata API, invia /riprendi per riattivare)"
     elif dentro_finestra_attiva(PIANO_GIORNATA, now_ts):
