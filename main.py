@@ -146,19 +146,43 @@ DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 900  # 15 minuti
 # regole standard.
 SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 
-# Auto-preferiti: una partita che parte già "a razzo" (tanti tiri o gol nei primissimi minuti)
-# vale la pena seguirla dai preferiti da subito, senza aspettare che l'utente la clicchi a mano
-# tra le tante notifiche normali. Valutata una sola volta per partita (auto_preferito_processato
-# in stato_partite): se non scatta entro la finestra, o se l'utente la rimuove in seguito, non
-# viene più ritentata per la stessa partita.
-# NOTA: la finestra (12') è volutamente molto più stretta di MINUTI_ATTIVA (25', soglia della
-# notifica normale nella Regola 2 di deve_notificare) pur usando la stessa soglia tiri (6):
-# altrimenti le due condizioni si sovrappongono quasi del tutto e finirebbero nei preferiti
-# tantissime partite solo "normalmente attive", non solo quelle davvero esplosive.
+# Auto-preferiti: una partita che si accende merita di essere seguita dal canale preferiti senza
+# aspettare che venga cliccata a mano tra le tante notifiche normali.
+#
+# La regola precedente chiedeva 6 tiri combinati O 2 gol ENTRO IL 12', e chiudeva per sempre la
+# finestra subito dopo. Misurata sui log di produzione del 16/08 (12:00-17:31): ~100 valutazioni,
+# ~30 finestre chiuse, ZERO partite promosse. I valori migliori visti sono stati "12' tiri=5",
+# "12' tiri=4 gol=1", "10' tiri=4": la soglia non è stata raggiunta nemmeno una volta. Tre motivi,
+# tutti strutturali e non risolvibili abbassando il numero:
+#  - i primi 12 minuti sono la parte meno informativa della partita, ed è anche la finestra in cui
+#    l'API spesso non ha ancora pubblicato le statistiche (il 16/08 Beveren e Bielefeld sono
+#    rimaste vuote fino oltre il 40'): una partita veniva valutata "tiri=0" perché il dato non
+#    c'era, non perché fosse bloccata;
+#  - una partita con 1 tiro al 12' può diventare la più interessante della giornata al 60', ma
+#    veniva già scartata per sempre ("non verrà più rivalutata");
+#  - contava il VOLUME dall'inizio gara, non il RITMO: 6 tiri fra il 60' e il 72' sul pareggio
+#    valgono molto più di 6 tiri sparsi nei primi 12 minuti, e non venivano mai visti.
+#
+# Ora si valuta per tutta la partita, sul ritmo del blocco di 15 minuti corrente (lo stesso delta
+# già calcolato per le notifiche e per /intensita, quindi nessuna chiamata API in più), con un
+# filtro di contesto e un tetto ai preferiti simultanei.
 AUTO_PREFERITI_ATTIVO = True
-SOGLIA_MINUTO_AUTO_PREFERITI = 12  # entro questo minuto la partita deve già mostrare ritmo alto
-SOGLIA_TIRI_AUTO_PREFERITI = 6  # tiri totali combinati entro quel minuto
-SOGLIA_GOL_AUTO_PREFERITI = 2  # oppure già questi gol combinati entro quel minuto, a prescindere dai tiri
+# Ritmo nel blocco 15 min corrente, somma delle due squadre. Tarati sui delta reali osservati:
+# 4 tiri in un blocco è ritmo alto ma non raro, 2 tiri in porta è il segnale più selettivo.
+SOGLIA_TIRI_RITMO_AUTO_PREFERITI = 4
+SOGLIA_PORTA_RITMO_AUTO_PREFERITI = 2
+# Contesto: dopo questo minuto la partita deve essere ancora in bilico per valere il canale
+# preferiti. Un 3-0 al 70' con tanti tiri non è una partita da seguire, è una partita finita.
+MINUTO_CONTESTO_AUTO_PREFERITI = 60
+SCARTO_MAX_AUTO_PREFERITI = 1  # pareggio o un gol di scarto
+# Tetto ai preferiti simultanei (manuali inclusi): ogni preferito viene ricontrollato ogni
+# INTERVALLO_CICLO_MOMENTUM (60s) invece di ogni INTERVALLO_CICLO_ATTIVO (180s), cioè costa il
+# triplo di chiamate API. Allentare le soglie senza un tetto porta dritti ai rate-limit.
+MAX_PREFERITI_SIMULTANEI = 4
+# Verdetto negativo per lo shadow-log: prima veniva registrato alla chiusura della finestra (~13'),
+# che ora non esiste più. Si registra una riga sola per partita a questo minuto, così il file resta
+# confrontabile (un campione per partita) invece di crescere ad ogni ciclo.
+MINUTO_VERDETTO_SHADOW_AUTO_PREFERITI = 75
 
 # Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
 # della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
@@ -189,6 +213,13 @@ SHADOW_LOG_STRATEGIE_FILE = data_path("shadow_log_strategie.jsonl")
 # es. dopo un riavvio del bot, che azzera lo storico in memoria). Sotto questa soglia si preferisce
 # non mandare nessun grafico piuttosto che mandarne uno inutile/fuorviante.
 MOMENTUM_MIN_STORICO = 6
+
+# Quante didascalie di notifica tenere per partita (vedi "didascalie_notifiche" in processa_partita):
+# servono a far ritrovare al bottone Momentum il testo esatto gia' mandato con quella notifica. Un
+# preferito viene notificato ogni INTERVALLO_CICLO_MOMENTUM (60s) per tutta la gara, quindi senza un
+# tetto se ne accumulerebbe un centinaio per fixture, tutte riscritte su disco ad ogni ciclo.
+# Momentum si clicca sulle notifiche recenti: le piu' vecchie sono peso morto.
+MAX_DIDASCALIE_RICORDATE = 30
 
 # Pesi per l'indice di intensità (usato dal comando /intensita e dal report automatico)
 PESO_INTENSITA_TIRI = 1
@@ -423,9 +454,11 @@ try:
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
-    SOGLIA_MINUTO_AUTO_PREFERITI = config.get("soglia_minuto_auto_preferiti", SOGLIA_MINUTO_AUTO_PREFERITI)
-    SOGLIA_TIRI_AUTO_PREFERITI = config.get("soglia_tiri_auto_preferiti", SOGLIA_TIRI_AUTO_PREFERITI)
-    SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
+    SOGLIA_TIRI_RITMO_AUTO_PREFERITI = config.get("soglia_tiri_ritmo_auto_preferiti", SOGLIA_TIRI_RITMO_AUTO_PREFERITI)
+    SOGLIA_PORTA_RITMO_AUTO_PREFERITI = config.get("soglia_porta_ritmo_auto_preferiti", SOGLIA_PORTA_RITMO_AUTO_PREFERITI)
+    MINUTO_CONTESTO_AUTO_PREFERITI = config.get("minuto_contesto_auto_preferiti", MINUTO_CONTESTO_AUTO_PREFERITI)
+    SCARTO_MAX_AUTO_PREFERITI = config.get("scarto_max_auto_preferiti", SCARTO_MAX_AUTO_PREFERITI)
+    MAX_PREFERITI_SIMULTANEI = config.get("max_preferiti_simultanei", MAX_PREFERITI_SIMULTANEI)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -456,7 +489,10 @@ try:
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
-    print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} (entro il {SOGLIA_MINUTO_AUTO_PREFERITI}' servono {SOGLIA_TIRI_AUTO_PREFERITI} tiri o {SOGLIA_GOL_AUTO_PREFERITI} gol)", flush=True)
+    print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} "
+          f"(ritmo 15 min: {SOGLIA_TIRI_RITMO_AUTO_PREFERITI} tiri o {SOGLIA_PORTA_RITMO_AUTO_PREFERITI} in porta; "
+          f"dal {MINUTO_CONTESTO_AUTO_PREFERITI}' max {SCARTO_MAX_AUTO_PREFERITI} gol di scarto; "
+          f"max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -3459,7 +3495,13 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
             # gol, tutto quello che c'era) - si perde solo se il bot è stato riavviato tra
             # l'invio e il click (stato in memoria perso), nel qual caso si ricostruisce una
             # versione minima piuttosto che lasciare senza didascalia.
-            caption = stato.get("didascalie_notifiche", {}).get(message_id)
+            # Chiave stringa: stato_partite finisce su disco in JSON, che le chiavi le forza a
+            # stringa, e carica_stato_partite() riconverte solo quelle di primo livello (i
+            # fixture_id). Scritta e letta come intero, la didascalia risultava introvabile dopo
+            # ogni riavvio del bot e la notifica perdeva quote, statistiche e gol appena si
+            # cliccava Momentum. Si vedeva soprattutto nel canale preferiti, dove le notifiche
+            # arrivano ogni 60s ed e' li' che si clicca Momentum piu' spesso.
+            caption = stato.get("didascalie_notifiche", {}).get(str(message_id))
             if not caption:
                 caption = (f"{home} {stato.get('score_home', '?')}-{stato.get('score_away', '?')} {away}\n"
                            f"{formatta_lega(stato.get('league', '?'), stato.get('league_country', ''))} | "
@@ -4913,19 +4955,47 @@ def cmd_aggiornastorico(chat_id):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
-def deve_aggiungere_automaticamente_ai_preferiti(tiri_totali, minuto, gol_totali):
-    """Partita che parte già 'a razzo': tanti tiri o gol nei primissimi minuti, segnale che vale
-    la pena seguirla dai preferiti da subito invece di aspettare che l'utente la clicchi a mano
-    tra le tante notifiche normali."""
+def deve_aggiungere_automaticamente_ai_preferiti(delta_stats, delta_reale, minuto,
+                                                 score_home, score_away):
+    """Partita che si sta accendendo ADESSO e che vale ancora la pena seguire.
+
+    Ritorna (True, motivo) oppure (False, motivo): il motivo serve al log, per poter capire a
+    posteriori perché una partita è stata promossa o scartata senza dover indovinare.
+
+    Guarda il RITMO del blocco di 15 minuti corrente, non i totali da inizio gara: 6 tiri fra il
+    60' e il 72' sul pareggio dicono molto di più di 6 tiri sparsi nei primi 12 minuti. Il delta è
+    lo stesso già calcolato per le notifiche (calcola_delta_15min), quindi non costa niente."""
     if not AUTO_PREFERITI_ATTIVO:
-        return False
-    if minuto is None or minuto > SOGLIA_MINUTO_AUTO_PREFERITI:
-        return False
-    if tiri_totali >= SOGLIA_TIRI_AUTO_PREFERITI:
-        return True
-    if gol_totali >= SOGLIA_GOL_AUTO_PREFERITI:
-        return True
-    return False
+        return False, "auto-preferiti disattivati"
+    if minuto is None:
+        return False, "minuto non disponibile"
+    if not delta_stats or not delta_reale:
+        # "Primo rilevamento": un solo punto nel blocco, il delta sarebbe (0,0) per costruzione e
+        # non direbbe niente sul ritmo (vedi _calcola_delta_15min_da_storico).
+        return False, "ritmo non ancora misurabile"
+    if avaria_statistiche_diffusa():
+        # Durante un guasto del feed i delta valgono zero per tutti: promuovere (o scartare) in
+        # base a numeri che l'API non sta pubblicando non ha senso. Vedi il 16/08.
+        return False, "statistiche assenti su molte leghe insieme, valutazione sospesa"
+    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+        # Non si marca la partita come già valutata: appena si libera un posto torna in gioco.
+        return False, f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+
+    scarto = abs(score_home - score_away)
+    if scarto >= SOGLIA_GOLEADA_STOP_NOTIFICHE:
+        # Oltre questo scarto il bot smette comunque di notificare (goleada): metterla fra i
+        # preferiti significherebbe pagarne il costo API senza ricevere niente.
+        return False, f"goleada ({scarto} gol di scarto)"
+    if minuto >= MINUTO_CONTESTO_AUTO_PREFERITI and scarto > SCARTO_MAX_AUTO_PREFERITI:
+        return False, f"partita incanalata al {minuto}' ({scarto} gol di scarto)"
+
+    tiri_ritmo = sum(delta_stats.get("Tiri totali", (0, 0)))
+    porta_ritmo = sum(delta_stats.get("Tiri in porta", (0, 0)))
+    if tiri_ritmo >= SOGLIA_TIRI_RITMO_AUTO_PREFERITI:
+        return True, f"{tiri_ritmo} tiri negli ultimi 15 min (soglia {SOGLIA_TIRI_RITMO_AUTO_PREFERITI})"
+    if porta_ritmo >= SOGLIA_PORTA_RITMO_AUTO_PREFERITI:
+        return True, f"{porta_ritmo} tiri in porta negli ultimi 15 min (soglia {SOGLIA_PORTA_RITMO_AUTO_PREFERITI})"
+    return False, f"ritmo basso ({tiri_ritmo} tiri, {porta_ritmo} in porta negli ultimi 15 min)"
 
 
 def _appendi_shadow_log(percorso_file, riga):
@@ -5547,6 +5617,10 @@ def processa_partita(fixture, notifiche_attive=True):
             }
             return
 
+        # Inizializzato prima del ramo: senza statistiche il delta non esiste, e più sotto
+        # l'auto-preferiti lo interroga comunque (senza questa riga sarebbe un NameError sulle
+        # partite che in questo ciclo non hanno ricevuto dati).
+        is_real_delta = False
         if current_stats:
             delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats, minuto)
             stats_dict = delta_stats
@@ -5667,18 +5741,21 @@ def processa_partita(fixture, notifiche_attive=True):
             # riproposta di nuovo entro la stessa finestra di minuti.
             gol_totali = score_home + score_away
             tiri_totali_partita = (tiri_casa + tiri_ospite) if current_stats else 0
-            if minuto is not None and minuto <= SOGLIA_MINUTO_AUTO_PREFERITI:
-                log(f"    ⭐? Valutazione auto-preferiti: {minuto}' tiri={tiri_totali_partita} gol={gol_totali} "
-                    f"(soglie: tiri>={SOGLIA_TIRI_AUTO_PREFERITI} o gol>={SOGLIA_GOL_AUTO_PREFERITI} entro il {SOGLIA_MINUTO_AUTO_PREFERITI}')")
-            if deve_aggiungere_automaticamente_ai_preferiti(tiri_totali_partita, minuto, gol_totali):
+            promuovi, motivo = deve_aggiungere_automaticamente_ai_preferiti(
+                stats_dict if current_stats else None, is_real_delta, minuto, score_home, score_away)
+            if promuovi:
                 FAVORITE_MATCHES.add(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
+                # Marcata come già valutata SOLO quando viene davvero promossa: così, se in seguito
+                # la si toglie a mano dai preferiti, il bot non la ripropone. Una partita mai
+                # promossa resta invece valutabile per tutto il resto della gara - è il punto del
+                # cambio: prima la finestra si chiudeva al 12' e non si riapriva più.
                 stato_partite[fixture_id]["auto_preferito_processato"] = True
-                log(f"    ⭐ Aggiunta automaticamente ai preferiti: ritmo alto al {minuto}' (tiri {tiri_totali_partita}, gol {gol_totali})")
+                log(f"    ⭐ Aggiunta automaticamente ai preferiti al {minuto}': {motivo}")
                 if notifiche_attive:
                     invia_messaggio_telegram(
-                        f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti: ritmo alto già al {minuto}' "
-                        f"(tiri totali {tiri_totali_partita}, gol {gol_totali}). Rimuovila dai preferiti se non ti interessa seguirla."
+                        f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti al {minuto}': {motivo}.\n"
+                        f"Risultato {score_home}-{score_away}. Rimuovila dai preferiti se non ti interessa seguirla."
                     )
                 registra_shadow_log_auto_preferiti(
                     fixture_id, home, away, league_name, league_country, minuto,
@@ -5687,9 +5764,21 @@ def processa_partita(fixture, notifiche_attive=True):
                     (tiri_area_casa + tiri_area_ospite) if current_stats else 0,
                     xg_casa, xg_ospite, gol_totali, True,
                 )
-            elif minuto is not None and minuto > SOGLIA_MINUTO_AUTO_PREFERITI:
-                if not stato_partite[fixture_id].get("auto_preferito_processato"):
-                    log(f"    ⭐✖️ Auto-preferiti: finestra chiusa al {minuto}' senza aver mai superato le soglie, non verrà più rivalutata")
+            else:
+                # Log solo quando la partita è in zona candidatura: senza finestra si valuta ad
+                # ogni ciclo per tutta la gara, e loggare ogni volta ogni partita renderebbe i log
+                # illeggibili proprio mentre servono.
+                if current_stats and is_real_delta:
+                    tiri_r = sum(stats_dict.get("Tiri totali", (0, 0)))
+                    porta_r = sum(stats_dict.get("Tiri in porta", (0, 0)))
+                    if tiri_r >= SOGLIA_TIRI_RITMO_AUTO_PREFERITI - 1 or porta_r >= SOGLIA_PORTA_RITMO_AUTO_PREFERITI:
+                        log(f"    ⭐? Auto-preferiti {minuto}': non promossa - {motivo}")
+                # Verdetto negativo per lo shadow-log: una riga sola per partita, così il file
+                # resta confrontabile (un campione per partita) invece di crescere ad ogni ciclo.
+                if (minuto is not None and minuto >= MINUTO_VERDETTO_SHADOW_AUTO_PREFERITI
+                        and not stato_partite[fixture_id].get("verdetto_shadow_auto_preferiti")):
+                    stato_partite[fixture_id]["verdetto_shadow_auto_preferiti"] = True
+                    log(f"    ⭐✖️ Auto-preferiti: mai promossa entro il {minuto}' - {motivo}")
                     registra_shadow_log_auto_preferiti(
                         fixture_id, home, away, league_name, league_country, minuto,
                         tiri_totali_partita, (tiri_p_casa + tiri_p_ospite) if current_stats else 0,
@@ -5697,7 +5786,6 @@ def processa_partita(fixture, notifiche_attive=True):
                         (tiri_area_casa + tiri_area_ospite) if current_stats else 0,
                         xg_casa, xg_ospite, gol_totali, False,
                     )
-                stato_partite[fixture_id]["auto_preferito_processato"] = True  # finestra chiusa, non ricontrollare più
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
         if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=evento_forzato, recupero_lungo=recupero_da_segnalare is not None, score_home=score_home, score_away=score_away):
@@ -5853,7 +5941,18 @@ def processa_partita(fixture, notifiche_attive=True):
                 # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
                 # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
                 # resta quello originale, invece di essere rimpiazzato da un testo minimo.
-                stato_partite[fixture_id].setdefault("didascalie_notifiche", {})[message_id_inviato] = messaggio
+                # Chiave stringa, la stessa forma con cui JSON la riscrive su disco: vedi il
+                # commento in cmd_momentum_da_bottone. Scritta come intero, dopo un riavvio non
+                # veniva piu' ritrovata.
+                didascalie = stato_partite[fixture_id].setdefault("didascalie_notifiche", {})
+                didascalie[str(message_id_inviato)] = messaggio
+                # Un preferito viene notificato ogni 60s per tutta la partita: senza un tetto qui
+                # si accumulano un centinaio di didascalie intere per fixture, riscritte su disco ad
+                # ogni ciclo. Momentum si clicca sulle notifiche recenti, le piu' vecchie non
+                # servono piu'.
+                if len(didascalie) > MAX_DIDASCALIE_RICORDATE:
+                    for vecchia in list(didascalie)[:-MAX_DIDASCALIE_RICORDATE]:
+                        del didascalie[vecchia]
         # Fuori orario: niente invio, ma lo stato sotto viene comunque aggiornato come se avessimo
         # notificato (timestamp_notifica azzerato, notified_final marcato) - altrimenti un
         # preferito verrebbe rimosso automaticamente solo perché è notte, non perché si è spento
