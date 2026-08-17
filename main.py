@@ -1,6 +1,7 @@
 import collections
 import json
 import re
+import unicodedata
 import time
 import datetime
 from zoneinfo import ZoneInfo
@@ -134,6 +135,15 @@ MOMENTUM_CORNER = 4
 # porta o 1 corner in più negli ultimi 15 min.
 SOGLIA_MIN_CAMBIO_PREFERITI = 2
 
+# Salto di ritmo: il criterio sopra misura quanto è cambiato DALL'ULTIMA NOTIFICA, quindi in una
+# fase concitata fatta di tanti piccoli incrementi (un tiro per ciclo) non scatta mai, pur essendo
+# esattamente il momento in cui la partita merita attenzione. Questo secondo criterio guarda invece
+# il totale del blocco di 15 minuti corrente: se il blocco è caldo la notifica parte lo stesso.
+# Scatta al massimo una volta per blocco (vedi blocco_ultima_notifica in processa_partita), quindi
+# aggiunge al massimo ~6 messaggi in una partita intera e non può degenerare.
+SOGLIA_RITMO_NOTIFICA_PREFERITI = 4       # tiri combinati nel blocco
+SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = 2  # oppure tiri in porta combinati nel blocco
+
 # Preferiti "raffreddati": se passano questi secondi senza che parta nessuna notifica (nessun
 # evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove automaticamente
 # dai preferiti e torna alle regole normali, invece di restare agganciata per sempre a soglie più
@@ -167,14 +177,25 @@ SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 # già calcolato per le notifiche e per /intensita, quindi nessuna chiamata API in più), con un
 # filtro di contesto e un tetto ai preferiti simultanei.
 AUTO_PREFERITI_ATTIVO = True
-# Ritmo nel blocco 15 min corrente, somma delle due squadre. Tarati sui delta reali osservati:
-# 4 tiri in un blocco è ritmo alto ma non raro, 2 tiri in porta è il segnale più selettivo.
-SOGLIA_TIRI_RITMO_AUTO_PREFERITI = 4
-SOGLIA_PORTA_RITMO_AUTO_PREFERITI = 2
-# Contesto: dopo questo minuto la partita deve essere ancora in bilico per valere il canale
-# preferiti. Un 3-0 al 70' con tanti tiri non è una partita da seguire, è una partita finita.
-MINUTO_CONTESTO_AUTO_PREFERITI = 60
+# --- Rotta 1: i GOL. Non tocca le statistiche, quindi funziona anche quando l'API non le
+# pubblica - ed è il motivo per cui è la rotta principale. Il 16/08 l'endpoint statistiche è
+# rimasto muto per ore su mezzo mondo (Belgio, Germania, Corea, Giappone, Svezia) mentre i gol
+# continuavano ad arrivare regolarmente, col nome del marcatore: una regola che dipende solo dai
+# gol non si spegne insieme al feed.
+#
+# Due gol presto dicono che la partita è viva, ma solo se il punteggio la lascia APERTA: un 2-0 al
+# 20' è una partita che si sta chiudendo, un 1-1 è una partita da seguire. Per questo non basta
+# contare i gol, serve anche lo scarto (SCARTO_MAX_AUTO_PREFERITI qui sotto): con 2 gol passa solo
+# l'1-1, con 3 gol passa il 2-1.
+SOGLIA_GOL_AUTO_PREFERITI = 2
+MINUTO_GOL_AUTO_PREFERITI = 25
 SCARTO_MAX_AUTO_PREFERITI = 1  # pareggio o un gol di scarto
+#
+# È l'UNICA porta d'ingresso, su richiesta esplicita. Era stata affiancata da una seconda regola
+# sul ritmo (tiri nel blocco di 15 minuti) per prendere anche le partite che si accendono senza
+# segnare: tolta, perché dipendeva dalle statistiche - cioè proprio dal dato che manca più spesso -
+# e perché una porta sola rende prevedibile cosa arriva nel canale. Un 0-0 con assedio quindi non
+# entra: resta seguito dalle notifiche normali nella chat principale.
 # Tetto ai preferiti simultanei (manuali inclusi): ogni preferito viene ricontrollato ogni
 # INTERVALLO_CICLO_MOMENTUM (60s) invece di ogni INTERVALLO_CICLO_ATTIVO (180s), cioè costa il
 # triplo di chiamate API. Allentare le soglie senza un tetto porta dritti ai rate-limit.
@@ -384,6 +405,8 @@ LEGHE_CON_STATISTICHE = [
     # Supercoppe di lega nazionali (l'equivalente locale della Community Shield inglese)
     "Community Shield", "Supercoppa Italiana", "Supercopa de Espana", "DFL-Supercup",
     "Trophee des Champions", "Johan Cruijff Schaal", "Supertaca",
+    # Coppe nazionali seguite (vedi COPPE_NAZIONALI_SEGUITE per la deroga sulle esclusioni)
+    "Coppa Italia", "FA Cup", "League Cup", "Copa del Rey", "DFB Pokal", "Coupe de France", "KNVB Beker", "Taca de Portugal", "Scottish Cup", "Scottish League Cup",
 ]
 
 # Nomi di campionato IDENTICI usati da paesi diversi nell'API (l'API-Football non li distingue
@@ -391,6 +414,10 @@ LEGHE_CON_STATISTICHE = [
 # League" del Kazakistan o il "Segunda División" dell'Uruguay (nessuna statistica reale)
 # passerebbero il filtro pensato per Inghilterra/Spagna, dato lo stesso nome esatto.
 PAESE_ATTESO_LEGA_AMBIGUA = {
+    # Coppe con nome condiviso da piu' federazioni: "FA Cup" e "League Cup" esistono con lo stesso
+    # identico nome in piu' paesi, e senza il vincolo passerebbero tutte.
+    "fa cup": "england",
+    "league cup": "england",
     "premier league": "england",
     "championship": "england",
     "league one": "england",
@@ -418,6 +445,27 @@ COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
     "uefa champions league qualification", "uefa europa league qualification",
     "uefa europa conference league qualification",
 }
+
+# Coppe nazionali seguite. Sono state riammesse su richiesta, ma non basta toglierle dall'elenco
+# delle escluse: senza la deroga qui sotto il meccanismo delle esclusioni per mancanza statistiche
+# le spegnerebbe quasi subito, ed e' il motivo per cui erano state tenute fuori.
+#
+# In coppa la copertura cambia PARTITA per partita, non a livello di competizione: una squadra di
+# Serie A che gioca in casa di una di Serie C gioca su un campo senza rilevazione, e nello stesso
+# turno un'altra partita fra due squadre di A ha i dati completi. Bastavano tre partite di
+# contorno nei primi turni per far sparire l'INTERA coppa per 24h - semifinali e finale comprese -
+# e dopo cinque turni per toglierla dalla whitelist per sempre.
+COPPE_NAZIONALI_SEGUITE = {
+    "coppa italia", "fa cup", "league cup", "copa del rey", "dfb-pokal", "dfb pokal",
+    "coupe de france", "knvb beker", "taca de portugal",
+    "scottish cup", "scottish league cup",
+}
+
+# Competizioni per cui le esclusioni per mancanza statistiche NON si applicano, perche' li' la
+# copertura e' una proprieta' della singola partita e non della competizione: le coppe nazionali
+# per il motivo sopra, le internazionali perche' nei turni di qualificazione mescolano federazioni
+# con copertura molto diversa (Kosovo-San Marino con dati parziali accanto a partite complete).
+COMPETIZIONI_COPERTURA_VARIABILE = COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO | COPPE_NAZIONALI_SEGUITE
 
 # Sottoinsieme delle competizioni UEFA sopra per cui ha senso cercare l'andata (fase di
 # qualificazione/playoff andata-ritorno delle 3 coppe per club): esclude Mondiali/Europei/Copa
@@ -451,12 +499,13 @@ try:
     MOMENTUM_TIRI_TOTALI = config.get("momentum_tiri_totali", MOMENTUM_TIRI_TOTALI)
     MOMENTUM_CORNER = config.get("momentum_corner", MOMENTUM_CORNER)
     SOGLIA_MIN_CAMBIO_PREFERITI = config.get("soglia_min_cambio_preferiti", SOGLIA_MIN_CAMBIO_PREFERITI)
+    SOGLIA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_ritmo_notifica_preferiti", SOGLIA_RITMO_NOTIFICA_PREFERITI)
+    SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_porta_ritmo_notifica_preferiti", SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI)
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
-    SOGLIA_TIRI_RITMO_AUTO_PREFERITI = config.get("soglia_tiri_ritmo_auto_preferiti", SOGLIA_TIRI_RITMO_AUTO_PREFERITI)
-    SOGLIA_PORTA_RITMO_AUTO_PREFERITI = config.get("soglia_porta_ritmo_auto_preferiti", SOGLIA_PORTA_RITMO_AUTO_PREFERITI)
-    MINUTO_CONTESTO_AUTO_PREFERITI = config.get("minuto_contesto_auto_preferiti", MINUTO_CONTESTO_AUTO_PREFERITI)
+    SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
+    MINUTO_GOL_AUTO_PREFERITI = config.get("minuto_gol_auto_preferiti", MINUTO_GOL_AUTO_PREFERITI)
     SCARTO_MAX_AUTO_PREFERITI = config.get("scarto_max_auto_preferiti", SCARTO_MAX_AUTO_PREFERITI)
     MAX_PREFERITI_SIMULTANEI = config.get("max_preferiti_simultanei", MAX_PREFERITI_SIMULTANEI)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
@@ -490,9 +539,9 @@ try:
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
     print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} "
-          f"(ritmo 15 min: {SOGLIA_TIRI_RITMO_AUTO_PREFERITI} tiri o {SOGLIA_PORTA_RITMO_AUTO_PREFERITI} in porta; "
-          f"dal {MINUTO_CONTESTO_AUTO_PREFERITI}' max {SCARTO_MAX_AUTO_PREFERITI} gol di scarto; "
-          f"max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)", flush=True)
+          f"({SOGLIA_GOL_AUTO_PREFERITI} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' con max "
+          f"{SCARTO_MAX_AUTO_PREFERITI} gol di scarto; max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)",
+          flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -514,15 +563,15 @@ PAROLE_ESCLUSE = [
 # pratica - nessuna di queste competizioni è comunque in LEGHE_CON_STATISTICHE, quindi verrebbe
 # già bloccata dalla whitelist da sola - ma resta come rete di sicurezza esplicita e documentata:
 # se in futuro cambia la logica del filtro, queste restano escluse di proposito, non per omissione.
+# Le coppe nazionali dei campionati principali sono state riammesse (vedi COPPE_NAZIONALI_SEGUITE):
+# qui restano solo le competizioni che NON vogliamo comunque, e non perche' siano coppe ma perche'
+# mettono in campo squadre riserve e club non professionistici - EFL Trophy e FA Trophy schierano
+# le U21 dei club di Premier League, la Challenge Cup scozzese squadre di leghe inferiori e
+# straniere. La Coupe de la Ligue non esiste piu' dal 2020 e resta come rete di sicurezza.
 COPPE_NAZIONALI_ESCLUSE = [
-    "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy",
-    "coppa italia",
-    "copa del rey",
-    "dfb-pokal", "dfb pokal",
-    "coupe de france", "coupe de la ligue",
-    "knvb beker",
-    "taca de portugal", "taça de portugal",
-    "scottish cup", "scottish league cup", "scottish challenge cup",
+    "efl trophy", "fa trophy",
+    "coupe de la ligue",
+    "scottish challenge cup",
 ]
 
 # Leghe che, empiricamente, non restituiscono mai statistiche reali dall'API pur superando il
@@ -614,6 +663,11 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
     accumulato da sola SOGLIA_SENZA_STATISTICHE risposte vuote consecutive (vedi il chiamante):
     qui ogni chiamata vale come "una partita intera di questa lega non ha statistiche", non come
     "un singolo controllo andato a vuoto"."""
+    # Nelle competizioni a copertura variabile il verdetto non viene nemmeno registrato: non
+    # avrebbe effetto (campionato_valido lo ignora, vedi COMPETIZIONI_COPERTURA_VARIABILE) e
+    # produrrebbe un log "Lega X esclusa per 24h" che descrive qualcosa che non succede.
+    if _senza_accenti(league_name) in COMPETIZIONI_COPERTURA_VARIABILE:
+        return
     chiave = (league_country.lower(), league_name.lower())
     stato = LEGHE_SENZA_STATISTICHE.get(chiave, {"senza_stats_consecutive": 0, "esclusa_fino": 0})
     if disponibili:
@@ -782,6 +836,10 @@ def registra_giornata_statistiche(league_country, league_name, giornata, disponi
 
     `giornata` è il campo "round" del fixture. Se l'API non lo fornisce si ripiega sulla data: la
     regola resta valida, solo un po' più severa (più giornate a parità di turni)."""
+    # Stesso motivo del gemello sopra: una coppa non va mai tolta dalla whitelist per le partite
+    # dei primi turni, quindi non si conta nemmeno.
+    if _senza_accenti(league_name) in COMPETIZIONI_COPERTURA_VARIABILE:
+        return
     chiave = (league_country.lower(), league_name.lower())
     stato = GIORNATE_SENZA_STATISTICHE.get(
         chiave, {"giornate": {}, "esclusa_definitivamente": 0})
@@ -1414,6 +1472,9 @@ def poll_callbacks():
                     elif cmd == "/coperturaleghe":
                         esegui_comando_sicuro(chat_id, cmd_coperturaleghe)
 
+                    elif cmd == "/dominio":
+                        esegui_comando_sicuro(chat_id, cmd_dominio)
+
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
 
@@ -1525,6 +1586,24 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
         return None
 
 
+def _senza_accenti(testo):
+    """Nome confrontabile: minuscolo e senza segni diacritici.
+
+    API-Football restituisce i nomi accentati ("Trophée des Champions", "Supercopa de España",
+    "Supertaça Cândido de Oliveira") mentre in whitelist alcune voci erano scritte in ASCII: il
+    confronto a stringa grezza non le faceva mai combaciare, e quelle competizioni non comparivano
+    fra le partite live pur essendo state messe in elenco apposta. Si vedeva anche il rattoppo:
+    per Süper Lig e Primera División erano state aggiunte a mano ENTRAMBE le forme, accentata e no.
+    Normalizzando qui il problema sparisce per tutte, comprese quelle che verranno aggiunte dopo."""
+    return "".join(c for c in unicodedata.normalize("NFD", (testo or "").lower())
+                   if unicodedata.category(c) != "Mn")
+
+
+# Chiavi normalizzate anch'esse: "segunda división" nella mappa sopra è accentata, e senza questo
+# la guardia sul paese per quella lega smetterebbe di trovarla appena il nome viene normalizzato.
+PAESE_ATTESO_LEGA_AMBIGUA_NORM = {_senza_accenti(k): v for k, v in PAESE_ATTESO_LEGA_AMBIGUA.items()}
+
+
 def _lega_in_whitelist_statica(nome, league_country):
     """True se 'nome' (già lowercase) corrisponde a una voce della whitelist statica.
     Match a confine di parola (non sottostringa grezza): "NB I" non deve intercettare "NB III"
@@ -1533,15 +1612,16 @@ def _lega_in_whitelist_statica(nome, league_country):
     ambigui condivisi da più paesi (es. "Premier League" Inghilterra/Kazakistan) serve anche il
     paese giusto, altrimenti passerebbero tutte le leghe omonime prive di statistiche reali."""
     paese = (league_country or "").lower()
+    nome = _senza_accenti(nome)
     for lega in LEGHE_CON_STATISTICHE:
-        lega_lower = lega.lower()
+        lega_lower = _senza_accenti(lega)
         if lega_lower in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO:
             if nome == lega_lower:
                 return True
             continue
         if not re.search(rf"\b{re.escape(lega_lower)}\b", nome):
             continue
-        paese_atteso = PAESE_ATTESO_LEGA_AMBIGUA.get(lega_lower)
+        paese_atteso = PAESE_ATTESO_LEGA_AMBIGUA_NORM.get(lega_lower)
         if paese_atteso and paese != paese_atteso:
             continue
         return True
@@ -1549,15 +1629,18 @@ def _lega_in_whitelist_statica(nome, league_country):
 
 
 def campionato_valido(league_name, league_type, league_country=""):
-    nome = league_name.lower()
+    # Normalizzato su ENTRAMBI i lati del confronto: l'API manda i nomi accentati e alcune voci
+    # degli elenchi sono scritte in ASCII (vedi _senza_accenti). Normalizzare solo il nome della
+    # lega romperebbe le voci accentate degli elenchi, per esempio "taça de portugal".
+    nome = _senza_accenti(league_name)
     for parola in PAROLE_ESCLUSE:
-        if parola in nome:
+        if _senza_accenti(parola) in nome:
             return False
     for coppa in COPPE_NAZIONALI_ESCLUSE:
         # Confine di parola, non sottostringa grezza: "coppa italia" non deve intercettare
         # "Supercoppa Italiana" (whitelistata a parte) solo perché ne è una sottostringa - stesso
         # criterio già usato da _lega_in_whitelist_statica per lo stesso identico motivo.
-        if re.search(rf"\b{re.escape(coppa)}\b", nome):
+        if re.search(rf"\b{re.escape(_senza_accenti(coppa))}\b", nome):
             return False
     if league_type and league_type.lower() not in ["league", "cup", "championship"]:
         return False
@@ -1570,7 +1653,7 @@ def campionato_valido(league_name, league_type, league_country=""):
     # scattare l'esclusione, TUTTA la competizione sparirebbe per 24h (anche le partite ben coperte
     # di squadre più note), senza nessuna indicazione visibile del motivo - nemmeno /diagnostica lo
     # segnala, perché filtra anch'essa tramite campionato_valido().
-    if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_per_mancanza_statistiche(league_country, league_name):
+    if nome not in COMPETIZIONI_COPERTURA_VARIABILE and lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     # Esclusione definitiva: la lega ha attraversato SOGLIA_GIORNATE_SENZA_STATISTICHE giornate di
     # campionato senza pubblicare un solo tiro. Vale la stessa deroga per le competizioni
@@ -1578,7 +1661,7 @@ def campionato_valido(league_name, league_type, league_country=""):
     # cambia partita per partita a seconda delle federazioni in campo, non è una proprietà della
     # competizione. Per tornare a seguire una lega tolta di qui basta cancellare la sua voce da
     # giornate_senza_statistiche.json (o il file intero).
-    if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_definitivamente(league_country, league_name):
+    if nome not in COMPETIZIONI_COPERTURA_VARIABILE and lega_esclusa_definitivamente(league_country, league_name):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
         # Solo whitelist statica curata: fino a poco fa si passava anche qualunque campionato
@@ -2467,6 +2550,8 @@ def cmd_help(chat_id):
         "di sei condizioni di gioco (non più esposte come comandi live)\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
+        "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
+        "rispecchia ancora (in cima le partite che dominano e perdono). Nessuna chiamata API\n"
         "/coperturaleghe - Quali campionati pubblicano statistiche reali e quante giornate senza "
         "dati ha accumulato ciascuno (da quale giornata è partita la verifica)\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
@@ -2927,6 +3012,67 @@ def cmd_shadowlogstrategie(chat_id):
                 files={"document": f}, timeout=30)
     except Exception as e:
         log(f"Errore invio file shadow_log_strategie.jsonl: {e}")
+
+
+def cmd_dominio(chat_id):
+    """Cruscotto: tutte le partite seguite, ordinate per quanto il risultato tradisce il campo.
+
+    Zero chiamate API - legge solo stato_partite, già aggiornato dal ciclo principale (a differenza
+    di /intensita, che ne fa una per partita e va aspettata). Serve a rispondere in un colpo
+    d'occhio a "dove sta succedendo qualcosa che il punteggio non dice ancora"."""
+    righe_sotto, righe_bloccate, righe_avanti, senza_dominio = [], [], [], 0
+    for fid, stato in stato_partite.items():
+        history = stato.get("history", [])
+        if not history:
+            continue
+        current_stats = history[-1].get("stats")
+        score_h = stato.get("score_home", 0)
+        score_a = stato.get("score_away", 0)
+        dominio = calcola_dominio(current_stats, score_h, score_a)
+        if not dominio:
+            senza_dominio += 1
+            continue
+        home = stato.get("home", "?")
+        away = stato.get("away", "?")
+        chi = home if dominio["lato"] == 0 else away
+        minuto = stato.get("last_minute", "?")
+        tiri = current_stats.get("Tiri totali", (0, 0))
+        porta = current_stats.get("Tiri in porta", (0, 0))
+        if dominio["lato"] == 1:
+            tiri, porta = (tiri[1], tiri[0]), (porta[1], porta[0])
+        # Due righe secche, senza ripetere quello che dice già l'intestazione del gruppo: la prima
+        # inquadra la partita, la seconda dice chi comanda e con quali numeri.
+        blocco = (
+            f"{home} {score_h}-{score_a} {away} · {minuto}'\n"
+            f"{barra_dominio(dominio['quota'])} {dominio['quota']}% {chi} · "
+            f"{tiri[0]}-{tiri[1]} tiri, {porta[0]}-{porta[1]} in porta"
+        )
+        destinazione = {0: righe_sotto, 1: righe_bloccate, 2: righe_avanti}[dominio["priorita"]]
+        destinazione.append((dominio["quota"], blocco))
+
+    if not (righe_sotto or righe_bloccate or righe_avanti):
+        invia_messaggio_telegram(
+            "Nessuna partita con un dominio netto in questo momento.\n\n"
+            f"{senza_dominio} partite seguite sono equilibrate, o non hanno ancora abbastanza "
+            "gioco per dare un verdetto.", chat_id=chat_id)
+        return
+
+    def ordina(voci):
+        return [b for _, b in sorted(voci, key=lambda v: -v[0])]
+
+    parti = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato"]
+    if righe_sotto:
+        parti.append("🔥 *DOMINA E PERDE*\n" + "\n\n".join(ordina(righe_sotto)))
+    if righe_bloccate:
+        parti.append("⚡ *DOMINA E NON SEGNA*\n" + "\n\n".join(ordina(righe_bloccate)))
+    if righe_avanti:
+        parti.append("▪️ *DOMINA ED È AVANTI* (il risultato rispecchia)\n" + "\n\n".join(ordina(righe_avanti)))
+    if senza_dominio:
+        parti.append(f"_Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco._"
+                     if senza_dominio > 1 else
+                     "_Un'altra partita seguita: equilibrata o con troppo poco gioco._")
+
+    invia_messaggio_telegram("\n\n".join(parti), chat_id=chat_id)
 
 
 def cmd_coperturaleghe(chat_id):
@@ -3560,6 +3706,91 @@ def calcola_indice_intensita(delta_stats):
         + (d_porta[0] + d_porta[1]) * PESO_INTENSITA_PORTA
         + (d_corner[0] + d_corner[1]) * PESO_INTENSITA_CORNER
     )
+
+
+# =============================================================================
+# DOMINIO: chi sta facendo la partita, e se il risultato lo rispecchia
+# =============================================================================
+# L'indice di intensità qui sopra SOMMA le due squadre: dice quanto si gioca, non chi comanda.
+# Un 10-9 di tiri è intensissimo ma equilibrato, e non indica da che parte stare; un 9-1 è la
+# stessa quantità di gioco ma tutta da una parte sola. Per il trading serve il secondo.
+#
+# Il segnale che conta davvero non è però il dominio in sé: è la DIVERGENZA fra dominio e
+# risultato. Una squadra che domina e vince 3-0 non offre niente, il mercato l'ha già capito.
+# Una che domina e non segna, o peggio sta perdendo, è la situazione in cui il punteggio racconta
+# una partita diversa da quella che si sta giocando.
+PESO_DOMINIO_TIRI = 1
+PESO_DOMINIO_PORTA = 3    # un tiro in porta pesa quanto tre tiri qualunque
+PESO_DOMINIO_CORNER = 1
+PESO_DOMINIO_AREA = 2     # tiri dentro l'area: la statistica più vicina a un'occasione vera
+# Sotto questa quota le due squadre si equivalgono abbastanza da non parlare di dominio.
+SOGLIA_QUOTA_DOMINIO = 65
+# Con pochissimo gioco le percentuali impazziscono (1 tiro a 0 fa "100%"): serve un minimo di
+# materiale prima di dare un verdetto.
+VOLUME_MINIMO_DOMINIO = 8
+
+
+def _peso_offensivo(stats, lato):
+    def v(chiave):
+        return stats.get(chiave, (0, 0))[lato] or 0
+    return (v("Tiri totali") * PESO_DOMINIO_TIRI
+            + v("Tiri in porta") * PESO_DOMINIO_PORTA
+            + v("Corner") * PESO_DOMINIO_CORNER
+            + v("Tiri in area") * PESO_DOMINIO_AREA)
+
+
+def calcola_dominio(current_stats, score_home, score_away):
+    """Ritorna chi domina, con quanta parte dell'azione e cosa dice il risultato.
+
+    None quando non c'è un dominio da dichiarare: statistiche assenti, troppo poco gioco per
+    giudicare, oppure squadre sostanzialmente pari."""
+    if not current_stats:
+        return None
+    peso_casa = _peso_offensivo(current_stats, 0)
+    peso_ospite = _peso_offensivo(current_stats, 1)
+    totale = peso_casa + peso_ospite
+    if totale < VOLUME_MINIMO_DOMINIO:
+        return None
+
+    lato = 0 if peso_casa >= peso_ospite else 1
+    quota = round(max(peso_casa, peso_ospite) / totale * 100)
+    if quota < SOGLIA_QUOTA_DOMINIO:
+        return None
+
+    gol_pro = score_home if lato == 0 else score_away
+    gol_contro = score_away if lato == 0 else score_home
+    if gol_pro > gol_contro:
+        situazione, priorita = "avanti", 2      # il risultato rispecchia il campo: niente da dire
+    elif gol_pro == gol_contro:
+        situazione, priorita = "bloccata", 1    # domina e non segna
+    else:
+        situazione, priorita = "sotto", 0       # domina e sta perdendo: divergenza massima
+    return {"lato": lato, "quota": quota, "situazione": situazione, "priorita": priorita}
+
+
+def barra_dominio(quota):
+    """Barra a dieci tacche: la quota si legge prima del numero."""
+    pieni = max(0, min(10, round(quota / 10)))
+    return "▓" * pieni + "░" * (10 - pieni)
+
+
+def riga_dominio(dominio, home, away, current_stats):
+    """Una riga sola che risponde a 'chi comanda e conviene guardarla?'."""
+    if not dominio:
+        return ""
+    chi = home if dominio["lato"] == 0 else away
+    tiri = current_stats.get("Tiri totali", (0, 0))
+    porta = current_stats.get("Tiri in porta", (0, 0))
+    if dominio["lato"] == 1:
+        tiri, porta = (tiri[1], tiri[0]), (porta[1], porta[0])
+    coda = {
+        "sotto": "e sta perdendo",
+        "bloccata": "e non segna",
+        "avanti": "ed è avanti",
+    }[dominio["situazione"]]
+    emoji = {"sotto": "🔥", "bloccata": "⚡", "avanti": "▪️"}[dominio["situazione"]]
+    return (f"{emoji} {chi} comanda {dominio['quota']}% {coda} "
+            f"({tiri[0]}-{tiri[1]} tiri, {porta[0]}-{porta[1]} in porta)")
 
 
 def descrivi_motivazioni_intensita(delta_stats):
@@ -4955,47 +5186,61 @@ def cmd_aggiornastorico(chat_id):
 # =============================================================================
 # REGOLE DI NOTIFICA
 # =============================================================================
-def deve_aggiungere_automaticamente_ai_preferiti(delta_stats, delta_reale, minuto,
-                                                 score_home, score_away):
-    """Partita che si sta accendendo ADESSO e che vale ancora la pena seguire.
+def invia_messaggio_uscita_preferiti(home, away, minuto, score_home, score_away, motivo, stato):
+    """Chiude il filo di una partita nel canale preferiti, dicendo perché non se ne parla più.
 
-    Ritorna (True, motivo) oppure (False, motivo): il motivo serve al log, per poter capire a
-    posteriori perché una partita è stata promossa o scartata senza dover indovinare.
+    Senza, il canale resta pieno di conversazioni senza finale: gli aggiornamenti si interrompono
+    e basta, e a distanza di ore non si capisce se la partita è finita, si è spenta o è stata
+    tolta. Va nel CANALE, non nella chat principale: è lì che la partita è vissuta."""
+    righe = [
+        f"🏁 ESCE DAI PREFERITI · {minuto}'",
+        f"{home} {score_home}-{score_away} {away}",
+        "",
+        motivo,
+    ]
+    # Confronto 1°T/2°T se disponibile: è il riepilogo che rende utile rileggere il filo dopo.
+    stats_1h = stato.get("stats_fine_1h")
+    history = stato.get("history", [])
+    if stats_1h and history:
+        righe.append("\n" + testo_confronto_tempi(stats_1h, history[-1]["stats"]))
+    invia_messaggio_telegram("\n".join(righe), chat_id=TELEGRAM_CHAT_ID_PREFERITI)
 
-    Guarda il RITMO del blocco di 15 minuti corrente, non i totali da inizio gara: 6 tiri fra il
-    60' e il 72' sul pareggio dicono molto di più di 6 tiri sparsi nei primi 12 minuti. Il delta è
-    lo stesso già calcolato per le notifiche (calcola_delta_15min), quindi non costa niente."""
+
+def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away):
+    """Partita che si sblocca presto restando aperta: due gol entro il 25' con al massimo un gol
+    di scarto.
+
+    Ritorna (True, motivo) oppure (False, motivo): il motivo finisce nel log e nella notifica, per
+    capire a posteriori perché una partita è stata promossa o scartata senza dover indovinare.
+
+    Non legge le statistiche, ed è deliberato. Il 16/08 l'endpoint statistiche è rimasto muto per
+    ore su Belgio, Germania, Corea, Giappone e Svezia mentre i gol continuavano ad arrivare
+    regolarmente, col nome del marcatore: una regola che guarda solo il punteggio non si spegne
+    insieme al feed, e non ha bisogno né della guardia sull'avaria diffusa né di aspettare che il
+    delta 15 minuti diventi misurabile."""
     if not AUTO_PREFERITI_ATTIVO:
         return False, "auto-preferiti disattivati"
     if minuto is None:
         return False, "minuto non disponibile"
-    if not delta_stats or not delta_reale:
-        # "Primo rilevamento": un solo punto nel blocco, il delta sarebbe (0,0) per costruzione e
-        # non direbbe niente sul ritmo (vedi _calcola_delta_15min_da_storico).
-        return False, "ritmo non ancora misurabile"
-    if avaria_statistiche_diffusa():
-        # Durante un guasto del feed i delta valgono zero per tutti: promuovere (o scartare) in
-        # base a numeri che l'API non sta pubblicando non ha senso. Vedi il 16/08.
-        return False, "statistiche assenti su molte leghe insieme, valutazione sospesa"
     if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
         # Non si marca la partita come già valutata: appena si libera un posto torna in gioco.
         return False, f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
 
+    gol_totali = score_home + score_away
     scarto = abs(score_home - score_away)
-    if scarto >= SOGLIA_GOLEADA_STOP_NOTIFICHE:
-        # Oltre questo scarto il bot smette comunque di notificare (goleada): metterla fra i
-        # preferiti significherebbe pagarne il costo API senza ricevere niente.
-        return False, f"goleada ({scarto} gol di scarto)"
-    if minuto >= MINUTO_CONTESTO_AUTO_PREFERITI and scarto > SCARTO_MAX_AUTO_PREFERITI:
-        return False, f"partita incanalata al {minuto}' ({scarto} gol di scarto)"
-
-    tiri_ritmo = sum(delta_stats.get("Tiri totali", (0, 0)))
-    porta_ritmo = sum(delta_stats.get("Tiri in porta", (0, 0)))
-    if tiri_ritmo >= SOGLIA_TIRI_RITMO_AUTO_PREFERITI:
-        return True, f"{tiri_ritmo} tiri negli ultimi 15 min (soglia {SOGLIA_TIRI_RITMO_AUTO_PREFERITI})"
-    if porta_ritmo >= SOGLIA_PORTA_RITMO_AUTO_PREFERITI:
-        return True, f"{porta_ritmo} tiri in porta negli ultimi 15 min (soglia {SOGLIA_PORTA_RITMO_AUTO_PREFERITI})"
-    return False, f"ritmo basso ({tiri_ritmo} tiri, {porta_ritmo} in porta negli ultimi 15 min)"
+    # I motivi non ripetono punteggio e minuto: chi chiama li ha già e li stampa accanto, e nel
+    # messaggio di ingresso finivano scritti due volte nella stessa riga.
+    if gol_totali < SOGLIA_GOL_AUTO_PREFERITI:
+        return False, f"{gol_totali} gol (ne servono {SOGLIA_GOL_AUTO_PREFERITI})"
+    if minuto > MINUTO_GOL_AUTO_PREFERITI:
+        return False, f"i {gol_totali} gol sono arrivati dopo il {MINUTO_GOL_AUTO_PREFERITI}'"
+    # Lo scarto decide se la partita è ancora aperta: con 2 gol passa l'1-1 ma non il 2-0, con 3
+    # gol passa il 2-1. Un 2-0 al 20' non è una partita viva, è una partita che si sta chiudendo.
+    # Copre da sé anche la goleada: con al massimo un gol di scarto non ci si arriva mai.
+    if scarto > SCARTO_MAX_AUTO_PREFERITI:
+        return False, f"{scarto} gol di scarto, partita già indirizzata"
+    return True, (f"{gol_totali} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' "
+                  f"con la partita ancora aperta")
 
 
 def _appendi_shadow_log(percorso_file, riga):
@@ -5147,6 +5392,18 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
                 return True
             if (d_corner[0] + d_corner[1]) >= SOGLIA_MIN_CAMBIO_PREFERITI:
                 return True
+            # Salto di ritmo: i controlli qui sopra misurano il cambiamento DALL'ULTIMA NOTIFICA,
+            # quindi una fase concitata fatta di tanti piccoli incrementi (un tiro per ciclo) non
+            # li supera mai, pur essendo il momento in cui la partita merita attenzione. Questo
+            # guarda il totale del blocco di 15 minuti, e scatta al massimo una volta per blocco:
+            # se in questo blocco una notifica è già partita - per un gol, per le soglie sopra, per
+            # qualunque motivo - non se ne aggiunge una seconda.
+            if stato.get("blocco_ultima_notifica") != _blocco_minuto(minuto):
+                tiri_blocco = sum(delta_stats.get("Tiri totali", (0, 0)))
+                porta_blocco = d_porta[0] + d_porta[1]
+                if (tiri_blocco >= SOGLIA_RITMO_NOTIFICA_PREFERITI
+                        or porta_blocco >= SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI):
+                    return True
         return False
 
     tiri_totali = tiri_casa + tiri_ospite
@@ -5617,10 +5874,6 @@ def processa_partita(fixture, notifiche_attive=True):
             }
             return
 
-        # Inizializzato prima del ramo: senza statistiche il delta non esiste, e più sotto
-        # l'auto-preferiti lo interroga comunque (senza questa riga sarebbe un NameError sulle
-        # partite che in questo ciclo non hanno ricevuto dati).
-        is_real_delta = False
         if current_stats:
             delta_stats, is_real_delta = calcola_delta_15min(fixture_id, current_stats, minuto)
             stats_dict = delta_stats
@@ -5703,6 +5956,29 @@ def processa_partita(fixture, notifiche_attive=True):
         # soglie più permissive per sempre.
         if str(fixture_id) in FAVORITE_MATCHES:
             stato_fav = stato_partite.setdefault(fixture_id, {})
+            # Preferito senza statistiche: esce. La regola d'ingresso guarda solo il punteggio,
+            # apposta per funzionare quando l'API tace, ma il canale serve a leggere tiri, tiri in
+            # porta e corner mentre si gioca - e senza quelli non può far scattare nessuna
+            # strategia, pur costando il triplo di chiamate (60s invece di 180s). Meglio liberare
+            # il posto per una partita che i dati li ha.
+            # Si guarda l'assenza CONFERMATA, non un buco passeggero: esito "vuote" ripetuto
+            # SOGLIA_SENZA_STATISTICHE volte, la stessa prova che usa la diagnostica per dire
+            # "l'API risponde ma non pubblica statistiche per questa partita". Un rate-limit o un
+            # timeout lasciano esito "errore" e non contano.
+            if (stato_fav.get("stats_ultimo_esito") == "vuote"
+                    and stato_fav.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE):
+                FAVORITE_MATCHES.discard(str(fixture_id))
+                save_favorites(FAVORITE_MATCHES)
+                # Non riproponibile: senza questo, la regola sui gol la rimetterebbe dentro al
+                # ciclo successivo, visto che il punteggio non è cambiato.
+                stato_fav["auto_preferito_processato"] = True
+                log("    ⭐➡️ Preferito rimosso: l'API non pubblica statistiche per questa partita")
+                if notifiche_attive:
+                    invia_messaggio_uscita_preferiti(
+                        home, away, minuto, score_home, score_away,
+                        "l'API non pubblica statistiche per questa partita",
+                        stato_fav)
+                return
             ultimo_invio_fav = stato_fav.get("timestamp_notifica", 0)
             # Il tempo di silenzio va misurato in minuti GIOCATI, non di orologio: durante
             # l'intervallo (status "HT", elapsed assente) non arrivano notifiche semplicemente
@@ -5732,9 +6008,10 @@ def processa_partita(fixture, notifiche_attive=True):
                 minuti_senza_notifica = DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
                 log(f"    ⭐➡️ Preferito rimosso automaticamente: nessuna notifica da oltre {minuti_senza_notifica} min")
                 if notifiche_attive:
-                    invia_messaggio_telegram(
-                        f"⭐➡️ {home} vs {away} rimossa automaticamente dai preferiti: nessuna notifica rilevante da {minuti_senza_notifica} minuti. Torna alle notifiche/soglie normali."
-                    )
+                    invia_messaggio_uscita_preferiti(
+                        home, away, minuto, score_home, score_away,
+                        f"si è spenta, nessun cambiamento da {minuti_senza_notifica} minuti giocati",
+                        stato_fav)
         elif not stato_partite.get(fixture_id, {}).get("auto_preferito_processato"):
             # Partita che parte già "a razzo" (tanti tiri o gol nei primissimi minuti): valutata
             # una sola volta per partita, cosi' se l'utente la rimuove in seguito non viene
@@ -5742,7 +6019,7 @@ def processa_partita(fixture, notifiche_attive=True):
             gol_totali = score_home + score_away
             tiri_totali_partita = (tiri_casa + tiri_ospite) if current_stats else 0
             promuovi, motivo = deve_aggiungere_automaticamente_ai_preferiti(
-                stats_dict if current_stats else None, is_real_delta, minuto, score_home, score_away)
+                minuto, score_home, score_away)
             if promuovi:
                 FAVORITE_MATCHES.add(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
@@ -5753,10 +6030,32 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["auto_preferito_processato"] = True
                 log(f"    ⭐ Aggiunta automaticamente ai preferiti al {minuto}': {motivo}")
                 if notifiche_attive:
-                    invia_messaggio_telegram(
-                        f"⭐ {home} vs {away} aggiunta automaticamente ai preferiti al {minuto}': {motivo}.\n"
-                        f"Risultato {score_home}-{score_away}. Rimuovila dai preferiti se non ti interessa seguirla."
-                    )
+                    # Nel CANALE preferiti, non nella chat principale: è il messaggio che apre la
+                    # partita là dove poi vivrà. Prima finiva nella chat principale (chat_id
+                    # omesso), e il canale si ritrovava un flusso di aggiornamenti senza inizio.
+                    quote_ingresso = quote_1x2_per_fixture(fixture_id)
+                    righe_ingresso = [
+                        f"⭐ ENTRA NEI PREFERITI · {minuto}'",
+                        f"{home} {score_home}-{score_away} {away}",
+                        f"{formatta_lega(league_name, league_country)}",
+                        "",
+                        motivo,
+                    ]
+                    if goals:
+                        marcatori = [f"{g['minute']}' {g['player']} ({g['team']})" for g in goals]
+                        righe_ingresso.append("\nGol: " + " · ".join(marcatori))
+                    if isinstance(quote_ingresso, dict):
+                        righe_ingresso.append(
+                            f"Quote 1X2 iniziali: {quote_ingresso['casa']:.2f} - "
+                            f"{quote_ingresso['pareggio']:.2f} - {quote_ingresso['ospite']:.2f}")
+                    if current_stats:
+                        righe_ingresso.append(
+                            f"Statistiche: Tiri {tiri_casa}-{tiri_ospite} · "
+                            f"Porta {tiri_p_casa}-{tiri_p_ospite} · Corner {corner_casa}-{corner_ospite}")
+                    else:
+                        righe_ingresso.append("Statistiche: N/D (l'API non le pubblica per questa partita)")
+                    invia_messaggio_telegram("\n".join(righe_ingresso),
+                                             chat_id=TELEGRAM_CHAT_ID_PREFERITI)
                 registra_shadow_log_auto_preferiti(
                     fixture_id, home, away, league_name, league_country, minuto,
                     tiri_totali_partita, (tiri_p_casa + tiri_p_ospite) if current_stats else 0,
@@ -5765,14 +6064,11 @@ def processa_partita(fixture, notifiche_attive=True):
                     xg_casa, xg_ospite, gol_totali, True,
                 )
             else:
-                # Log solo quando la partita è in zona candidatura: senza finestra si valuta ad
-                # ogni ciclo per tutta la gara, e loggare ogni volta ogni partita renderebbe i log
-                # illeggibili proprio mentre servono.
-                if current_stats and is_real_delta:
-                    tiri_r = sum(stats_dict.get("Tiri totali", (0, 0)))
-                    porta_r = sum(stats_dict.get("Tiri in porta", (0, 0)))
-                    if tiri_r >= SOGLIA_TIRI_RITMO_AUTO_PREFERITI - 1 or porta_r >= SOGLIA_PORTA_RITMO_AUTO_PREFERITI:
-                        log(f"    ⭐? Auto-preferiti {minuto}': non promossa - {motivo}")
+                # Log solo per le partite che hanno segnato: sono le uniche che possono entrare,
+                # quindi le uniche il cui "no" dice qualcosa. Loggare ad ogni ciclo anche gli 0-0
+                # riempirebbe i log senza aggiungere niente.
+                if gol_totali >= SOGLIA_GOL_AUTO_PREFERITI and minuto is not None:
+                    log(f"    ⭐? Auto-preferiti {minuto}': non promossa - {motivo}")
                 # Verdetto negativo per lo shadow-log: una riga sola per partita, così il file
                 # resta confrontabile (un campione per partita) invece di crescere ad ogni ciclo.
                 if (minuto is not None and minuto >= MINUTO_VERDETTO_SHADOW_AUTO_PREFERITI
@@ -5879,6 +6175,15 @@ def processa_partita(fixture, notifiche_attive=True):
         # Confronto 1°T/2°T: solo nel 2° tempo. Se manca lo snapshot di fine 1°T (il bot ha
         # iniziato a monitorare la partita dopo l'intervallo, es. per un riavvio nel mezzo) lo
         # dice esplicitamente, invece di lasciare intuire una sezione sparita per errore.
+        # Dominio sui totali di partita, non sul blocco 15 min: la domanda è "chi sta facendo la
+        # partita", che è una cosa cumulativa. Si calcola una volta e finisce sia in notifica sia
+        # nel log, così a colpo d'occhio si legge chi comanda senza confrontare due colonne.
+        dominio_partita = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
+        riga_dominio_notifica = ""
+        if dominio_partita:
+            riga_dominio_notifica = riga_dominio(dominio_partita, home, away, current_stats) + "\n"
+            log(f"  {riga_dominio(dominio_partita, home, away, current_stats)}")
+
         tempi_text = ""
         stats_1h_salvate = stato_partite.get(fixture_id, {}).get("stats_fine_1h")
         if status_short == "2H" and current_stats:
@@ -5926,6 +6231,7 @@ def processa_partita(fixture, notifiche_attive=True):
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
             f"- Corner: {corner_line}\n"
+            f"{riga_dominio_notifica}"
             f"{tempi_text}"
             f"{nota_momentum}"
         ).rstrip()
@@ -5964,6 +6270,10 @@ def processa_partita(fixture, notifiche_attive=True):
             "tiri_ospite": tiri_ospite,
             "timestamp_notifica": time.time(),
             "notified_final": prev_notified,
+            # Blocco di 15 minuti in cui è caduta questa notifica: il salto di ritmo dei preferiti
+            # (vedi deve_notificare) lo usa per non mandare un secondo messaggio nello stesso
+            # blocco, qualunque fosse il motivo del primo.
+            "blocco_ultima_notifica": _blocco_minuto(minuto),
         }
         # Minuto di gioco dell'ultima notifica: serve alla rimozione automatica dei preferiti per
         # misurare il silenzio in minuti giocati invece che di orologio (vedi sopra). Non si
