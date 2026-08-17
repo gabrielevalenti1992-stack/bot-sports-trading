@@ -74,16 +74,104 @@ DISCO_SCRIVIBILE = verifica_disco_scrivibile()
 
 
 # =============================================================================
-# SERVER HTTP PER RENDER FREE (fix 501 HEAD)
+# SERVER HTTP PER RENDER FREE (fix 501 HEAD) + BATTITO DEL CICLO PRINCIPALE
 # =============================================================================
+# Il server HTTP vive in un thread daemon separato dal ciclo principale: finché il processo Python
+# è vivo risponde, anche se il ciclo che fa il lavoro vero è morto o bloccato. Rispondere sempre
+# "200 Bot is running!" rendeva quindi l'endpoint inutile come controllo di salute - un monitor
+# esterno lo avrebbe visto verde con il bot fermo da ore.
+#
+# Il ciclo principale aggiorna questo battito ad ogni giro (vedi segna_battito): se l'ultimo
+# aggiornamento è più vecchio della soglia qui sotto, il ciclo non sta più girando e l'endpoint
+# risponde 503, che è quello che un monitor esterno sa leggere.
+#
+# La pausa manuale (/stop) è uno stato SANO: il ciclo non lavora perché gliel'è stato chiesto, e
+# svegliare qualcuno di notte per una pausa voluta sarebbe rumore. Aggiorna il battito anche lei,
+# dichiarando lo stato, così l'endpoint distingue "fermo apposta" da "fermo e basta".
+# Due tempi distinti, perché "vivo" e "funzionante" non sono la stessa cosa: il ciclo principale
+# cattura qualunque eccezione e riprova dopo 30s, quindi un bot che fallisce ad ogni giro continua
+# a passare dall'inizio del ciclo per sempre. Col solo battito d'inizio sembrerebbe sano.
+#   timestamp        -> l'ultima volta che il ciclo è passato di lì (thread vivo)
+#   giro_completato  -> l'ultima volta che un giro è arrivato in fondo senza eccezioni
+BATTITO_CICLO = {
+    "timestamp": time.time(),
+    "giro_completato": time.time(),
+    "stato": "avvio",
+    "ciclo": 0,
+    "lavora": False,
+}
+
+# Margine sopra l'attesa più lunga possibile tra due giri (INTERVALLO_CICLO_MORTO, 30 min di
+# default): un ciclo lento non è un ciclo morto. 15 minuti coprono l'elaborazione di una serata
+# piena (due chiamate API per partita, più le attese del limitatore globale quando è saturo)
+# senza far scattare falsi allarmi.
+MARGINE_BATTITO_SECONDI = 900
+
+
+def segna_battito(stato, ciclo=None, lavora=True):
+    """Registra che il ciclo principale è passato di qui. Chiamata ad ogni giro, compresi quelli
+    che non fanno lavoro (pausa manuale, configurazione incompleta): è la prova che il thread è
+    vivo, non che abbia trovato qualcosa da fare.
+
+    lavora=False per gli stati in cui NON completare giri è normale (pausa manuale, token
+    mancante): lì pretendere un giro completo darebbe un allarme per una situazione voluta."""
+    BATTITO_CICLO["timestamp"] = time.time()
+    BATTITO_CICLO["stato"] = stato
+    BATTITO_CICLO["lavora"] = lavora
+    if ciclo is not None:
+        BATTITO_CICLO["ciclo"] = ciclo
+
+
+def segna_giro_completato():
+    """Fine di un giro arrivato in fondo senza eccezioni: è questo, non l'inizio, a dire che il
+    bot sta davvero lavorando."""
+    BATTITO_CICLO["giro_completato"] = time.time()
+
+
+def stato_salute():
+    """(codice_http, testo) per l'endpoint di salute.
+
+    200 = il ciclo principale gira, o è fermo per un motivo voluto (pausa manuale).
+    503 = il ciclo non passa più (bloccato/morto), oppure passa ma non completa un giro da troppo
+          tempo (eccezione ad ogni ciclo). Sono i due casi che devono svegliare qualcuno."""
+    # Letto dal modulo al momento della richiesta, non all'import: il valore vero arriva da
+    # config.json, che viene caricato parecchie righe più sotto di qui. Il default copre la
+    # finestra di pochi millisecondi tra l'avvio del server e il caricamento della configurazione.
+    intervallo_massimo = globals().get("INTERVALLO_CICLO_MORTO", 1800)
+    soglia = intervallo_massimo + MARGINE_BATTITO_SECONDI
+    adesso = time.time()
+    eta_battito = adesso - BATTITO_CICLO["timestamp"]
+    eta_giro = adesso - BATTITO_CICLO["giro_completato"]
+    righe = [
+        f"stato: {BATTITO_CICLO['stato']}",
+        f"ultimo passaggio del ciclo: {int(eta_battito)}s fa (soglia {soglia}s)",
+        f"ultimo giro completato: {int(eta_giro)}s fa",
+        f"ciclo numero: {BATTITO_CICLO['ciclo']}",
+    ]
+    if eta_battito > soglia:
+        righe.insert(0, "BOT FERMO: il ciclo principale non gira più")
+        return 503, "\n".join(righe)
+    if BATTITO_CICLO["lavora"] and eta_giro > soglia:
+        righe.insert(0, "BOT INCEPPATO: i cicli partono ma nessuno arriva in fondo")
+        return 503, "\n".join(righe)
+    righe.insert(0, "Bot is running!")
+    return 200, "\n".join(righe)
+
+
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
+        codice, testo = stato_salute()
+        self.send_response(codice)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(testo.encode("utf-8"))
 
     def do_HEAD(self):
-        self.send_response(200)
+        # Stesso codice del GET: un monitor esterno può usare HEAD, e rispondere sempre 200 qui
+        # vanificherebbe tutto il controllo qui sopra.
+        codice, _ = stato_salute()
+        self.send_response(codice)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
 
     def log_message(self, format, *args):
@@ -6436,6 +6524,9 @@ if __name__ == "__main__":
         # tutto il bot.
         try:
             if not CONFIG_VALIDA:
+                # Battito comunque: il thread è vivo. Lo stato dichiarato dice che manca un token,
+                # così l'endpoint di salute distingue questo caso da un ciclo bloccato.
+                segna_battito("configurazione incompleta (manca un token)", lavora=False)
                 log("CONFIGURAZIONE INCOMPLETA - Attendo 30 secondi...")
                 time.sleep(30)
                 continue
@@ -6448,6 +6539,7 @@ if __name__ == "__main__":
                     invia_messaggio_telegram(f"⏸ Bot ancora in pausa da {ore}h. Invia /riprendi per riattivarlo.")
                     STATO_PAUSA["ultimo_promemoria"] = ora
                     salva_pausa(STATO_PAUSA)
+                segna_battito(f"in pausa manuale da {round(da_quanto / 60)} min", lavora=False)
                 log(f"In pausa manuale da {round(da_quanto / 60)} min, nessuna chiamata API. Attesa {INTERVALLO_CICLO_MORTO}s...")
                 time.sleep(INTERVALLO_CICLO_MORTO)
                 continue
@@ -6466,6 +6558,7 @@ if __name__ == "__main__":
             aggiorna_quote_prepartita_imminenti()
 
             ciclo_numero += 1
+            segna_battito("ciclo in corso", ciclo_numero)
             log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
 
             partite = get_partite_live()
@@ -6562,6 +6655,8 @@ if __name__ == "__main__":
             if preferito_live:
                 prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
             log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''})...")
+            # Ultima riga prima dell'attesa: il giro è arrivato in fondo senza eccezioni.
+            segna_giro_completato()
             time.sleep(prossimo_intervallo)
         except Exception as e:
             log(f"Errore imprevisto nel ciclo principale (il bot NON si riavvia, riprende dopo una pausa): {e}")
