@@ -405,8 +405,8 @@ LEGHE_CON_STATISTICHE = [
     # Supercoppe di lega nazionali (l'equivalente locale della Community Shield inglese)
     "Community Shield", "Supercoppa Italiana", "Supercopa de Espana", "DFL-Supercup",
     "Trophee des Champions", "Johan Cruijff Schaal", "Supertaca",
-    # Coppa nazionale seguita su richiesta (le altre restano in COPPE_NAZIONALI_ESCLUSE)
-    "Coppa Italia",
+    # Coppe nazionali seguite (vedi COPPE_NAZIONALI_SEGUITE per la deroga sulle esclusioni)
+    "Coppa Italia", "FA Cup", "League Cup", "Copa del Rey", "DFB Pokal", "Coupe de France", "KNVB Beker", "Taca de Portugal", "Scottish Cup", "Scottish League Cup",
 ]
 
 # Nomi di campionato IDENTICI usati da paesi diversi nell'API (l'API-Football non li distingue
@@ -414,6 +414,10 @@ LEGHE_CON_STATISTICHE = [
 # League" del Kazakistan o il "Segunda División" dell'Uruguay (nessuna statistica reale)
 # passerebbero il filtro pensato per Inghilterra/Spagna, dato lo stesso nome esatto.
 PAESE_ATTESO_LEGA_AMBIGUA = {
+    # Coppe con nome condiviso da piu' federazioni: "FA Cup" e "League Cup" esistono con lo stesso
+    # identico nome in piu' paesi, e senza il vincolo passerebbero tutte.
+    "fa cup": "england",
+    "league cup": "england",
     "premier league": "england",
     "championship": "england",
     "league one": "england",
@@ -441,6 +445,27 @@ COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO = {
     "uefa champions league qualification", "uefa europa league qualification",
     "uefa europa conference league qualification",
 }
+
+# Coppe nazionali seguite. Sono state riammesse su richiesta, ma non basta toglierle dall'elenco
+# delle escluse: senza la deroga qui sotto il meccanismo delle esclusioni per mancanza statistiche
+# le spegnerebbe quasi subito, ed e' il motivo per cui erano state tenute fuori.
+#
+# In coppa la copertura cambia PARTITA per partita, non a livello di competizione: una squadra di
+# Serie A che gioca in casa di una di Serie C gioca su un campo senza rilevazione, e nello stesso
+# turno un'altra partita fra due squadre di A ha i dati completi. Bastavano tre partite di
+# contorno nei primi turni per far sparire l'INTERA coppa per 24h - semifinali e finale comprese -
+# e dopo cinque turni per toglierla dalla whitelist per sempre.
+COPPE_NAZIONALI_SEGUITE = {
+    "coppa italia", "fa cup", "league cup", "copa del rey", "dfb-pokal", "dfb pokal",
+    "coupe de france", "knvb beker", "taca de portugal",
+    "scottish cup", "scottish league cup",
+}
+
+# Competizioni per cui le esclusioni per mancanza statistiche NON si applicano, perche' li' la
+# copertura e' una proprieta' della singola partita e non della competizione: le coppe nazionali
+# per il motivo sopra, le internazionali perche' nei turni di qualificazione mescolano federazioni
+# con copertura molto diversa (Kosovo-San Marino con dati parziali accanto a partite complete).
+COMPETIZIONI_COPERTURA_VARIABILE = COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO | COPPE_NAZIONALI_SEGUITE
 
 # Sottoinsieme delle competizioni UEFA sopra per cui ha senso cercare l'andata (fase di
 # qualificazione/playoff andata-ritorno delle 3 coppe per club): esclude Mondiali/Europei/Copa
@@ -538,16 +563,15 @@ PAROLE_ESCLUSE = [
 # pratica - nessuna di queste competizioni è comunque in LEGHE_CON_STATISTICHE, quindi verrebbe
 # già bloccata dalla whitelist da sola - ma resta come rete di sicurezza esplicita e documentata:
 # se in futuro cambia la logica del filtro, queste restano escluse di proposito, non per omissione.
+# Le coppe nazionali dei campionati principali sono state riammesse (vedi COPPE_NAZIONALI_SEGUITE):
+# qui restano solo le competizioni che NON vogliamo comunque, e non perche' siano coppe ma perche'
+# mettono in campo squadre riserve e club non professionistici - EFL Trophy e FA Trophy schierano
+# le U21 dei club di Premier League, la Challenge Cup scozzese squadre di leghe inferiori e
+# straniere. La Coupe de la Ligue non esiste piu' dal 2020 e resta come rete di sicurezza.
 COPPE_NAZIONALI_ESCLUSE = [
-    "league cup", "efl cup", "carabao cup", "fa cup", "efl trophy", "fa trophy",
-    # "coppa italia" tolta su richiesta: va seguita, quindi sta in LEGHE_CON_STATISTICHE. Le altre
-    # coppe nazionali restano escluse - qui si toglie solo quella chiesta, non la categoria.
-    "copa del rey",
-    "dfb-pokal", "dfb pokal",
-    "coupe de france", "coupe de la ligue",
-    "knvb beker",
-    "taca de portugal", "taça de portugal",
-    "scottish cup", "scottish league cup", "scottish challenge cup",
+    "efl trophy", "fa trophy",
+    "coupe de la ligue",
+    "scottish challenge cup",
 ]
 
 # Leghe che, empiricamente, non restituiscono mai statistiche reali dall'API pur superando il
@@ -639,6 +663,11 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
     accumulato da sola SOGLIA_SENZA_STATISTICHE risposte vuote consecutive (vedi il chiamante):
     qui ogni chiamata vale come "una partita intera di questa lega non ha statistiche", non come
     "un singolo controllo andato a vuoto"."""
+    # Nelle competizioni a copertura variabile il verdetto non viene nemmeno registrato: non
+    # avrebbe effetto (campionato_valido lo ignora, vedi COMPETIZIONI_COPERTURA_VARIABILE) e
+    # produrrebbe un log "Lega X esclusa per 24h" che descrive qualcosa che non succede.
+    if _senza_accenti(league_name) in COMPETIZIONI_COPERTURA_VARIABILE:
+        return
     chiave = (league_country.lower(), league_name.lower())
     stato = LEGHE_SENZA_STATISTICHE.get(chiave, {"senza_stats_consecutive": 0, "esclusa_fino": 0})
     if disponibili:
@@ -807,6 +836,10 @@ def registra_giornata_statistiche(league_country, league_name, giornata, disponi
 
     `giornata` è il campo "round" del fixture. Se l'API non lo fornisce si ripiega sulla data: la
     regola resta valida, solo un po' più severa (più giornate a parità di turni)."""
+    # Stesso motivo del gemello sopra: una coppa non va mai tolta dalla whitelist per le partite
+    # dei primi turni, quindi non si conta nemmeno.
+    if _senza_accenti(league_name) in COMPETIZIONI_COPERTURA_VARIABILE:
+        return
     chiave = (league_country.lower(), league_name.lower())
     stato = GIORNATE_SENZA_STATISTICHE.get(
         chiave, {"giornate": {}, "esclusa_definitivamente": 0})
@@ -1620,7 +1653,7 @@ def campionato_valido(league_name, league_type, league_country=""):
     # scattare l'esclusione, TUTTA la competizione sparirebbe per 24h (anche le partite ben coperte
     # di squadre più note), senza nessuna indicazione visibile del motivo - nemmeno /diagnostica lo
     # segnala, perché filtra anch'essa tramite campionato_valido().
-    if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_per_mancanza_statistiche(league_country, league_name):
+    if nome not in COMPETIZIONI_COPERTURA_VARIABILE and lega_esclusa_per_mancanza_statistiche(league_country, league_name):
         return False
     # Esclusione definitiva: la lega ha attraversato SOGLIA_GIORNATE_SENZA_STATISTICHE giornate di
     # campionato senza pubblicare un solo tiro. Vale la stessa deroga per le competizioni
@@ -1628,7 +1661,7 @@ def campionato_valido(league_name, league_type, league_country=""):
     # cambia partita per partita a seconda delle federazioni in campo, non è una proprietà della
     # competizione. Per tornare a seguire una lega tolta di qui basta cancellare la sua voce da
     # giornate_senza_statistiche.json (o il file intero).
-    if nome not in COMPETIZIONI_INTERNAZIONALI_MATCH_ESATTO and lega_esclusa_definitivamente(league_country, league_name):
+    if nome not in COMPETIZIONI_COPERTURA_VARIABILE and lega_esclusa_definitivamente(league_country, league_name):
         return False
     if SOLO_LEGHE_CON_STATISTICHE:
         # Solo whitelist statica curata: fino a poco fa si passava anche qualunque campionato
