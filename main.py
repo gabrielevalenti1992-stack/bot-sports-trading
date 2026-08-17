@@ -5345,6 +5345,35 @@ def registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, 
     })
 
 
+def classifica_cambio_punteggio(fixture_id, score_home, score_away):
+    """Confronta il punteggio appena letto dall'API con quello dell'ultimo ciclo per questa
+    partita, e ritorna (gol_appena_segnato, punteggio_corretto_al_ribasso).
+
+    Un punteggio può cambiare anche ALL'INDIETRO: gol annullato al VAR, oppure una correzione
+    dell'API che aveva attribuito un gol per sbaglio. Prima qui bastava che il punteggio fosse
+    "diverso" da quello di prima, quindi anche togliere un gol veniva trattato come segnarlo - e
+    un gol è un evento forzato, che scavalca modalità essenziale e filtro goleada e manda una
+    notifica intera. Visto in produzione il 17/08 su due partite: "1-0 -> 0-0" alle 16:15 (lo
+    stesso gol dato alle 16:11 e poi tolto) e "0-2 -> 0-1" alle 17:12.
+
+    Un gol c'è stato solo se il punteggio di una delle due squadre è SALITO. Se è solo sceso è una
+    correzione: lo stato viene aggiornato lo stesso dal chiamante (il risultato mostrato resta
+    quello vero), ma non parte nessuna notifica di gol.
+
+    Alla prima lettura di una partita non c'è niente da confrontare: nessun gol, nessuna
+    correzione - altrimenti ogni partita già in corso quando il bot la vede per la prima volta
+    (o dopo un riavvio, che azzera stato_partite) genererebbe un gol inventato."""
+    stato_precedente = stato_partite.get(fixture_id, {})
+    if not stato_precedente:
+        return False, False
+    prev_score_home = stato_precedente.get("score_home", score_home)
+    prev_score_away = stato_precedente.get("score_away", score_away)
+    gol_appena_segnato = score_home > prev_score_home or score_away > prev_score_away
+    corretto_al_ribasso = (not gol_appena_segnato
+                           and (score_home < prev_score_home or score_away < prev_score_away))
+    return gol_appena_segnato, corretto_al_ribasso
+
+
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
@@ -5525,9 +5554,16 @@ def processa_partita(fixture, notifiche_attive=True):
         stato_precedente = stato_partite.get(fixture_id, {})
         prev_score_home = stato_precedente.get("score_home", score_home)
         prev_score_away = stato_precedente.get("score_away", score_away)
-        gol_appena_segnato = (score_home != prev_score_home) or (score_away != prev_score_away)
-        if gol_appena_segnato and stato_precedente:
+        gol_appena_segnato, punteggio_corretto_al_ribasso = classifica_cambio_punteggio(
+            fixture_id, score_home, score_away)
+        if gol_appena_segnato:
             log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
+        elif punteggio_corretto_al_ribasso:
+            # Nessuna notifica: il risultato mostrato resta comunque aggiornato (lo stato viene
+            # riscritto poco più sotto), ma dire "gol" per un gol tolto è il contrario di quello
+            # che è successo.
+            log(f"    ↩️ Punteggio corretto all'indietro: {prev_score_home}-{prev_score_away} -> "
+                f"{score_home}-{score_away} (gol annullato o correzione dell'API, nessuna notifica)")
 
         # Minuti di recupero: si tiene il valore più recente annunciato dall'API per il tempo in
         # corso, e si rileva il momento in cui il tempo finisce (1H->altro, 2H->altro) per poterlo
