@@ -752,6 +752,46 @@ PAROLE_ESCLUSE = [
     # Ripristinare dopo il test!
 ]
 
+# Formazioni giovanili e riserve riconosciute dal NOME DELLA SQUADRA, non da quello della lega.
+#
+# Escludere i campionati uno per uno non bastava, ed e' stato dimostrato due volte nella stessa
+# sera: tolta "National League Cup" e' arrivata "Premier League Cup" (Huddersfield Town U21 -
+# Gillingham FC U21, statistiche N/D), che passava per la stessa strada - contiene "Premier League"
+# e "League Cup", entrambe in whitelist. Dietro c'e' sempre "Professional Development League" e
+# "Premier League International Cup", e il prossimo torneo giovanile con un nome che assomiglia a
+# quello di un campionato vero rifarebbe lo stesso giro.
+#
+# Il segnale comune non e' il nome della competizione: sono le squadre. "Newcastle United U21" e'
+# una squadra di sviluppo comunque si chiami il torneo in cui gioca, e l'API non pubblica quasi mai
+# le sue statistiche. Basta UNA delle due: in queste coppe un club non-league affronta la U21 di un
+# club di Premier (Tamworth - Newcastle United U21), quindi chiedere che siano giovanili entrambe
+# lascerebbe passare meta' delle partite.
+PAROLE_ESCLUSE_SQUADRE = [
+    "u23", "u21", "u20", "u19", "u18", "u17", "u16", "u15",
+    "under-23", "under-21", "under-20", "under-19", "under-18", "under-17",
+    "under 23", "under 21", "under 20", "under 19", "under 18", "under 17",
+    "youth", "reserves", "riserve",
+]
+
+
+def squadra_giovanile(nome_squadra):
+    """True se il nome e' quello di una formazione giovanile o di riserve.
+
+    Confine di parola, non sottostringa: "u20" non deve intercettare un club che ha quelle tre
+    lettere dentro un nome piu' lungo."""
+    nome = _senza_accenti(nome_squadra or "")
+    return any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE)
+
+
+def partita_tra_giovanili(fixture):
+    """True se almeno una delle due squadre della partita e' giovanile/riserve.
+
+    Si applica al tracciamento automatico (ciclo principale e piano giornata), non ai comandi:
+    se l'utente cerca esplicitamente una partita con /status deve poterla vedere lo stesso."""
+    squadre = fixture.get("teams", {}) or {}
+    return any(squadra_giovanile((squadre.get(lato) or {}).get("name", ""))
+               for lato in ("home", "away"))
+
 # Coppe nazionali (non UEFA) sempre escluse. Da quando campionato_valido() usa solo la whitelist
 # statica (niente più cache dinamica dell'API, vedi commento lì) questo elenco è ridondante in
 # pratica - nessuna di queste competizioni è comunque in LEGHE_CON_STATISTICHE, quindi verrebbe
@@ -2194,6 +2234,10 @@ def costruisci_piano_giornata(data_str):
             continue
         league = item.get("league", {})
         if not campionato_valido(league.get("name", ""), league.get("type", ""), league.get("country", "")):
+            continue
+        # Stesso filtro del ciclo principale: una partita giovanile non deve nemmeno entrare nel
+        # piano della giornata, altrimenti rientrerebbe dalla finestra oraria che il piano genera.
+        if partita_tra_giovanili(item):
             continue
         kickoff_ts = fixture_info.get("timestamp")
         if not kickoff_ts:
@@ -7197,7 +7241,7 @@ if __name__ == "__main__":
                     f.get("league", {}).get("name", ""),
                     f.get("league", {}).get("type", ""),
                     f.get("league", {}).get("country", "")
-                )
+                ) and not partita_tra_giovanili(f)
             ]
             log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
 
