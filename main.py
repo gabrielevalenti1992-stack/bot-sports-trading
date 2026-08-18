@@ -734,6 +734,9 @@ try:
     print(f"Gate dominio notifiche generali: {'ATTIVO' if DOMINIO_GATE_NOTIFICHE_ATTIVO else 'disattivo'} "
           f"(quota >= {SOGLIA_QUOTA_DOMINIO_NOTIFICA}%) | messaggio live preferiti: "
           f"{'ATTIVO' if MESSAGGIO_LIVE_PREFERITI_ATTIVO else 'disattivo'}", flush=True)
+    print(f"Un aggiornamento per blocco di 15 min (chat principale): "
+          f"{'ATTIVO' if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO else 'disattivo'} | "
+          f"UptimeRobot: {'collegato' if UPTIMEROBOT_API_KEY else 'non collegato'}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -4312,6 +4315,27 @@ def calcola_dominio(current_stats, score_home, score_away):
     return {"lato": lato, "quota": quota, "situazione": situazione, "priorita": priorita}
 
 
+def motivo_assenza_dominio(current_stats):
+    """Perche' calcola_dominio() non ha dichiarato un dominio: il numero che e' mancato.
+
+    calcola_dominio ritorna None per tre ragioni diverse - statistiche assenti, troppo poco gioco,
+    squadre pari - e nei log finivano tutte e tre nella stessa riga. E' il motivo di skip piu'
+    frequente da quando il gate e' attivo, quindi era anche quello che conveniva meno lasciare
+    muto: "squadre pari al 58%" e "volume 5, ne servono 8" portano a due decisioni diverse.
+
+    Usa lo stesso _peso_offensivo di calcola_dominio, non un conteggio parallelo: due definizioni
+    di "quanto si e' giocato" finirebbero prima o poi per divergere."""
+    if not current_stats:
+        return "statistiche assenti"
+    peso_casa = _peso_offensivo(current_stats, 0)
+    peso_ospite = _peso_offensivo(current_stats, 1)
+    totale = peso_casa + peso_ospite
+    if totale < VOLUME_MINIMO_DOMINIO:
+        return f"troppo poco gioco (volume {totale}, ne servono {VOLUME_MINIMO_DOMINIO})"
+    quota = round(max(peso_casa, peso_ospite) / totale * 100)
+    return f"squadre pari, {quota}% (serve {SOGLIA_QUOTA_DOMINIO})"
+
+
 def barra_dominio(quota):
     """Barra a dieci tacche: la quota si legge prima del numero."""
     pieni = max(0, min(10, round(quota / 10)))
@@ -6038,6 +6062,30 @@ def classifica_cambio_punteggio(fixture_id, score_home, score_away):
     return gol_appena_segnato, corretto_al_ribasso
 
 
+# Perche' l'ultima valutazione di deve_notificare() e' finita come e' finita, per fixture.
+#
+# Serve perche' il log diceva solo "-> Skip": con gate del dominio, freno per blocco, goleada,
+# modalita' essenziale, soglie dei preferiti e "niente e' cambiato", quel Skip puo' voler dire sei
+# cose diverse e da fuori sono indistinguibili. Con le notifiche diventate selettive la domanda
+# "perche' questa partita non e' arrivata in chat?" e' quella che si fa piu' spesso, e la risposta
+# doveva essere leggibile nei log invece di richiedere di rileggere il codice.
+#
+# Registrato anche quando la notifica PARTE: sapere quale regola l'ha fatta scattare e' il dato che
+# serve per tarare le soglie (quale regola lavora davvero, quale non scatta mai).
+MOTIVO_VALUTAZIONE_NOTIFICA = {}
+
+
+def _verdetto_notifica(fixture_id, esito, motivo):
+    """Registra il perche' e restituisce l'esito, cosi' ogni uscita di deve_notificare() resta una
+    riga sola e non si puo' aggiungere un ramo dimenticando di spiegarlo."""
+    MOTIVO_VALUTAZIONE_NOTIFICA[fixture_id] = motivo
+    return esito
+
+
+def motivo_valutazione_notifica(fixture_id):
+    return MOTIVO_VALUTAZIONE_NOTIFICA.get(fixture_id, "motivo non registrato")
+
+
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None,
                     current_stats=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
@@ -6045,12 +6093,14 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # passare). Un gol resta notificato anche se porta la partita in goleada (regola sotto): è
     # l'evento che ha creato la goleada, non uno dei tanti aggiornamenti successivi ormai inutili.
     if gol_appena_segnato or recupero_lungo:
-        return True
+        return _verdetto_notifica(
+            fixture_id, True,
+            "gol o evento forzato" if gol_appena_segnato else "recupero appena concluso")
 
     # Modalità essenziale: tutto il resto (soglie tiri, momentum, refresh forzato, preferiti) è
     # sospeso finché non torna la modalità completa.
     if MODALITA_NOTIFICHE.get("essenziale"):
-        return False
+        return _verdetto_notifica(fixture_id, False, "modalità essenziale attiva")
 
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
@@ -6058,7 +6108,9 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     ultimo_invio = stato.get("timestamp_notifica", 0)
 
     if tiri_casa == ultima_casa and tiri_ospite == ultima_ospite:
-        return False
+        return _verdetto_notifica(
+            fixture_id, False,
+            f"nessun tiro cambiato dall'ultimo controllo (fermi a {tiri_casa}-{tiri_ospite})")
 
     # Goleada: oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto la partita perde valore per il
     # trading, si smette di notificarla del tutto (preferiti compresi). Il pareggio NON ha un
@@ -6066,7 +6118,9 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     if score_home is not None and score_away is not None:
         diff_gol = abs(score_home - score_away)
         if diff_gol > SOGLIA_GOLEADA_STOP_NOTIFICHE:
-            return False
+            return _verdetto_notifica(
+                fixture_id, False,
+                f"goleada: {diff_gol} gol di scarto (oltre {SOGLIA_GOLEADA_STOP_NOTIFICHE})")
 
     # Preferiti: molto più reattivi delle altre partite (bypassano le soglie sotto), ma non per il
     # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio. Con il
@@ -6075,17 +6129,21 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # applica in modo uniforme a tiri totali, tiri in porta e corner.
     if str(fixture_id) in FAVORITE_MATCHES:
         if ultima_casa < 0:
-            return True  # prima notifica per questa partita preferita: sempre subito
+            # prima notifica per questa partita preferita: sempre subito
+            return _verdetto_notifica(fixture_id, True, "preferita: prima notifica")
         cambio_tiri_totali = (tiri_casa + tiri_ospite) - (ultima_casa + ultima_ospite)
         if cambio_tiri_totali >= SOGLIA_MIN_CAMBIO_PREFERITI:
-            return True
+            return _verdetto_notifica(
+                fixture_id, True, f"preferita: +{cambio_tiri_totali} tiri dall'ultimo invio")
         if delta_stats:
             d_porta = delta_stats.get("Tiri in porta", (0, 0))
             d_corner = delta_stats.get("Corner", (0, 0))
             if (d_porta[0] + d_porta[1]) >= SOGLIA_MIN_CAMBIO_PREFERITI:
-                return True
+                return _verdetto_notifica(
+                    fixture_id, True, f"preferita: +{d_porta[0] + d_porta[1]} tiri in porta")
             if (d_corner[0] + d_corner[1]) >= SOGLIA_MIN_CAMBIO_PREFERITI:
-                return True
+                return _verdetto_notifica(
+                    fixture_id, True, f"preferita: +{d_corner[0] + d_corner[1]} corner")
             # Salto di ritmo: i controlli qui sopra misurano il cambiamento DALL'ULTIMA NOTIFICA,
             # quindi una fase concitata fatta di tanti piccoli incrementi (un tiro per ciclo) non
             # li supera mai, pur essendo il momento in cui la partita merita attenzione. Questo
@@ -6097,8 +6155,12 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
                 porta_blocco = d_porta[0] + d_porta[1]
                 if (tiri_blocco >= SOGLIA_RITMO_NOTIFICA_PREFERITI
                         or porta_blocco >= SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI):
-                    return True
-        return False
+                    return _verdetto_notifica(
+                        fixture_id, True,
+                        f"preferita: salto di ritmo nel blocco ({tiri_blocco} tiri, "
+                        f"{porta_blocco} in porta)")
+        return _verdetto_notifica(
+            fixture_id, False, "preferita: cambiamento sotto le soglie reattive")
 
     # GATE DOMINIO (solo partite NON preferite: sopra si e' gia' tornati per quelle).
     #
@@ -6121,8 +6183,15 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # comunque, perche' passano molto piu' in alto.
     if DOMINIO_GATE_NOTIFICHE_ATTIVO:
         dominio = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
-        if not dominio or dominio["quota"] < SOGLIA_QUOTA_DOMINIO_NOTIFICA:
-            return False
+        if not dominio:
+            return _verdetto_notifica(
+                fixture_id, False,
+                f"gate dominio: {motivo_assenza_dominio(current_stats)}")
+        if dominio["quota"] < SOGLIA_QUOTA_DOMINIO_NOTIFICA:
+            return _verdetto_notifica(
+                fixture_id, False,
+                f"gate dominio: {dominio['quota']}% sotto la soglia "
+                f"{SOGLIA_QUOTA_DOMINIO_NOTIFICA}%")
 
     # UN AGGIORNAMENTO DI ROUTINE PER BLOCCO DI 15 MINUTI.
     #
@@ -6140,7 +6209,10 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # aggiornamento di routine per blocco e per partita. Gli eventi che devono farsi sentire - gol,
     # rosso, rigore, recupero - non passano di qui: hanno gia' restituito True molto piu' in alto.
     if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO and stato.get("blocco_ultima_notifica") == _blocco_minuto(minuto):
-        return False
+        blocco = _blocco_minuto(minuto)
+        return _verdetto_notifica(
+            fixture_id, False,
+            f"già inviato un aggiornamento nel blocco {blocco}-{blocco + 14}'")
 
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)
@@ -6148,15 +6220,19 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
 
     # Regola 1: Differenza tiri significativa
     if diff >= DIFF_TIRI_SOGLIA:
-        return True
+        return _verdetto_notifica(
+            fixture_id, True, f"Regola 1: differenza tiri {diff} (soglia {DIFF_TIRI_SOGLIA})")
 
     # Regola 2: Partita molto attiva nei primi 25 min
     if minuto <= MINUTI_ATTIVA and tiri_totali >= TIRI_TOTALI_ATTIVA:
-        return True
+        return _verdetto_notifica(
+            fixture_id, True, f"Regola 2: {tiri_totali} tiri entro il {MINUTI_ATTIVA}'")
 
     # Regola 3: Forzata ogni 30 min se abbastanza tiri
     if tempo_passato >= INTERVALLO_FORZATO and tiri_totali >= 4:
-        return True
+        return _verdetto_notifica(
+            fixture_id, True,
+            f"Regola 3: refresh dopo {int(tempo_passato / 60)} min dall'ultimo invio")
 
     # Regola 4: MOMENTUM - ritmo recente negli ultimi 15 min
     # Cattura partite che si svegliano nel secondo tempo anche se totali bassi
@@ -6165,13 +6241,21 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         d_porta = delta_stats.get("Tiri in porta", (0, 0))
         d_corner = delta_stats.get("Corner", (0, 0))
         if (d_porta[0] + d_porta[1]) >= MOMENTUM_TIRI_IN_PORTA:
-            return True
+            return _verdetto_notifica(
+                fixture_id, True,
+                f"Regola 4: +{d_porta[0] + d_porta[1]} tiri in porta negli ultimi 15 min")
         if (d_tiri[0] + d_tiri[1]) >= MOMENTUM_TIRI_TOTALI:
-            return True
+            return _verdetto_notifica(
+                fixture_id, True,
+                f"Regola 4: +{d_tiri[0] + d_tiri[1]} tiri negli ultimi 15 min")
         if (d_corner[0] + d_corner[1]) >= MOMENTUM_CORNER:
-            return True
+            return _verdetto_notifica(
+                fixture_id, True,
+                f"Regola 4: +{d_corner[0] + d_corner[1]} corner negli ultimi 15 min")
 
-    return False
+    return _verdetto_notifica(
+        fixture_id, False,
+        f"nessuna regola soddisfatta (differenza tiri {diff}, totali {tiri_totali})")
 
 
 # =============================================================================
@@ -6878,8 +6962,10 @@ def processa_partita(fixture, notifiche_attive=True):
                 "timestamp_notifica": stato_partite[fixture_id].get("timestamp_notifica", 0),
                 "notified_final": prev_notified,
             })
-            log(f"  -> Skip")
+            log(f"  -> Skip: {motivo_valutazione_notifica(fixture_id)}")
             return
+
+        log(f"  -> Notifica: {motivo_valutazione_notifica(fixture_id)}")
 
         # Preferiti: un'unica immagine con il totale cumulativo (barre proporzionali, come per
         # tutte le altre partite) impilato sopra il grafico momentum (andamento a intervalli, per
@@ -7120,6 +7206,9 @@ def pulisci_partite_terminate(fixture_ids_live):
         stato = stato_partite.get(fid, {})
         # Nessun messaggio di fine partita
         SILENCED_MATCHES.pop(str(fid), None)
+        # Il motivo dell'ultima valutazione vive quanto la partita: senza questa riga il dizionario
+        # crescerebbe per tutta la vita del processo, una voce per ogni partita mai vista.
+        MOTIVO_VALUTAZIONE_NOTIFICA.pop(fid, None)
         del stato_partite[fid]
 
     if ids_da_rimuovere:
@@ -7261,15 +7350,21 @@ if __name__ == "__main__":
 
             partite = get_partite_live()
             chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
-            partite_valide = [
+            in_whitelist = [
                 f for f in partite
                 if campionato_valido(
                     f.get("league", {}).get("name", ""),
                     f.get("league", {}).get("type", ""),
                     f.get("league", {}).get("country", "")
-                ) and not partita_tra_giovanili(f)
+                )
             ]
-            log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
+            partite_valide = [f for f in in_whitelist if not partita_tra_giovanili(f)]
+            # Le giovanili si contano a parte invece di sparire dentro il totale: se un giorno il
+            # filtro dovesse escludere una partita vera, il numero lo mostra subito invece di
+            # lasciar credere che quella partita non fosse live.
+            escluse_giovanili = len(in_whitelist) - len(partite_valide)
+            log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
+                + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
 
             if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
                 if chiamata_partite_live_fallita:
