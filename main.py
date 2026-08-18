@@ -197,6 +197,12 @@ API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
 # le notifiche dei preferiti restano nella chat principale come tutte le altre.
 TELEGRAM_CHAT_ID_PREFERITI = os.environ.get("TELEGRAM_CHAT_ID_PREFERITI") or TELEGRAM_CHAT_ID
 
+# UptimeRobot (opzionale): serve solo al comando /uptime, che chiede quanto e' stato raggiungibile
+# l'endpoint di salute visto da fuori. Senza questa variabile il bot funziona esattamente come
+# prima e /uptime spiega come impostarla, invece di fallire con un errore.
+# Basta una chiave READ-ONLY: il bot legge lo stato dei monitor e non deve poterli modificare.
+UPTIMEROBOT_API_KEY = os.environ.get("UPTIMEROBOT_API_KEY")
+
 CONFIG_VALIDA = all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, API_FOOTBALL_KEY])
 print(f"TOKEN presente: {'SI' if TELEGRAM_BOT_TOKEN else 'NO'}", flush=True)
 print(f"CHAT_ID presente: {'SI' if TELEGRAM_CHAT_ID else 'NO'}", flush=True)
@@ -731,7 +737,17 @@ PAROLE_ESCLUSE = [
     # Campionati di sviluppo/riserve il cui nome inizia come un campionato whitelist (es. "Premier
     # League 2" contiene "Premier League" e passerebbe il match a sottostringa della whitelist):
     # vanno esclusi esplicitamente qui, non li ferma il controllo U21 perché non contengono "u21".
-    "premier league 2", "professional development league"
+    "premier league 2", "professional development league",
+    # Stesso motivo, dall'altro lato: "National League Cup" CONTIENE "League Cup" (in whitelist per
+    # la Carabao Cup inglese) e la superava a confine di parola. E' la coppa in cui i club non-league
+    # affrontano le U21 dei club di Premier: il 18/08 ne erano live dodici in contemporanea su 21
+    # partite valide totali - Halifax-Derby U21, Gateshead-Nottingham Forest U21, Tamworth-Newcastle
+    # U21 e le altre - e la diagnostica ripeteva per ognuna "l'API risponde ma non pubblica
+    # statistiche per questa partita". Ventiquattro chiamate per ciclo che non producono mai un
+    # dato, ma consumano il limite per-minuto: quella sera Dinamo Zagreb-Viking e Fenerbahce-Lyon,
+    # Champions League, restavano a "Statistiche: N/D" con nei log "Rate-limit ancora in
+    # raffreddamento, chiamata saltata". Le partite vere perdevano la corsa contro le U21.
+    "national league cup"
     # TEST TEMPORANEO: "friendlies", "amichevoli", "friendly" rimossi per verificare grafici/notifiche
     # Ripristinare dopo il test!
 ]
@@ -1661,6 +1677,9 @@ def poll_callbacks():
 
                     elif cmd == "/apiusage":
                         esegui_comando_sicuro(chat_id, cmd_apiusage)
+
+                    elif cmd == "/uptime":
+                        esegui_comando_sicuro(chat_id, cmd_uptime)
         except Exception as e:
             log(f"Errore poll callback: {e}")
         time.sleep(5)
@@ -2778,6 +2797,8 @@ def cmd_help(chat_id):
         "dati ha accumulato ciascuno (da quale giornata è partita la verifica)\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
         "/apiusage - Quante chiamate API-Football il bot fa al giorno (storico e quota residua)\n"
+        "/uptime - Quanto è stato raggiungibile il bot visto da fuori (UptimeRobot): "
+        "disponibilità 24h/7g/30g e ultimo disservizio\n"
         "/setup - Menu comandi a bottoni"
     )
     requests.post(
@@ -3634,6 +3655,120 @@ def cmd_apiusage(chat_id):
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=5)
+
+
+# Stati dei monitor UptimeRobot (campo "status" della API v2).
+STATI_UPTIMEROBOT = {
+    0: ("⏸️", "in pausa"),
+    1: ("⏳", "mai controllato finora"),
+    2: ("🟢", "raggiungibile"),
+    8: ("🟠", "sembra irraggiungibile"),
+    9: ("🔴", "irraggiungibile"),
+}
+
+
+def _durata_leggibile(secondi):
+    """"3h 12m" invece di "11520": una durata di disservizio si legge, non si converte a mente."""
+    try:
+        secondi = int(secondi)
+    except (TypeError, ValueError):
+        return "durata sconosciuta"
+    if secondi < 60:
+        return f"{secondi}s"
+    minuti, sec = divmod(secondi, 60)
+    if minuti < 60:
+        return f"{minuti}m" if not sec else f"{minuti}m {sec}s"
+    ore, minuti = divmod(minuti, 60)
+    if ore < 24:
+        return f"{ore}h" if not minuti else f"{ore}h {minuti}m"
+    giorni, ore = divmod(ore, 24)
+    return f"{giorni}g" if not ore else f"{giorni}g {ore}h"
+
+
+def cmd_uptime(chat_id):
+    """Quanto e' stato raggiungibile il bot VISTO DA FUORI, secondo UptimeRobot.
+
+    Risponde a una domanda che il bot da solo non puo' porsi in modo credibile: mentre era giu',
+    non stava girando per accorgersene. L'unico giudice sensato e' un osservatore esterno, ed e'
+    esattamente quello che UptimeRobot fa ogni 5 minuti sull'endpoint di salute.
+
+    Sola lettura, su richiesta: nessuna chiamata finche' non si digita il comando, e la chiave
+    read-only non puo' modificare i monitor nemmeno per sbaglio."""
+    if not UPTIMEROBOT_API_KEY:
+        invia_messaggio_telegram(
+            "UptimeRobot non è collegato.\n\n"
+            "Serve la variabile d'ambiente UPTIMEROBOT_API_KEY su Render "
+            "(Environment → Add Environment Variable), con una chiave *read-only* presa da "
+            "UptimeRobot → Integrations & API → API.\n\n"
+            "Senza, il resto del bot funziona normalmente: cambia solo che questo comando non ha "
+            "niente da leggere.", chat_id=chat_id)
+        return
+
+    try:
+        # API v2: form-encoded, non JSON. custom_uptime_ratios chiede le percentuali di 1, 7 e 30
+        # giorni in un colpo solo; logs=1 porta gli ultimi eventi, da cui si ricava l'ultimo
+        # disservizio senza una seconda chiamata.
+        risposta = requests.post(
+            "https://api.uptimerobot.com/v2/getMonitors",
+            data={"api_key": UPTIMEROBOT_API_KEY, "format": "json",
+                  "custom_uptime_ratios": "1-7-30", "logs": "1", "logs_limit": "5"},
+            timeout=15)
+        dati = risposta.json()
+    except Exception as e:
+        log(f"Errore chiamata UptimeRobot: {e}")
+        invia_messaggio_telegram(
+            f"UptimeRobot non ha risposto: {e}\n\n"
+            "È un problema di questa chiamata, non del bot: il monitoraggio esterno continua "
+            "comunque a girare e ad avvisare via email.", chat_id=chat_id)
+        return
+
+    # "stat" e' il verdetto della API: qualunque cosa diversa da "ok" porta con se' il motivo,
+    # e riportarlo com'e' evita di far indovinare se sia la chiave sbagliata o altro.
+    if dati.get("stat") != "ok":
+        errore = (dati.get("error") or {}).get("message", "motivo non specificato")
+        invia_messaggio_telegram(
+            f"UptimeRobot ha rifiutato la richiesta: {errore}\n\n"
+            "Se parla della chiave, va rigenerata da UptimeRobot → Integrations & API e "
+            "riaggiornata su Render.", chat_id=chat_id)
+        return
+
+    monitor = dati.get("monitors") or []
+    if not monitor:
+        invia_messaggio_telegram(
+            "UptimeRobot risponde, ma su questo account non c'è nessun monitor configurato.",
+            chat_id=chat_id)
+        return
+
+    righe = ["📡 *Disponibilità vista da fuori* (UptimeRobot)"]
+    for m in monitor:
+        emoji, descrizione = STATI_UPTIMEROBOT.get(m.get("status"), ("❔", "stato sconosciuto"))
+        righe.append(f"\n{emoji} *{m.get('friendly_name', 'senza nome')}* — {descrizione}")
+
+        # Le tre percentuali arrivano in un'unica stringa "99.9-99.8-99.7" nell'ordine chiesto
+        # sopra (1-7-30 giorni). Se l'account non le fornisce si salta la riga invece di stampare
+        # numeri inventati.
+        percentuali = str(m.get("custom_uptime_ratio", "")).split("-")
+        if len(percentuali) == 3:
+            try:
+                g1, g7, g30 = (float(p) for p in percentuali)
+                righe.append(f"   24h {g1:.2f}% · 7g {g7:.2f}% · 30g {g30:.2f}%")
+            except ValueError:
+                pass
+
+        # Ultimo disservizio: nei log type=1 significa "down". Serve a distinguere "100% da
+        # sempre" da "100% nelle ultime 24h ma ieri e' stato giu' un'ora".
+        cadute = [l for l in (m.get("logs") or []) if l.get("type") == 1]
+        if cadute:
+            ultima = cadute[0]
+            quando = datetime.datetime.fromtimestamp(
+                ultima.get("datetime", 0), ZoneInfo("Europe/Rome")).strftime("%d/%m %H:%M")
+            righe.append(f"   Ultimo disservizio: {quando} per {_durata_leggibile(ultima.get('duration'))}")
+        else:
+            righe.append("   Nessun disservizio negli ultimi eventi registrati")
+
+    righe.append("\n_Controllo ogni 5 minuti dall'esterno: è il solo modo per sapere se il bot è "
+                 "stato irraggiungibile: mentre era giù non stava girando per accorgersene._")
+    invia_messaggio_telegram("\n".join(righe), chat_id=chat_id)
 
 
 def cmd_funzioni(chat_id):
