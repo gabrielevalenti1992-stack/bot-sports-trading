@@ -731,7 +731,17 @@ PAROLE_ESCLUSE = [
     # Campionati di sviluppo/riserve il cui nome inizia come un campionato whitelist (es. "Premier
     # League 2" contiene "Premier League" e passerebbe il match a sottostringa della whitelist):
     # vanno esclusi esplicitamente qui, non li ferma il controllo U21 perché non contengono "u21".
-    "premier league 2", "professional development league"
+    "premier league 2", "professional development league",
+    # Stesso motivo, dall'altro lato: "National League Cup" CONTIENE "League Cup" (in whitelist per
+    # la Carabao Cup inglese) e la superava a confine di parola. E' la coppa in cui i club non-league
+    # affrontano le U21 dei club di Premier: il 18/08 ne erano live dodici in contemporanea su 21
+    # partite valide totali - Halifax-Derby U21, Gateshead-Nottingham Forest U21, Tamworth-Newcastle
+    # U21 e le altre - e la diagnostica ripeteva per ognuna "l'API risponde ma non pubblica
+    # statistiche per questa partita". Ventiquattro chiamate per ciclo che non producono mai un
+    # dato, ma consumano il limite per-minuto: quella sera Dinamo Zagreb-Viking e Fenerbahce-Lyon,
+    # Champions League, restavano a "Statistiche: N/D" con nei log "Rate-limit ancora in
+    # raffreddamento, chiamata saltata". Le partite vere perdevano la corsa contro le U21.
+    "national league cup"
     # TEST TEMPORANEO: "friendlies", "amichevoli", "friendly" rimossi per verificare grafici/notifiche
     # Ripristinare dopo il test!
 ]
