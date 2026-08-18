@@ -293,11 +293,88 @@ MAX_PREFERITI_SIMULTANEI = 4
 # confrontabile (un campione per partita) invece di crescere ad ogni ciclo.
 MINUTO_VERDETTO_SHADOW_AUTO_PREFERITI = 75
 
+# --- Rotta 2: il DOMINIO. Si affianca alla rotta gol, non la sostituisce.
+#
+# La rotta gol qui sopra prende le partite che si sbloccano presto e restano aperte, ed e' cieca
+# per costruzione a un 0-0 con assedio: una squadra puo' comandare la partita all'80% senza mai
+# segnare e non entra da nessuna parte. E' esattamente il caso che questa seconda porta copre,
+# senza toccare la prima - se l'API smette di pubblicare statistiche (16/08, mezzo mondo muto per
+# ore) questa rotta non promuove niente, ma la rotta gol continua a funzionare da sola come oggi.
+#
+# Non e' il ritorno della vecchia regola "ritmo" tolta in precedenza. Quella guardava il VOLUME nel
+# blocco di 15 minuti (quanto si gioca), questa guarda lo SQUILIBRIO sui totali di partita (chi la
+# sta facendo), e soprattutto calcola_dominio() ritorna None quando le statistiche mancano o sono
+# troppo poche: non puo' promuovere per errore su dati assenti, cosa che alla regola ritmo non era
+# garantita. Il motivo dell'ingresso resta scritto per esteso nel messaggio del canale, quindi
+# resta sempre leggibile a colpo d'occhio se una partita e' entrata per gol o per dominio.
+#
+# SPENTA DI DEFAULT, ed e' il punto del disegno: da spenta la rotta gira lo stesso ad ogni ciclo e
+# scrive tutto nello shadow-log dedicato senza promuovere nulla (vedi
+# SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE). Le due soglie qui sotto sono stime a occhio, non
+# misure: si accende dopo aver guardato i percentili veri raccolti dal log, con lo stesso codice
+# che ha prodotto quei dati - non con un ramo diverso mai girato in produzione.
+AUTO_PREFERITI_DOMINIO_ATTIVO = False
+# Molto piu' alta della soglia con cui si dichiara un dominio in notifica (SOGLIA_QUOTA_DOMINIO,
+# 65%): li' basta dire "comanda"; qui si occupa uno dei quattro posti nei preferiti e si triplica
+# il costo API di quella partita, quindi serve uno squilibrio netto, non una prevalenza.
+SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI = 78
+# I due assi sono accoppiati e vanno alzati insieme: su poco materiale la percentuale impazzisce
+# (4 tiri a 1 fa gia' 80%), quindi una quota piu' alta senza un volume piu' alto seleziona
+# soprattutto rumore. Doppio del minimo con cui calcola_dominio accetta di dare un verdetto.
+VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI = 16
+# Isteresi in ingresso: la rotta gol valuta un evento discreto ("e' arrivato il secondo gol") e un
+# colpo solo basta. Il dominio e' invece un valore continuo, che puo' toccare la soglia per un
+# ciclo e ridiscendere: si promuove solo dopo questi cicli CONSECUTIVI sopra soglia (il contatore
+# si azzera appena scende), cioe' ~9 minuti di gioco a ciclo attivo da 180s.
+CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
+
+# Gate dominio sulle notifiche generali (chat principale, partite NON preferite): prima di
+# valutare le regole a volume grezzo (differenza tiri, partita attiva, refresh forzato, momentum
+# 15 min) si chiede se in questa partita STIA COMANDANDO QUALCUNO. Le regole restano identiche, ma
+# smettono di essere il criterio d'ingresso e diventano solo la cadenza con cui si aggiorna una
+# partita gia' qualificata: senza gate arrivavano in chat anche i 10-9 di tiri, tantissimo gioco
+# distribuito equamente, che e' il tipo di partita da cui non si ricava una direzione.
+#
+# Costante separata da SOGLIA_QUOTA_DOMINIO apposta: quella decide quando SCRIVERE la riga
+# "X comanda 70%" dentro una notifica, questa decide se la notifica parta del tutto - due domande
+# diverse, che devono poter essere tarate una senza l'altra. Attenzione pero': abbassarla sotto
+# SOGLIA_QUOTA_DOMINIO non allarga il gate, perche' sotto quella quota calcola_dominio() non
+# dichiara alcun dominio e ritorna None comunque. Alzarla stringe.
+DOMINIO_GATE_NOTIFICHE_ATTIVO = True
+SOGLIA_QUOTA_DOMINIO_NOTIFICA = 65
+
+# Messaggio live: nel canale preferiti una partita viene ricontrollata ogni 60s per tutta la gara,
+# e ogni aggiornamento era finora un messaggio nuovo - decine di foto quasi identiche impilate, in
+# cui l'ultima riga utile e' sempre in fondo e le precedenti sono gia' scadute. Qui invece gli
+# aggiornamenti di routine RISCRIVONO il messaggio precedente (editMessageMedia: foto e didascalia
+# insieme), cosi' in cima al canale c'e' sempre una sola scheda viva per partita.
+#
+# Due cose NON vengono mai riscritte, e sono il motivo per cui questo non spegne le notifiche:
+# Telegram non suona su un edit, quindi un evento che deve farsi sentire (gol, rosso, rigore,
+# recupero appena concluso) manda sempre un messaggio NUOVO - che diventa poi la scheda viva da
+# aggiornare. E ad ogni blocco di 15 minuti si ricomincia da un messaggio nuovo, cosi' il canale
+# conserva comunque un filo storico leggibile (~6 schede a partita invece di ~1 sola per 90
+# minuti, o delle ~40-90 di prima) invece di una sola riga che cambia di nascosto.
+MESSAGGIO_LIVE_PREFERITI_ATTIVO = True
+
 # Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
 # della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
 # scattare), senza cambiare alcun comportamento. Serve a raccogliere dati reali per calibrare le
 # soglie sopra con percentili veri invece che a occhio, una volta accumulate abbastanza partite.
 SHADOW_LOG_AUTO_PREFERITI_FILE = data_path("shadow_log_auto_preferiti.jsonl")
+
+# Shadow-log della rotta dominio, in un file suo e non mescolato a quello sopra: le due rotte
+# vanno lette separatamente (una si misura in gol e minuti, l'altra in quota e volume pesato), e
+# tenerle in un solo file costringerebbe a filtrarle ad ogni analisi - stesso motivo per cui
+# valore, strategie e auto-preferiti hanno gia' tre file distinti.
+#
+# Registra il PICCO di dominio della partita, non solo il valore all'istante del verdetto: la
+# domanda a cui questi dati devono rispondere e' "con soglia X e N cicli consecutivi, quante
+# partite sarebbero entrate e quali", e serve sapere quanto in alto e' arrivata ciascuna, non
+# quanto valeva al 75'. Con il picco, la quota al picco, il volume in quel momento e la striscia
+# consecutiva piu' lunga si puo' ricalcolare a tavolino l'esito di qualunque coppia di soglie
+# senza dover rigirare una stagione.
+SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE = data_path("shadow_log_auto_preferiti_dominio.jsonl")
 
 # Shadow-log valore: stesso principio (silenzioso, nessun comportamento visibile) ma per validare
 # in futuro se la probabilità no-vig del mercato pre-match, incrociata con le statistiche live,
@@ -596,6 +673,13 @@ try:
     MINUTO_GOL_AUTO_PREFERITI = config.get("minuto_gol_auto_preferiti", MINUTO_GOL_AUTO_PREFERITI)
     SCARTO_MAX_AUTO_PREFERITI = config.get("scarto_max_auto_preferiti", SCARTO_MAX_AUTO_PREFERITI)
     MAX_PREFERITI_SIMULTANEI = config.get("max_preferiti_simultanei", MAX_PREFERITI_SIMULTANEI)
+    AUTO_PREFERITI_DOMINIO_ATTIVO = config.get("auto_preferiti_dominio_attivo", AUTO_PREFERITI_DOMINIO_ATTIVO)
+    SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI = config.get("soglia_quota_dominio_auto_preferiti", SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI)
+    VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI = config.get("volume_minimo_dominio_auto_preferiti", VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI)
+    CICLI_DOMINIO_PER_AUTO_PREFERITI = config.get("cicli_dominio_per_auto_preferiti", CICLI_DOMINIO_PER_AUTO_PREFERITI)
+    DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
+    SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
+    MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -630,6 +714,12 @@ try:
           f"({SOGLIA_GOL_AUTO_PREFERITI} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' con max "
           f"{SCARTO_MAX_AUTO_PREFERITI} gol di scarto; max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)",
           flush=True)
+    print(f"Rotta dominio auto-preferiti: {'ATTIVA' if AUTO_PREFERITI_DOMINIO_ATTIVO else 'solo shadow-log (non promuove)'} "
+          f"(quota >= {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%, volume >= {VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI}, "
+          f"{CICLI_DOMINIO_PER_AUTO_PREFERITI} cicli consecutivi)", flush=True)
+    print(f"Gate dominio notifiche generali: {'ATTIVO' if DOMINIO_GATE_NOTIFICHE_ATTIVO else 'disattivo'} "
+          f"(quota >= {SOGLIA_QUOTA_DOMINIO_NOTIFICA}%) | messaggio live preferiti: "
+          f"{'ATTIVO' if MESSAGGIO_LIVE_PREFERITI_ATTIVO else 'disattivo'}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -1554,6 +1644,9 @@ def poll_callbacks():
                     elif cmd == "/shadowlogstrategie":
                         esegui_comando_sicuro(chat_id, cmd_shadowlogstrategie)
 
+                    elif cmd == "/shadowlogdominio":
+                        esegui_comando_sicuro(chat_id, cmd_shadowlogdominio)
+
                     elif cmd == "/diagnostica":
                         esegui_comando_sicuro(chat_id, cmd_diagnostica)
 
@@ -1672,6 +1765,45 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
     except Exception as e:
         log(f"Errore invio Telegram: {e}")
         return None
+
+
+def aggiorna_notifica_telegram(message_id, foto_path, messaggio, reply_markup=None, chat_id=None):
+    """Riscrive una notifica gia' mandata (foto e didascalia insieme, editMessageMedia) invece di
+    aggiungerne una nuova. Ritorna True se l'aggiornamento e' andato a buon fine.
+
+    Un False non e' un errore da propagare: e' semplicemente "questa scheda non si puo' piu'
+    aggiornare" (cancellata a mano, troppo vecchia, rate-limit passeggero), e il chiamante ha
+    sempre la strada del messaggio nuovo. Per questo qui non si avvisa e non si fa fallback sul
+    canale: una notifica non viene mai persa per colpa di un edit fallito."""
+    if not CONFIG_VALIDA:
+        return False
+    if not message_id or not foto_path or not os.path.exists(foto_path):
+        return False
+    destinatario = chat_id or TELEGRAM_CHAT_ID
+    try:
+        media = {"type": "photo", "media": "attach://photo",
+                 "caption": messaggio, "parse_mode": "Markdown"}
+        dati = {"chat_id": destinatario, "message_id": message_id, "media": json.dumps(media)}
+        if reply_markup:
+            dati["reply_markup"] = json.dumps(reply_markup)
+        with open(foto_path, 'rb') as photo:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageMedia",
+                data=dati, files={"photo": photo}, timeout=15)
+        if response.status_code == 200:
+            log(f"Telegram scheda live aggiornata -> {destinatario} (message_id {message_id})")
+            return True
+        # "message is not modified": l'edit non serviva perche' il contenuto era gia' quello. Non
+        # e' un fallimento, e rimandare un messaggio nuovo identico sarebbe il contrario di quello
+        # che questa funzione esiste per evitare.
+        if "not modified" in response.text:
+            return True
+        log(f"Scheda live non aggiornabile (message_id {message_id}): "
+            f"HTTP {response.status_code} - {response.text[:200]}")
+        return False
+    except Exception as e:
+        log(f"Errore aggiornamento scheda live Telegram: {e}")
+        return False
 
 
 def _senza_accenti(testo):
@@ -2636,6 +2768,8 @@ def cmd_help(chat_id):
         "/shadowlog - Riepilogo e file dei dati raccolti per la validazione (quote vs risultati)\n"
         "/shadowlogstrategie - Riepilogo e file dei dati raccolti in background sull'efficacia "
         "di sei condizioni di gioco (non più esposte come comandi live)\n"
+        "/shadowlogdominio - A che quota di dominio arrivano davvero le partite, e quante "
+        "entrerebbero nei preferiti con le soglie attuali\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
         "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
@@ -3027,6 +3161,106 @@ def cmd_shadowlog(chat_id):
         log(f"Errore invio file shadow_log_valore.jsonl: {e}")
 
 
+def _percentile(valori_ordinati, percentuale):
+    """Percentile su una lista gia' ordinata, senza numpy (non e' fra le dipendenze del bot)."""
+    if not valori_ordinati:
+        return None
+    posizione = (len(valori_ordinati) - 1) * percentuale / 100
+    basso, alto = int(posizione), min(int(posizione) + 1, len(valori_ordinati) - 1)
+    return round(valori_ordinati[basso] + (valori_ordinati[alto] - valori_ordinati[basso]) * (posizione - basso), 1)
+
+
+def cmd_shadowlogdominio(chat_id):
+    """Riepilogo + file di shadow_log_auto_preferiti_dominio.jsonl: a che quota di dominio sono
+    arrivate davvero le partite osservate, e quante sarebbero entrate nei preferiti con le soglie
+    attualmente impostate.
+
+    E' il comando che serve per decidere se accendere la rotta dominio
+    (AUTO_PREFERITI_DOMINIO_ATTIVO): finche' e' spenta il bot registra tutto senza promuovere
+    nulla, e le soglie 78%/16 restano stime a occhio. I percentili qui sotto le sostituiscono con
+    numeri veri - la stessa disciplina usata per calibrare la rotta gol."""
+    if not os.path.exists(SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE):
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": ("Nessun dato ancora: shadow_log_auto_preferiti_dominio.jsonl non "
+                           "esiste. Il primo verdetto per partita viene scritto al "
+                           f"{MINUTO_VERDETTO_SHADOW_AUTO_PREFERITI}', quindi serve almeno una "
+                           "partita seguita fin li'.")}, timeout=5)
+        return
+
+    picchi, scattate, righe_totali, malformate = [], 0, 0, 0
+    strisce = []
+    try:
+        with open(SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE, "r") as f:
+            for riga in f:
+                riga = riga.strip()
+                if not riga:
+                    continue
+                righe_totali += 1
+                try:
+                    dato = json.loads(riga)
+                except Exception:
+                    malformate += 1
+                    continue
+                if dato.get("auto_preferiti_dominio_scattato"):
+                    scattate += 1
+                quota_max = dato.get("quota_max")
+                if quota_max is not None:
+                    picchi.append(quota_max)
+                strisce.append(dato.get("cicli_consecutivi_max", 0))
+    except Exception as e:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": f"Errore leggendo shadow_log_auto_preferiti_dominio.jsonl: {e}"}, timeout=5)
+        return
+
+    picchi.sort()
+    # Quante partite avrebbero superato la sola soglia di quota: e' il numero che dice se 78% e'
+    # troppo alto (nessuna entra mai) o troppo basso (entra mezzo campionato).
+    sopra_soglia = sum(1 for p in picchi if p >= SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI)
+    righe = [
+        "Shadow-log rotta dominio - riepilogo:",
+        f"- Partite osservate: {righe_totali}"
+        + (f" ({malformate} riga malformata)" if malformate == 1
+           else f" ({malformate} righe malformate)" if malformate else ""),
+        f"- Promosse davvero dalla rotta dominio: {scattate}",
+        f"- Promozione: {'ATTIVA' if AUTO_PREFERITI_DOMINIO_ATTIVO else 'spenta (sola osservazione)'}",
+        "",
+        f"Soglie attuali: quota {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%, volume "
+        f"{VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI}, {CICLI_DOMINIO_PER_AUTO_PREFERITI} cicli di fila",
+    ]
+    if picchi:
+        righe += [
+            "",
+            "Picco di dominio raggiunto (percentili sulle partite osservate):",
+            f"- mediana: {_percentile(picchi, 50)}%",
+            f"- 75°: {_percentile(picchi, 75)}%   90°: {_percentile(picchi, 90)}%   "
+            f"95°: {_percentile(picchi, 95)}%",
+            f"- massimo visto: {picchi[-1]}%",
+            "",
+            f"Con la soglia di quota attuale ({SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%) sarebbero "
+            f"passate {sopra_soglia} partite su {len(picchi)} "
+            f"({round(sopra_soglia / len(picchi) * 100)}%), prima di applicare volume e cicli.",
+            f"- striscia consecutiva piu' lunga vista: {max(strisce) if strisce else 0} cicli",
+        ]
+    else:
+        righe.append("\nNessuna partita ha ancora raggiunto un dominio misurabile "
+                     "(statistiche assenti o squadre pari).")
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=5)
+
+    try:
+        with open(SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                data={"chat_id": chat_id}, files={"document": f}, timeout=30)
+    except Exception as e:
+        log(f"Errore invio file shadow_log_auto_preferiti_dominio.jsonl: {e}")
+
+
 def cmd_shadowlogstrategie(chat_id):
     """Manda un riepilogo numerico + il file grezzo di shadow_log_strategie.jsonl via Telegram,
     stesso principio di /shadowlog ma per le sei strategie: quante volte scatta ciascuna e su
@@ -3411,8 +3645,14 @@ def cmd_funzioni(chat_id):
         "🟢 COSA FA IL BOT OGGI, DAVVERO ATTIVO\n\n"
         "Monitoraggio live\n"
         "Segue le partite dei campionati che segui e ti avvisa quando succede qualcosa che "
-        "conta (tanti tiri, pressione in aumento, un gol, un cartellino rosso, un rigore, un "
-        "recupero lungo) - così non devi controllare tu ogni partita a mano.\n\n"
+        "conta (un gol, un cartellino rosso, un rigore, un recupero lungo) - così non devi "
+        "controllare tu ogni partita a mano.\n\n"
+        "Solo le partite in cui comanda qualcuno\n"
+        "Per gli aggiornamenti che non sono gol o eventi, in chat arrivano ora solo le partite "
+        "in cui una squadra sta davvero facendo la partita (almeno il 65% dell'azione: tiri, "
+        "tiri in porta, corner, tiri in area, pesati). Una partita combattuta con tanti tiri da "
+        "una parte e dall'altra non arriva più: c'è tanto gioco ma non dice da che parte stare, "
+        "ed era il grosso del rumore. I gol restano notificati sempre, in qualunque partita.\n\n"
         "Grafico momentum\n"
         "Il bottone \"📈 Momentum\" sotto ogni notifica ti fa vedere come sta andando la "
         "pressione della partita minuto per minuto (tiri, tiri in porta, corner, xG) - utile "
@@ -3423,9 +3663,17 @@ def cmd_funzioni(chat_id):
         "della partita - vedi subito come il mercato valutava la partita, senza cercarla altrove.\n\n"
         "Preferiti\n"
         "Puoi seguire una partita con più attenzione (notifiche più frequenti, grafico più "
-        "ricco) aggiungendola ai preferiti a mano, oppure ci pensa da solo il bot se la "
-        "partita parte già con un ritmo alto. Le notifiche dei preferiti arrivano in un "
-        "canale Telegram separato, se lo hai configurato.\n\n"
+        "ricco) aggiungendola ai preferiti a mano, oppure ci pensa da solo il bot quando una "
+        "partita si sblocca presto restando aperta (due gol entro il 25' con al massimo un gol "
+        "di scarto). Le notifiche dei preferiti arrivano in un canale Telegram separato, se lo "
+        "hai configurato.\n\n"
+        "Una scheda sola per partita nel canale preferiti\n"
+        "Un preferito veniva ricontrollato ogni minuto e ogni volta era un messaggio nuovo: "
+        "decine di foto quasi identiche impilate. Ora gli aggiornamenti di routine riscrivono "
+        "la scheda precedente, così in cima al canale c'è sempre una sola scheda aggiornata per "
+        "partita. Restano messaggi nuovi - quelli che fanno suonare il telefono - i gol, i "
+        "rossi, i rigori e i recuperi, e si riparte da una scheda nuova ad ogni quarto d'ora, "
+        "così il filo della partita resta comunque leggibile a ritroso.\n\n"
         "Controllo del bot\n"
         "/stop ferma tutto (nessuna chiamata, nessuna notifica) quando sai che non stai "
         "seguendo il trading, /riprendi lo riattiva. C'è anche una pausa automatica nelle ore "
@@ -3458,11 +3706,22 @@ def cmd_funzioni(chat_id):
         "valutarle da solo ogni 15 minuti su ogni partita seguita e a registrare quali scattano, "
         "così più avanti si può controllare con dati reali se scattare anticipa davvero un gol. "
         "/shadowlogstrategie mostra a che punto è questa raccolta.\n\n"
+        "Terza raccolta, sempre silenziosa: una seconda porta d'ingresso ai preferiti basata sul "
+        "dominio, per prendere anche le partite in cui una squadra assedia senza segnare (un "
+        "assedio sullo 0-0 oggi non entra nei preferiti da nessuna parte). La regola è già "
+        "scritta e gira ad ogni ciclo, ma NON promuove niente: registra soltanto a che quota di "
+        "dominio arriva ogni partita, perché le soglie di partenza (78% dell'azione, con almeno "
+        "il doppio del gioco minimo, per tre controlli di fila) sono stime a occhio. Quando i "
+        "dati raccolti diranno quali sono i valori veri, si accende con un interruttore in "
+        "configurazione. /shadowlogdominio mostra i numeri raccolti finora.\n\n"
         "Il bot ora si controlla anche da solo: ogni 30 minuti verifica che partite "
         "tracciate, statistiche e i due shadow-log sopra stiano davvero funzionando, e se "
         "trova un problema te lo scrive qui in chat da solo (oltre che nei log) - non devi "
         "controllare nulla a mano né lanciare comandi apposta.\n\n"
         "📋 ULTIME NOVITÀ (ultimi giorni)\n"
+        "Le notifiche generali passano solo per le partite in cui comanda qualcuno, il canale "
+        "preferiti aggiorna una scheda sola per partita invece di impilare messaggi, raccolta "
+        "dati sulla rotta dominio verso i preferiti (spenta, sola osservazione). "
         "Quote 1X2 nelle notifiche, pausa automatica per fascia oraria, monitoraggio 24/7 "
         "anche fuori orario, il bottone Momentum ora aggiorna la notifica esistente invece "
         "di mandarne una nuova, corretto un bug che perdeva il risultato di partite finite "
@@ -3765,6 +4024,16 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
             chat_id, "Errore nell'aggiornare la notifica con il grafico momentum, riprova.",
             message_id, "editMessageMedia fallita")
         return
+
+    # Questa notifica esce dal giro degli aggiornamenti in place (vedi message_id_live in
+    # processa_partita): l'utente ha appena chiesto di vederci dentro il grafico momentum, e il
+    # ciclo successivo - se cadesse ancora nello stesso blocco di 15 minuti - la riscriverebbe
+    # sopra facendo sparire proprio quello che era stato chiesto. Il prossimo aggiornamento apre
+    # una scheda nuova e lascia intatta questa.
+    if stato.get("message_id_live") == message_id:
+        stato.pop("message_id_live", None)
+        stato.pop("blocco_messaggio_live", None)
+        stato.pop("chat_messaggio_live", None)
 
     # Il bottone non serve più: il grafico è già agganciato alla notifica, ricliccarlo
     # rigenererebbe la stessa immagine inutilmente.
@@ -5331,6 +5600,87 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
                   f"con la partita ancora aperta")
 
 
+def _dominio_per_auto_preferiti(current_stats, score_home, score_away):
+    """Quota e volume pesato della partita, letti con gli occhi della rotta dominio.
+
+    Ritorna (quota, volume, dominio) con quota/volume a None quando non c'e' abbastanza materiale
+    per dire alcunche' - cioe' esattamente quando calcola_dominio() ritorna None: statistiche
+    assenti, troppo poco gioco, oppure squadre sostanzialmente pari. Il volume e' lo stesso peso
+    offensivo combinato su cui calcola_dominio calcola la percentuale, riusato qui invece di
+    ricontarlo per non avere due definizioni di "quanto si e' giocato" che possono divergere."""
+    dominio = calcola_dominio(current_stats, score_home, score_away)
+    if not dominio:
+        return None, None, None
+    volume = _peso_offensivo(current_stats, 0) + _peso_offensivo(current_stats, 1)
+    return dominio["quota"], volume, dominio
+
+
+def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current_stats, score_home,
+                                                             score_away, minuto):
+    """Rotta 2: una squadra che sta facendo la partita da sola, con abbastanza gioco alle spalle
+    perche' la percentuale voglia dire qualcosa, e per piu' cicli di fila.
+
+    Ritorna (True/False, motivo), stessa forma della rotta gol: il motivo finisce nel log e nel
+    messaggio di ingresso del canale, cosi' resta sempre scritto PERCHE' una partita e' entrata.
+
+    Aggiorna anche il contatore di isteresi e il picco di dominio dentro stato_partite: va chiamata
+    ad ogni ciclo, anche quando la promozione e' spenta (AUTO_PREFERITI_DOMINIO_ATTIVO=False), che
+    e' il modo in cui lo shadow-log raccoglie i dati per tarare le soglie."""
+    stato = stato_partite.setdefault(fixture_id, {})
+    quota, volume, dominio = _dominio_per_auto_preferiti(current_stats, score_home, score_away)
+
+    # Il picco si aggiorna sempre, promozione accesa o spenta e soglie a parte: e' il dato che
+    # serve all'analisi offline per rispondere a "con quale soglia questa partita sarebbe entrata".
+    if quota is not None and quota > stato.get("dominio_quota_max", 0):
+        stato["dominio_quota_max"] = quota
+        stato["dominio_volume_al_max"] = volume
+        stato["dominio_minuto_al_max"] = minuto
+        stato["dominio_situazione_al_max"] = dominio["situazione"]
+
+    sopra_soglia = (quota is not None
+                    and quota >= SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI
+                    and volume >= VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI)
+    if sopra_soglia:
+        cicli = stato.get("cicli_dominio_sopra_soglia", 0) + 1
+    else:
+        # Azzeramento, non decremento: l'isteresi deve chiedere cicli CONSECUTIVI, altrimenti una
+        # partita che oscilla intorno alla soglia accumulerebbe lo stesso il credito per entrare.
+        cicli = 0
+    stato["cicli_dominio_sopra_soglia"] = cicli
+    stato["cicli_dominio_sopra_soglia_max"] = max(stato.get("cicli_dominio_sopra_soglia_max", 0), cicli)
+
+    if not AUTO_PREFERITI_DOMINIO_ATTIVO:
+        return False, "rotta dominio in sola osservazione (non promuove)"
+    if not AUTO_PREFERITI_ATTIVO:
+        return False, "auto-preferiti disattivati"
+    if minuto is None:
+        return False, "minuto non disponibile"
+    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+        # Come la rotta gol: non si marca la partita come gia' valutata, appena si libera un posto
+        # torna in gioco. Il tetto e' lo stesso identico dei preferiti manuali e della rotta gol,
+        # non uno dedicato: e' li' per proteggere il numero di chiamate API, e le chiamate non
+        # sanno da quale porta sia entrata la partita.
+        return False, f"gia' {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+    # Goleada: qui serve un controllo esplicito, mentre la rotta gol la evita da sola (con al
+    # massimo un gol di scarto non ci si arriva mai). Una squadra puo' benissimo dominare all'85%
+    # mentre e' gia' avanti 4-0, ed e' proprio la partita che il resto del bot smette di notificare.
+    if abs(score_home - score_away) > SOGLIA_GOLEADA_STOP_NOTIFICHE:
+        return False, f"{abs(score_home - score_away)} gol di scarto, partita gia' decisa"
+    if quota is None:
+        return False, "nessun dominio misurabile (statistiche assenti o troppo poco gioco)"
+    if not sopra_soglia:
+        return False, (f"dominio {quota}% su volume {volume} "
+                       f"(servono {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}% e volume "
+                       f"{VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI})")
+    if cicli < CICLI_DOMINIO_PER_AUTO_PREFERITI:
+        return False, (f"dominio {quota}% da {cicli} cicli "
+                       f"(ne servono {CICLI_DOMINIO_PER_AUTO_PREFERITI} di fila)")
+
+    chi = "la squadra di casa" if dominio["lato"] == 0 else "la squadra ospite"
+    coda = {"sotto": "e sta perdendo", "bloccata": "e non segna", "avanti": "ed e' avanti"}[dominio["situazione"]]
+    return True, f"dominio: {chi} comanda {quota}% {coda}, stabile da {cicli} cicli"
+
+
 def _appendi_shadow_log(percorso_file, riga):
     """Appende una riga JSON a un file di shadow-log (raccolta dati per analisi offline, nessun
     effetto sul comportamento del bot). Helper condiviso da tutti gli shadow-log del bot, per non
@@ -5363,6 +5713,45 @@ def registra_shadow_log_auto_preferiti(fixture_id, home, away, league_name, leag
         "xg_ospite": xg_ospite,
         "gol_totali": gol_totali,
         "auto_preferiti_scattato": scattato,
+    })
+
+
+def registra_shadow_log_auto_preferiti_dominio(fixture_id, home, away, league_name, league_country,
+                                               minuto, score_home, score_away, quota, volume,
+                                               situazione, cicli, scattato, motivo):
+    """Una riga per la rotta dominio: com'era la partita al momento del verdetto E quanto in alto
+    era arrivato il dominio nel corso della gara (il picco tenuto in stato_partite).
+
+    Il picco e' la parte che serve davvero a tarare: le soglie 78%/16 sono stime a occhio, e per
+    sostituirle con percentili veri bisogna sapere a che quota e' arrivata ogni partita, non a che
+    quota si trovava all'istante in cui si e' guardato. Con quota_max, il volume in quel momento e
+    la striscia consecutiva piu' lunga si ricalcola offline l'esito di qualunque coppia di soglie."""
+    stato = stato_partite.get(fixture_id, {})
+    _appendi_shadow_log(SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE, {
+        "timestamp": time.time(),
+        "fixture_id": fixture_id,
+        "home": home,
+        "away": away,
+        "league": league_name,
+        "league_country": league_country,
+        "minuto": minuto,
+        "score_home": score_home,
+        "score_away": score_away,
+        "quota": quota,
+        "volume": volume,
+        "situazione": situazione,
+        "cicli_consecutivi": cicli,
+        "quota_max": stato.get("dominio_quota_max"),
+        "volume_al_max": stato.get("dominio_volume_al_max"),
+        "minuto_al_max": stato.get("dominio_minuto_al_max"),
+        "situazione_al_max": stato.get("dominio_situazione_al_max"),
+        "cicli_consecutivi_max": stato.get("cicli_dominio_sopra_soglia_max", 0),
+        "soglia_quota": SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI,
+        "soglia_volume": VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI,
+        "soglia_cicli": CICLI_DOMINIO_PER_AUTO_PREFERITI,
+        "promozione_attiva": AUTO_PREFERITI_DOMINIO_ATTIVO,
+        "auto_preferiti_dominio_scattato": scattato,
+        "motivo": motivo,
     })
 
 
@@ -5462,7 +5851,8 @@ def classifica_cambio_punteggio(fixture_id, score_home, score_away):
     return gol_appena_segnato, corretto_al_ribasso
 
 
-def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None):
+def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None,
+                    current_stats=None):
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
     # passare). Un gol resta notificato anche se porta la partita in goleada (regola sotto): è
@@ -5522,6 +5912,30 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
                         or porta_blocco >= SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI):
                     return True
         return False
+
+    # GATE DOMINIO (solo partite NON preferite: sopra si e' gia' tornati per quelle).
+    #
+    # Le quattro regole qui sotto guardano il VOLUME: quanti tiri in tutto, quanta differenza,
+    # quanto ritmo negli ultimi 15 minuti. Prese da sole rispondono a "si sta giocando?", che non e'
+    # la domanda utile: un 10-9 di tiri le supera tutte pur essendo la partita da cui si ricava
+    # meno di ogni altra, perche' il gioco e' distribuito equamente e non indica da che parte
+    # stare. Il gate chiede prima "sta comandando qualcuno?", e solo dopo lascia che le regole
+    # decidano QUANDO aggiornare - da criterio d'ingresso diventano cadenza.
+    #
+    # Posizione deliberata, non casuale: sta DOPO il gol/evento forzato (che passa sempre, gate o
+    # meno), DOPO la modalita' essenziale e DOPO la goleada, cosi' eredita quelle tre sospensioni
+    # senza riscriverle, e DOPO il ramo dei preferiti, che resta intoccato con le sue soglie
+    # reattive - una partita entrata nei preferiti e' gia' stata giudicata degna, non deve
+    # ripresentare le credenziali ad ogni ciclo.
+    #
+    # Quando le statistiche mancano del tutto calcola_dominio() ritorna None e il gate chiude, ma
+    # non e' un buco nuovo: senza statistiche tiri e delta valgono zero, e le quattro regole qui
+    # sotto non scattavano gia' prima (diff 0, totali 0, delta 0). I gol continuano ad arrivare
+    # comunque, perche' passano molto piu' in alto.
+    if DOMINIO_GATE_NOTIFICHE_ATTIVO:
+        dominio = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
+        if not dominio or dominio["quota"] < SOGLIA_QUOTA_DOMINIO_NOTIFICA:
+            return False
 
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)
@@ -6144,6 +6558,23 @@ def processa_partita(fixture, notifiche_attive=True):
             tiri_totali_partita = (tiri_casa + tiri_ospite) if current_stats else 0
             promuovi, motivo = deve_aggiungere_automaticamente_ai_preferiti(
                 minuto, score_home, score_away)
+            # Rotta 2 (dominio), valutata solo se la prima non ha gia' promosso: da qui in poi la
+            # partita e' comunque nei preferiti, e continuare a misurarne il dominio non servirebbe
+            # a nessuno dei due scopi (ne' promuovere ne' tarare le soglie per promuovere).
+            # Va chiamata anche quando la promozione e' spenta: e' lei ad aggiornare contatore di
+            # isteresi e picco, cioe' i dati con cui poi si decide se accenderla.
+            promuovi_dominio = False
+            motivo_dominio = ""
+            quota_dominio = volume_dominio = None
+            situazione_dominio = None
+            if not promuovi:
+                quota_dominio, volume_dominio, dominio_valutato = _dominio_per_auto_preferiti(
+                    current_stats, score_home, score_away)
+                situazione_dominio = dominio_valutato["situazione"] if dominio_valutato else None
+                promuovi_dominio, motivo_dominio = deve_aggiungere_automaticamente_ai_preferiti_per_dominio(
+                    fixture_id, current_stats, score_home, score_away, minuto)
+                if promuovi_dominio:
+                    promuovi, motivo = True, motivo_dominio
             if promuovi:
                 FAVORITE_MATCHES.add(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
@@ -6187,6 +6618,11 @@ def processa_partita(fixture, notifiche_attive=True):
                     (tiri_area_casa + tiri_area_ospite) if current_stats else 0,
                     xg_casa, xg_ospite, gol_totali, True,
                 )
+                if promuovi_dominio:
+                    registra_shadow_log_auto_preferiti_dominio(
+                        fixture_id, home, away, league_name, league_country, minuto,
+                        score_home, score_away, quota_dominio, volume_dominio, situazione_dominio,
+                        stato_partite[fixture_id].get("cicli_dominio_sopra_soglia", 0), True, motivo)
             else:
                 # Log solo per le partite che hanno segnato: sono le uniche che possono entrare,
                 # quindi le uniche il cui "no" dice qualcosa. Loggare ad ogni ciclo anche gli 0-0
@@ -6206,9 +6642,30 @@ def processa_partita(fixture, notifiche_attive=True):
                         (tiri_area_casa + tiri_area_ospite) if current_stats else 0,
                         xg_casa, xg_ospite, gol_totali, False,
                     )
+                # Verdetto della rotta dominio: contatore suo, non quello della rotta gol qui
+                # sopra. Le due rotte scartano per motivi diversi e in momenti diversi, e con un
+                # flag condiviso il "no" di una avrebbe zittito per sempre quello dell'altra. La
+                # riga porta con se' il picco raggiunto in tutta la partita, non solo il valore di
+                # questo istante: e' quello il dato con cui si tarano le soglie.
+                if (minuto is not None and minuto >= MINUTO_VERDETTO_SHADOW_AUTO_PREFERITI
+                        and not stato_partite[fixture_id].get("verdetto_shadow_dominio")):
+                    stato_partite[fixture_id]["verdetto_shadow_dominio"] = True
+                    quota_max_vista = stato_partite[fixture_id].get("dominio_quota_max")
+                    picco_txt = f" (picco {quota_max_vista}%)" if quota_max_vista else ""
+                    log(f"    ⭐✖️ Rotta dominio: mai promossa entro il {minuto}' - "
+                        f"{motivo_dominio}{picco_txt}")
+                    registra_shadow_log_auto_preferiti_dominio(
+                        fixture_id, home, away, league_name, league_country, minuto,
+                        score_home, score_away, quota_dominio, volume_dominio, situazione_dominio,
+                        stato_partite[fixture_id].get("cicli_dominio_sopra_soglia", 0), False,
+                        motivo_dominio)
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
-        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict, gol_appena_segnato=evento_forzato, recupero_lungo=recupero_da_segnalare is not None, score_home=score_home, score_away=score_away):
+        if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict,
+                               gol_appena_segnato=evento_forzato,
+                               recupero_lungo=recupero_da_segnalare is not None,
+                               score_home=score_home, score_away=score_away,
+                               current_stats=current_stats):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
             stato_partite[fixture_id].update({
                 "tiri_casa": tiri_casa,
@@ -6366,7 +6823,42 @@ def processa_partita(fixture, notifiche_attive=True):
         keyboard = get_notification_keyboard(fixture_id, is_fav, is_sil, mostra_momentum)
         chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if is_fav else TELEGRAM_CHAT_ID
         if notifiche_attive:
-            message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
+            # Scheda viva del canale preferiti (vedi MESSAGGIO_LIVE_PREFERITI_ATTIVO): dentro lo
+            # stesso blocco di 15 minuti gli aggiornamenti di routine riscrivono il messaggio
+            # precedente, invece di impilarne uno nuovo ogni 60 secondi.
+            #
+            # Tre cose aprono sempre un messaggio NUOVO, e sono il motivo per cui questo non
+            # trasforma le notifiche in aggiornamenti silenziosi:
+            #  - un evento forzato (gol, rosso, rigore) o un recupero appena concluso: Telegram non
+            #    suona sugli edit, quindi quello che deve farsi sentire non puo' essere un edit;
+            #  - il cambio di blocco di 15 minuti: il canale conserva un filo storico leggibile
+            #    invece di un'unica riga che cambia di nascosto per 90 minuti;
+            #  - la chat diversa da quella della scheda: un id di messaggio vale solo nella sua
+            #    chat, e una partita che entra o esce dai preferiti cambia destinazione.
+            blocco_corrente = _blocco_minuto(minuto)
+            stato_live = stato_partite.get(fixture_id, {})
+            message_id_live = stato_live.get("message_id_live")
+            scheda_aggiornabile = (
+                MESSAGGIO_LIVE_PREFERITI_ATTIVO
+                and is_fav
+                and message_id_live
+                and stato_live.get("blocco_messaggio_live") == blocco_corrente
+                and stato_live.get("chat_messaggio_live") == chat_destinazione
+                and not evento_forzato
+                and not recupero_da_segnalare)
+            message_id_inviato = None
+            if scheda_aggiornabile and aggiorna_notifica_telegram(
+                    message_id_live, foto_path, messaggio, reply_markup=keyboard,
+                    chat_id=chat_destinazione):
+                message_id_inviato = message_id_live
+            if message_id_inviato is None:
+                message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
+                if message_id_inviato and MESSAGGIO_LIVE_PREFERITI_ATTIVO and is_fav:
+                    stato_partite[fixture_id].update({
+                        "message_id_live": message_id_inviato,
+                        "blocco_messaggio_live": blocco_corrente,
+                        "chat_messaggio_live": chat_destinazione,
+                    })
             if message_id_inviato and mostra_momentum:
                 # Ricorda la didascalia esatta di questo messaggio: se poi si clicca "Momentum", la
                 # foto viene sostituita ma il testo con tutti i dati (quote, statistiche, gol...)
@@ -6490,6 +6982,7 @@ def imposta_comandi_telegram():
         {"command": "testpreferiti", "description": "Verifica il canale preferiti dedicato"},
         {"command": "shadowlog", "description": "Riepilogo dati raccolti per la validazione"},
         {"command": "shadowlogstrategie", "description": "Dati raccolti in background sull'efficacia delle strategie"},
+        {"command": "shadowlogdominio", "description": "A che quota di dominio arrivano le partite osservate"},
         {"command": "diagnostica", "description": "Controllo dal vivo di ogni partita live"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "apiusage", "description": "Chiamate API-Football fatte al giorno"},
