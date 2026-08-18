@@ -349,6 +349,13 @@ CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
 DOMINIO_GATE_NOTIFICHE_ATTIVO = True
 SOGLIA_QUOTA_DOMINIO_NOTIFICA = 65
 
+# Un aggiornamento di routine per blocco di 15 minuti e per partita, nella chat principale (vedi il
+# commento esteso dentro deve_notificare). Serve perche' le quattro regole generali guardano lo
+# stato assoluto e non il cambiamento: una volta che una partita e' sbilanciata restano vere per
+# sempre, e la stessa partita tornava in chat ad ogni ciclo. Gli eventi forzati - gol, rosso,
+# rigore, recupero - non sono toccati: passano molto prima di questo controllo.
+UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = True
+
 # Messaggio live: nel canale preferiti una partita viene ricontrollata ogni 60s per tutta la gara,
 # e ogni aggiornamento era finora un messaggio nuovo - decine di foto quasi identiche impilate, in
 # cui l'ultima riga utile e' sempre in fondo e le precedenti sono gia' scadute. Qui invece gli
@@ -685,6 +692,7 @@ try:
     CICLI_DOMINIO_PER_AUTO_PREFERITI = config.get("cicli_dominio_per_auto_preferiti", CICLI_DOMINIO_PER_AUTO_PREFERITI)
     DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
+    UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
@@ -751,6 +759,46 @@ PAROLE_ESCLUSE = [
     # TEST TEMPORANEO: "friendlies", "amichevoli", "friendly" rimossi per verificare grafici/notifiche
     # Ripristinare dopo il test!
 ]
+
+# Formazioni giovanili e riserve riconosciute dal NOME DELLA SQUADRA, non da quello della lega.
+#
+# Escludere i campionati uno per uno non bastava, ed e' stato dimostrato due volte nella stessa
+# sera: tolta "National League Cup" e' arrivata "Premier League Cup" (Huddersfield Town U21 -
+# Gillingham FC U21, statistiche N/D), che passava per la stessa strada - contiene "Premier League"
+# e "League Cup", entrambe in whitelist. Dietro c'e' sempre "Professional Development League" e
+# "Premier League International Cup", e il prossimo torneo giovanile con un nome che assomiglia a
+# quello di un campionato vero rifarebbe lo stesso giro.
+#
+# Il segnale comune non e' il nome della competizione: sono le squadre. "Newcastle United U21" e'
+# una squadra di sviluppo comunque si chiami il torneo in cui gioca, e l'API non pubblica quasi mai
+# le sue statistiche. Basta UNA delle due: in queste coppe un club non-league affronta la U21 di un
+# club di Premier (Tamworth - Newcastle United U21), quindi chiedere che siano giovanili entrambe
+# lascerebbe passare meta' delle partite.
+PAROLE_ESCLUSE_SQUADRE = [
+    "u23", "u21", "u20", "u19", "u18", "u17", "u16", "u15",
+    "under-23", "under-21", "under-20", "under-19", "under-18", "under-17",
+    "under 23", "under 21", "under 20", "under 19", "under 18", "under 17",
+    "youth", "reserves", "riserve",
+]
+
+
+def squadra_giovanile(nome_squadra):
+    """True se il nome e' quello di una formazione giovanile o di riserve.
+
+    Confine di parola, non sottostringa: "u20" non deve intercettare un club che ha quelle tre
+    lettere dentro un nome piu' lungo."""
+    nome = _senza_accenti(nome_squadra or "")
+    return any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE)
+
+
+def partita_tra_giovanili(fixture):
+    """True se almeno una delle due squadre della partita e' giovanile/riserve.
+
+    Si applica al tracciamento automatico (ciclo principale e piano giornata), non ai comandi:
+    se l'utente cerca esplicitamente una partita con /status deve poterla vedere lo stesso."""
+    squadre = fixture.get("teams", {}) or {}
+    return any(squadra_giovanile((squadre.get(lato) or {}).get("name", ""))
+               for lato in ("home", "away"))
 
 # Coppe nazionali (non UEFA) sempre escluse. Da quando campionato_valido() usa solo la whitelist
 # statica (niente più cache dinamica dell'API, vedi commento lì) questo elenco è ridondante in
@@ -2194,6 +2242,10 @@ def costruisci_piano_giornata(data_str):
             continue
         league = item.get("league", {})
         if not campionato_valido(league.get("name", ""), league.get("type", ""), league.get("country", "")):
+            continue
+        # Stesso filtro del ciclo principale: una partita giovanile non deve nemmeno entrare nel
+        # piano della giornata, altrimenti rientrerebbe dalla finestra oraria che il piano genera.
+        if partita_tra_giovanili(item):
             continue
         kickoff_ts = fixture_info.get("timestamp")
         if not kickoff_ts:
@@ -6072,6 +6124,24 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         if not dominio or dominio["quota"] < SOGLIA_QUOTA_DOMINIO_NOTIFICA:
             return False
 
+    # UN AGGIORNAMENTO DI ROUTINE PER BLOCCO DI 15 MINUTI.
+    #
+    # Le quattro regole qui sotto guardano lo stato ASSOLUTO, non il cambiamento: la Regola 1
+    # ("differenza tiri >= 3") e' vera per sempre appena una partita si sbilancia. Dinamo
+    # Zagreb-Viking il 18/08 era 19-5 di tiri, differenza 14: superava la soglia ad ogni singolo
+    # ciclo, e la stessa partita tornava in chat ogni 3 minuti (22:41, 22:44, 22:47...).
+    #
+    # Il gate del dominio ha reso la cosa piu' evidente invece di causarla: filtrando alle sole
+    # partite dominate, lascia passare esattamente quelle in cui la differenza tiri e' alta - cioe'
+    # quelle che la Regola 1 ripresenta all'infinito. Prima il rumore era distribuito su piu'
+    # partite, ora si concentra sulle stesse due o tre.
+    #
+    # Il freno riusa il blocco di 15 minuti gia' esistente per il salto di ritmo dei preferiti: un
+    # aggiornamento di routine per blocco e per partita. Gli eventi che devono farsi sentire - gol,
+    # rosso, rigore, recupero - non passano di qui: hanno gia' restituito True molto piu' in alto.
+    if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO and stato.get("blocco_ultima_notifica") == _blocco_minuto(minuto):
+        return False
+
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)
     tempo_passato = time.time() - ultimo_invio
@@ -7197,7 +7267,7 @@ if __name__ == "__main__":
                     f.get("league", {}).get("name", ""),
                     f.get("league", {}).get("type", ""),
                     f.get("league", {}).get("country", "")
-                )
+                ) and not partita_tra_giovanili(f)
             ]
             log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide")
 
