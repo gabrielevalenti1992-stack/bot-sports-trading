@@ -349,6 +349,13 @@ CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
 DOMINIO_GATE_NOTIFICHE_ATTIVO = True
 SOGLIA_QUOTA_DOMINIO_NOTIFICA = 65
 
+# Un aggiornamento di routine per blocco di 15 minuti e per partita, nella chat principale (vedi il
+# commento esteso dentro deve_notificare). Serve perche' le quattro regole generali guardano lo
+# stato assoluto e non il cambiamento: una volta che una partita e' sbilanciata restano vere per
+# sempre, e la stessa partita tornava in chat ad ogni ciclo. Gli eventi forzati - gol, rosso,
+# rigore, recupero - non sono toccati: passano molto prima di questo controllo.
+UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = True
+
 # Messaggio live: nel canale preferiti una partita viene ricontrollata ogni 60s per tutta la gara,
 # e ogni aggiornamento era finora un messaggio nuovo - decine di foto quasi identiche impilate, in
 # cui l'ultima riga utile e' sempre in fondo e le precedenti sono gia' scadute. Qui invece gli
@@ -685,6 +692,7 @@ try:
     CICLI_DOMINIO_PER_AUTO_PREFERITI = config.get("cicli_dominio_per_auto_preferiti", CICLI_DOMINIO_PER_AUTO_PREFERITI)
     DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
+    UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
@@ -6115,6 +6123,24 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         dominio = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
         if not dominio or dominio["quota"] < SOGLIA_QUOTA_DOMINIO_NOTIFICA:
             return False
+
+    # UN AGGIORNAMENTO DI ROUTINE PER BLOCCO DI 15 MINUTI.
+    #
+    # Le quattro regole qui sotto guardano lo stato ASSOLUTO, non il cambiamento: la Regola 1
+    # ("differenza tiri >= 3") e' vera per sempre appena una partita si sbilancia. Dinamo
+    # Zagreb-Viking il 18/08 era 19-5 di tiri, differenza 14: superava la soglia ad ogni singolo
+    # ciclo, e la stessa partita tornava in chat ogni 3 minuti (22:41, 22:44, 22:47...).
+    #
+    # Il gate del dominio ha reso la cosa piu' evidente invece di causarla: filtrando alle sole
+    # partite dominate, lascia passare esattamente quelle in cui la differenza tiri e' alta - cioe'
+    # quelle che la Regola 1 ripresenta all'infinito. Prima il rumore era distribuito su piu'
+    # partite, ora si concentra sulle stesse due o tre.
+    #
+    # Il freno riusa il blocco di 15 minuti gia' esistente per il salto di ritmo dei preferiti: un
+    # aggiornamento di routine per blocco e per partita. Gli eventi che devono farsi sentire - gol,
+    # rosso, rigore, recupero - non passano di qui: hanno gia' restituito True molto piu' in alto.
+    if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO and stato.get("blocco_ultima_notifica") == _blocco_minuto(minuto):
+        return False
 
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)

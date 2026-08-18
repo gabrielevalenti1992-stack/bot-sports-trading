@@ -19,6 +19,7 @@
   "cicli_dominio_per_auto_preferiti": 3,
   "dominio_gate_notifiche_attivo": true,
   "soglia_quota_dominio_notifica": 65,
+  "un_aggiornamento_per_blocco_attivo": true,
   "messaggio_live_preferiti_attivo": true,
   "peso_intensita_tiri": 1,
   "peso_intensita_porta": 2,
