@@ -794,6 +794,17 @@ def squadra_giovanile(nome_squadra):
     return any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE)
 
 
+def fixture_in_whitelist(fixture):
+    """campionato_valido() letto direttamente da una partita dell'API.
+
+    Gemella di partita_tra_giovanili(): stessa forma, stesso uso, cosi' i due filtri si leggono
+    insieme dove servono. Prima lo scavo dentro "league" era ricopiato in quattro punti - ciclo
+    principale, /live, /intensita e la diagnostica - e bastava aggiungerne un quinto con una chiave
+    scritta storta per avere un filtro che si comporta diversamente dagli altri."""
+    lega = fixture.get("league") or {}
+    return campionato_valido(lega.get("name", ""), lega.get("type", ""), lega.get("country", ""))
+
+
 def partita_tra_giovanili(fixture):
     """True se almeno una delle due squadre della partita e' giovanile/riserve.
 
@@ -1441,6 +1452,18 @@ def _esegui_comando(chat_id, funzione, args):
             pass
 
 
+def togli_bottoni(chat_id, msg_id):
+    """Toglie la tastiera da un messaggio gia' inviato: dopo aver silenziato o riattivato una
+    partita i bottoni non hanno piu' senso, e lasciarli invita a ricliccarli."""
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
+            json={"chat_id": chat_id, "message_id": msg_id,
+                  "reply_markup": json.dumps({"inline_keyboard": []})}, timeout=5)
+    except Exception as e:
+        log(f"Bottoni non rimossi (message_id {msg_id}): {e}")
+
+
 def esegui_comando_sicuro(chat_id, funzione, *args):
     """Lancia il comando in un thread separato invece di eseguirlo nel thread che fa polling di
     Telegram: alcuni comandi (es. /intensita) possono girare per decine di secondi o
@@ -1490,13 +1513,7 @@ def poll_callbacks():
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                             json={"callback_query_id": cq["id"]}, timeout=5)
-                        requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
-                            json={
-                                "chat_id": chat_id,
-                                "message_id": msg_id,
-                                "reply_markup": json.dumps({"inline_keyboard": []})
-                            }, timeout=5)
+                        togli_bottoni(chat_id, msg_id)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={
@@ -1512,13 +1529,7 @@ def poll_callbacks():
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                             json={"callback_query_id": cq["id"], "text": "Partita riattivata"}, timeout=5)
-                        requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
-                            json={
-                                "chat_id": chat_id,
-                                "message_id": msg_id,
-                                "reply_markup": json.dumps({"inline_keyboard": []})
-                            }, timeout=5)
+                        togli_bottoni(chat_id, msg_id)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={"chat_id": chat_id, "text": "\U0001F514 Partita riattivata. Torneranno gli alert live."}, timeout=5)
@@ -2916,11 +2927,7 @@ def cmd_live(chat_id):
     partite_cmd_raw = get_partite_live()
     partite_cmd = [
         f for f in partite_cmd_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
+        if fixture_in_whitelist(f)
     ]
     if not partite_cmd:
         requests.post(
@@ -3189,24 +3196,14 @@ def cmd_shadowlog(chat_id):
         return
 
     snapshot_fixtures, risultato_fixtures = set(), set()
-    totale_righe = righe_malformate = 0
     try:
-        with open(SHADOW_LOG_VALORE_FILE, "r") as f:
-            for riga in f:
-                riga = riga.strip()
-                if not riga:
-                    continue
-                totale_righe += 1
-                try:
-                    dato = json.loads(riga)
-                except Exception:
-                    righe_malformate += 1
-                    continue
-                fid = dato.get("fixture_id")
-                if dato.get("tipo") == "snapshot":
-                    snapshot_fixtures.add(fid)
-                elif dato.get("tipo") == "risultato_finale":
-                    risultato_fixtures.add(fid)
+        dati, totale_righe, righe_malformate = leggi_shadow_log(SHADOW_LOG_VALORE_FILE)
+        for dato in dati:
+            fid = dato.get("fixture_id")
+            if dato.get("tipo") == "snapshot":
+                snapshot_fixtures.add(fid)
+            elif dato.get("tipo") == "risultato_finale":
+                risultato_fixtures.add(fid)
     except Exception as e:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -3352,31 +3349,21 @@ def cmd_shadowlogstrategie(chat_id):
         return
 
     snapshot_fixtures, risultato_fixtures = set(), set()
-    totale_righe = righe_malformate = 0
     conteggio_strategie = {nome: 0 for nome, _e, _f, _d in STRATEGIE}
     fixtures_per_strategia = {nome: set() for nome, _e, _f, _d in STRATEGIE}
     try:
-        with open(SHADOW_LOG_STRATEGIE_FILE, "r") as f:
-            for riga in f:
-                riga = riga.strip()
-                if not riga:
-                    continue
-                totale_righe += 1
-                try:
-                    dato = json.loads(riga)
-                except Exception:
-                    righe_malformate += 1
-                    continue
-                fid = dato.get("fixture_id")
-                if dato.get("tipo") == "snapshot":
-                    snapshot_fixtures.add(fid)
-                    for segnale in dato.get("segnali", []):
-                        nome_strat = segnale.get("strategia")
-                        if nome_strat in conteggio_strategie:
-                            conteggio_strategie[nome_strat] += 1
-                            fixtures_per_strategia[nome_strat].add(fid)
-                elif dato.get("tipo") == "risultato_finale":
-                    risultato_fixtures.add(fid)
+        dati, totale_righe, righe_malformate = leggi_shadow_log(SHADOW_LOG_STRATEGIE_FILE)
+        for dato in dati:
+            fid = dato.get("fixture_id")
+            if dato.get("tipo") == "snapshot":
+                snapshot_fixtures.add(fid)
+                for segnale in dato.get("segnali", []):
+                    nome_strat = segnale.get("strategia")
+                    if nome_strat in conteggio_strategie:
+                        conteggio_strategie[nome_strat] += 1
+                        fixtures_per_strategia[nome_strat].add(fid)
+            elif dato.get("tipo") == "risultato_finale":
+                risultato_fixtures.add(fid)
     except Exception as e:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -3540,11 +3527,7 @@ def cmd_diagnostica(chat_id):
 
     partite_valide = [
         f for f in partite_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
+        if fixture_in_whitelist(f)
     ]
     ora = time.time()
     righe = [
@@ -4401,11 +4384,7 @@ def cmd_intensita(chat_id):
     partite_raw = get_partite_live()
     partite_cmd = [
         f for f in partite_raw
-        if campionato_valido(
-            f.get("league", {}).get("name", ""),
-            f.get("league", {}).get("type", ""),
-            f.get("league", {}).get("country", "")
-        )
+        if fixture_in_whitelist(f)
     ]
     if not partite_cmd:
         requests.post(
@@ -5501,7 +5480,6 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
     per squadra). Elabora al massimo `max_fixtures` nuove partite per chiamata per non consumare
     troppe richieste API in un colpo solo: le partite restanti vengono rimandate alla prossima
     esecuzione (il progresso è tracciato su disco tramite fixture_ids_processati)."""
-    global STORICO_MINUTAGGI
     max_fixtures = max_fixtures or STORICO_MAX_FIXTURES_PER_RUN
     league_key = str(league_id)
 
@@ -5890,6 +5868,28 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
     chi = "la squadra di casa" if dominio["lato"] == 0 else "la squadra ospite"
     coda = {"sotto": "e sta perdendo", "bloccata": "e non segna", "avanti": "ed e' avanti"}[dominio["situazione"]]
     return True, f"dominio: {chi} comanda {quota}% {coda}, stabile da {cicli} cicli"
+
+
+def leggi_shadow_log(percorso_file):
+    """Legge uno shadow-log (una riga JSON per evento) contando anche le righe illeggibili.
+
+    Ritorna (dati, totale_righe, righe_malformate). Una riga corrotta non fa fallire la lettura -
+    si conta e si tira dritto - perche' il file viene appeso in produzione e un crash a meta'
+    scrittura non deve rendere illeggibile tutto lo storico. Gli errori di apertura invece si
+    propagano: il chiamante li mostra in chat col nome del file."""
+    dati = []
+    totale = malformate = 0
+    with open(percorso_file, "r") as f:
+        for riga in f:
+            riga = riga.strip()
+            if not riga:
+                continue
+            totale += 1
+            try:
+                dati.append(json.loads(riga))
+            except Exception:
+                malformate += 1
+    return dati, totale, malformate
 
 
 def _appendi_shadow_log(percorso_file, riga):
@@ -6437,7 +6437,7 @@ def processa_partita(fixture, notifiche_attive=True):
         if goals:
             log(f"    ⚽ Gol trovati: {len(goals)}")
         else:
-            log(f"    ⚽ Nessun gol registrato")
+            log("    ⚽ Nessun gol registrato")
 
         # Cartellini rossi e rigori: stessa lista fresca ad ogni ciclo (nessuna chiamata in più,
         # è già dentro "events"), confrontata con quella salvata al ciclo precedente per capire
@@ -6535,7 +6535,7 @@ def processa_partita(fixture, notifiche_attive=True):
             registra_osservazione_statistiche(league_country, league_name, True, league_round)
             if fine_1h_appena_avvenuta:
                 stato_partite[fixture_id]["stats_fine_1h"] = current_stats
-                log(f"    📸 Statistiche di fine 1° tempo salvate (confronto 1°T/2°T, strategia Rimonta)")
+                log("    📸 Statistiche di fine 1° tempo salvate (confronto 1°T/2°T, strategia Rimonta)")
         else:
             current_stats = None
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
@@ -6546,7 +6546,7 @@ def processa_partita(fixture, notifiche_attive=True):
                 # dopo. Il contatore delle risposte vuote NON va azzerato (non abbiamo notizie
                 # nuove) ma nemmeno incrementato.
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "errore"
-                log(f"    ⚠️ Statistiche non recuperate: chiamata API fallita (rate-limit/timeout/rete), riprovo al prossimo ciclo")
+                log("    ⚠️ Statistiche non recuperate: chiamata API fallita (rate-limit/timeout/rete), riprovo al prossimo ciclo")
             else:
                 vuote = stato_partite[fixture_id].get("stats_vuote_consecutive", 0) + 1
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
@@ -6774,7 +6774,7 @@ def processa_partita(fixture, notifiche_attive=True):
             if "muted_at_minute" not in muted_data:
                 muted_data["muted_at_minute"] = minuto
                 save_silenced(SILENCED_MATCHES)
-            log(f"  -> Silenziata, skip")
+            log("  -> Silenziata, skip")
             return
 
         # Preferito "raffreddato": se sono passati troppi minuti dall'ultima notifica inviata,
@@ -7203,7 +7203,6 @@ def processa_partita(fixture, notifiche_attive=True):
 def pulisci_partite_terminate(fixture_ids_live):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
     for fid in ids_da_rimuovere:
-        stato = stato_partite.get(fid, {})
         # Nessun messaggio di fine partita
         SILENCED_MATCHES.pop(str(fid), None)
         # Il motivo dell'ultima valutazione vive quanto la partita: senza questa riga il dizionario
@@ -7352,11 +7351,7 @@ if __name__ == "__main__":
             chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
             in_whitelist = [
                 f for f in partite
-                if campionato_valido(
-                    f.get("league", {}).get("name", ""),
-                    f.get("league", {}).get("type", ""),
-                    f.get("league", {}).get("country", "")
-                )
+                if fixture_in_whitelist(f)
             ]
             partite_valide = [f for f in in_whitelist if not partita_tra_giovanili(f)]
             # Le giovanili si contano a parte invece di sparire dentro il totale: se un giorno il
