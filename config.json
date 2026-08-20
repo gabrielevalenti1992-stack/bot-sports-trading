@@ -21,6 +21,8 @@
   "soglia_quota_dominio_notifica": 65,
   "un_aggiornamento_per_blocco_attivo": true,
   "messaggio_live_preferiti_attivo": true,
+  "elimina_scheda_precedente_attivo": true,
+  "momentum_persistente_attivo": true,
   "peso_intensita_tiri": 1,
   "peso_intensita_porta": 2,
   "peso_intensita_corner": 1,
