@@ -370,6 +370,28 @@ UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = True
 # minuti, o delle ~40-90 di prima) invece di una sola riga che cambia di nascosto.
 MESSAGGIO_LIVE_PREFERITI_ATTIVO = True
 
+# Una scheda sola per partita: quando ne parte una nuova, quella vecchia viene CANCELLATA.
+#
+# L'edit sopra tiene viva una sola scheda finche' si resta nello stesso blocco di 15 minuti, ma
+# appena si cambia blocco - o arriva un gol, o si e' cliccato Momentum - nasce un messaggio nuovo e
+# il precedente resta li' sotto, fermo a dati ormai scaduti. In chat si finisce per leggere una
+# scheda vecchia credendola attuale, che e' peggio del non averla.
+#
+# Niente va perso: il testo della scheda porta con se' tutto lo storico che conta (marcatori con
+# il minuto, cartellini, rigori, confronto 1°T/2°T), e il grafico viene rigenerato ogni volta sui
+# dati aggiornati. La scheda cancellata era una fotografia vecchia della stessa partita, non un
+# pezzo di informazione che esiste solo li'.
+ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = True
+
+# Momentum "appiccicato" alla partita: cliccare il bottone su una notifica dice che di QUESTA
+# partita si vuole vedere l'andamento, non che lo si vuole vedere una volta sola.
+#
+# Prima il grafico viveva solo dentro il messaggio su cui si era cliccato: la notifica successiva
+# tornava alle sole barre, e per rivedere il momentum bisognava ricliccare ogni volta. Ora la
+# richiesta resta memorizzata per il resto della partita e ogni notifica successiva nasce gia'
+# combinata (barre + momentum), esattamente come succede da sempre per i preferiti.
+MOMENTUM_PERSISTENTE_ATTIVO = True
+
 # Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
 # della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
 # scattare), senza cambiare alcun comportamento. Serve a raccogliere dati reali per calibrare le
@@ -694,6 +716,8 @@ try:
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
+    ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = config.get("elimina_scheda_precedente_attivo", ELIMINA_SCHEDA_PRECEDENTE_ATTIVO)
+    MOMENTUM_PERSISTENTE_ATTIVO = config.get("momentum_persistente_attivo", MOMENTUM_PERSISTENTE_ATTIVO)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -737,6 +761,9 @@ try:
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
           f"{'ATTIVO' if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO else 'disattivo'} | "
           f"UptimeRobot: {'collegato' if UPTIMEROBOT_API_KEY else 'non collegato'}", flush=True)
+    print(f"Scheda precedente eliminata: {'SI' if ELIMINA_SCHEDA_PRECEDENTE_ATTIVO else 'no'} | "
+          f"momentum persistente per partita: "
+          f"{'SI' if MOMENTUM_PERSISTENTE_ATTIVO else 'no'}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -1462,6 +1489,28 @@ def togli_bottoni(chat_id, msg_id):
                   "reply_markup": json.dumps({"inline_keyboard": []})}, timeout=5)
     except Exception as e:
         log(f"Bottoni non rimossi (message_id {msg_id}): {e}")
+
+
+def elimina_messaggio(chat_id, message_id):
+    """Cancella una scheda superata. Ritorna True se e' stata davvero rimossa.
+
+    Un fallimento non e' un problema da propagare, ed e' anzi il caso normale col passare del
+    tempo: Telegram lascia cancellare i propri messaggi solo entro 48 ore, e una scheda che
+    l'utente ha gia' cancellato a mano non c'e' piu'. In entrambi i casi il risultato voluto -
+    "quella vecchia non deve restare in giro" - e' comunque ottenuto, quindi si logga e basta."""
+    if not message_id:
+        return False
+    try:
+        risposta = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id}, timeout=5)
+        if risposta.status_code == 200:
+            return True
+        log(f"Scheda precedente non cancellata (message_id {message_id}): "
+            f"HTTP {risposta.status_code} - {risposta.text[:150]}")
+    except Exception as e:
+        log(f"Scheda precedente non cancellata (message_id {message_id}): {e}")
+    return False
 
 
 def esegui_comando_sicuro(chat_id, funzione, *args):
@@ -4207,6 +4256,11 @@ def cmd_momentum_da_bottone(chat_id, fixture_id, message_id):
         stato.pop("message_id_live", None)
         stato.pop("blocco_messaggio_live", None)
         stato.pop("chat_messaggio_live", None)
+
+    # Da qui in avanti questa partita mostra sempre il momentum: il click dice "di questa partita
+    # voglio vedere l'andamento", non "voglio vederlo una volta sola". Senza, la notifica
+    # successiva tornava alle sole barre e il grafico andava richiesto da capo ogni volta.
+    stato["momentum_richiesto"] = True
 
     # Il bottone non serve più: il grafico è già agganciato alla notifica, ricliccarlo
     # rigenererebbe la stessa immagine inutilmente.
@@ -6977,8 +7031,14 @@ def processa_partita(fixture, notifiche_attive=True):
         # Il grafico (barre o combinato) serve solo per l'invio Telegram più sotto: se le
         # notifiche sono spente (fuori orario) generarlo comunque sarebbe lavoro sprecato
         # (rendering matplotlib + scrittura file) per un'immagine mai inviata e subito cancellata.
+        # Il combinato (barre + momentum) spetta ai preferiti e a chi ha chiesto il momentum su
+        # questa partita: la richiesta vale per il resto della gara, non solo per il messaggio su
+        # cui si e' cliccato (vedi MOMENTUM_PERSISTENTE_ATTIVO).
+        momentum_richiesto = bool(
+            MOMENTUM_PERSISTENTE_ATTIVO
+            and stato_partite.get(fixture_id, {}).get("momentum_richiesto"))
         if notifiche_attive:
-            if is_fav:
+            if is_fav or momentum_richiesto:
                 history_completo = stato_partite.get(fixture_id, {}).get("history", [])
                 foto_path = genera_grafico_combinato(
                     fixture_id, home, away, current_stats if current_stats else stats_dict, history_completo,
@@ -7143,7 +7203,18 @@ def processa_partita(fixture, notifiche_attive=True):
                     chat_id=chat_destinazione):
                 message_id_inviato = message_id_live
             if message_id_inviato is None:
+                # La scheda precedente si cancella solo DOPO che la nuova e' partita davvero: se
+                # l'invio fallisce (rete, rate-limit) si resta con quella vecchia, che e' scaduta
+                # ma esiste, invece che senza niente.
+                scheda_da_eliminare = stato_partite.get(fixture_id, {}).get("scheda_visibile")
                 message_id_inviato = invia_notifica_telegram(foto_path, messaggio, reply_markup=keyboard, chat_id=chat_destinazione)
+                if message_id_inviato:
+                    if (ELIMINA_SCHEDA_PRECEDENTE_ATTIVO and scheda_da_eliminare
+                            and scheda_da_eliminare.get("message_id") != message_id_inviato):
+                        elimina_messaggio(scheda_da_eliminare.get("chat_id"),
+                                          scheda_da_eliminare.get("message_id"))
+                    stato_partite[fixture_id]["scheda_visibile"] = {
+                        "message_id": message_id_inviato, "chat_id": chat_destinazione}
                 if message_id_inviato and MESSAGGIO_LIVE_PREFERITI_ATTIVO and is_fav:
                     stato_partite[fixture_id].update({
                         "message_id_live": message_id_inviato,
