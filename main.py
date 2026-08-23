@@ -349,6 +349,27 @@ CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
 DOMINIO_GATE_NOTIFICHE_ATTIVO = True
 SOGLIA_QUOTA_DOMINIO_NOTIFICA = 65
 
+# LA FAVORITA CHE NON STA VINCENDO: seconda porta accanto al gate del dominio.
+#
+# Il gate chiede una cosa sola - chi tira di piu' - e non chiede mai chi DOVEVA vincere. Il 23/08
+# Manchester City-Bournemouth e' finito 0-1 all'intervallo senza mai arrivare in chat: il bot
+# vedeva Tiri 5-2, Porta 2-2, Area 4-2, cioe' dominio 62%, sotto la soglia. E aveva ragione sui
+# tiri: gli xG dicevano 0.49 City contro 0.53 Bournemouth, il dominio del City era tutto possesso
+# (68%) e passaggi (330 contro 157), che di proposito qui non contano perche' non anticipano i gol.
+#
+# Solo che una super-favorita in casa sotto all'intervallo e' esattamente la divergenza che
+# interessa: il campo e il tabellone dicono cose diverse da quello che il mercato si aspettava.
+# Quella domanda il dominio non la pone, perche' guarda la partita e non il pronostico.
+#
+# Il dato serve gia' ed e' gia' in casa: le quote 1X2 pre-match sono scaricate col piano giornata e
+# calcola_probabilita_no_vig() toglie il margine del bookmaker. Zero chiamate API in piu'.
+#
+# "Non sta vincendo" comprende il pareggio, non solo la sconfitta: per una squadra data al 75%+ un
+# pareggio e' gia' un risultato che il mercato non aveva messo in conto.
+FAVORITA_IN_DIFFICOLTA_ATTIVO = True
+SOGLIA_PROB_FAVORITA = 0.75   # probabilita' no-vig pre-match per considerarla favorita netta
+MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = 30
+
 # Un aggiornamento di routine per blocco di 15 minuti e per partita, nella chat principale (vedi il
 # commento esteso dentro deve_notificare). Serve perche' le quattro regole generali guardano lo
 # stato assoluto e non il cambiamento: una volta che una partita e' sbilanciata restano vere per
@@ -720,6 +741,9 @@ try:
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
+    FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
+    SOGLIA_PROB_FAVORITA = config.get("soglia_prob_favorita", SOGLIA_PROB_FAVORITA)
+    MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = config.get("minuto_minimo_favorita_in_difficolta", MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA)
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = config.get("elimina_scheda_precedente_attivo", ELIMINA_SCHEDA_PRECEDENTE_ATTIVO)
     MOMENTUM_PERSISTENTE_ATTIVO = config.get("momentum_persistente_attivo", MOMENTUM_PERSISTENTE_ATTIVO)
@@ -763,6 +787,8 @@ try:
     print(f"Gate dominio notifiche generali: {'ATTIVO' if DOMINIO_GATE_NOTIFICHE_ATTIVO else 'disattivo'} "
           f"(quota >= {SOGLIA_QUOTA_DOMINIO_NOTIFICA}%) | messaggio live preferiti: "
           f"{'ATTIVO' if MESSAGGIO_LIVE_PREFERITI_ATTIVO else 'disattivo'}", flush=True)
+    print(f"Favorita che non vince: {'ATTIVA' if FAVORITA_IN_DIFFICOLTA_ATTIVO else 'disattiva'} "
+          f"(favorita dal {SOGLIA_PROB_FAVORITA * 100:.0f}% no-vig, dal {MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA}')", flush=True)
     print(f"Backoff statistiche assenti: "
           f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}", flush=True)
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
@@ -4403,6 +4429,36 @@ def calcola_dominio(current_stats, score_home, score_away):
     return {"lato": lato, "quota": quota, "situazione": situazione, "priorita": priorita}
 
 
+def favorita_che_non_vince(fixture_id, score_home, score_away, minuto):
+    """La squadra data favorita dal mercato pre-partita non sta vincendo.
+
+    Ritorna (lato, probabilita) - es. ("casa", 0.78) - oppure None. Il lato serve solo al testo del
+    motivo: chi chiama deve sapere DI CHI si parla, altrimenti "favorita al 78%" non dice quale.
+
+    Guarda solo le quote iniziali, mai quelle live: il punto e' il confronto fra quello che il
+    mercato si aspettava PRIMA e quello che sta succedendo adesso. Una quota live si e' gia'
+    aggiornata al risultato, e confrontarla col risultato non direbbe piu' niente."""
+    if not FAVORITA_IN_DIFFICOLTA_ATTIVO:
+        return None
+    if minuto is None or minuto < MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA:
+        return None
+    if score_home is None or score_away is None:
+        return None
+    # quote_1x2_per_fixture ritorna il dizionario, oppure False quando il bookmaker non le ha
+    # pubblicate, oppure None se la partita non e' nel piano: solo il primo caso e' utilizzabile.
+    quote = quote_1x2_per_fixture(fixture_id)
+    if not isinstance(quote, dict):
+        return None
+    probabilita = calcola_probabilita_no_vig(quote)
+    if not probabilita:
+        return None
+    if probabilita["casa"] >= SOGLIA_PROB_FAVORITA and score_home <= score_away:
+        return "casa", probabilita["casa"]
+    if probabilita["ospite"] >= SOGLIA_PROB_FAVORITA and score_away <= score_home:
+        return "ospite", probabilita["ospite"]
+    return None
+
+
 def motivo_assenza_dominio(current_stats):
     """Perche' calcola_dominio() non ha dichiarato un dominio: il numero che e' mancato.
 
@@ -6286,7 +6342,13 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # non e' un buco nuovo: senza statistiche tiri e delta valgono zero, e le quattro regole qui
     # sotto non scattavano gia' prima (diff 0, totali 0, delta 0). I gol continuano ad arrivare
     # comunque, perche' passano molto piu' in alto.
-    if DOMINIO_GATE_NOTIFICHE_ATTIVO:
+    # Due strade per qualificare la partita, non una: il dominio sul campo (sotto) oppure la
+    # favorita di mercato che non sta vincendo (vedi favorita_che_non_vince). La seconda scavalca il
+    # gate perche' risponde a una domanda diversa - non "chi comanda" ma "chi doveva vincere" - e
+    # una partita come City-Bournemouth 0-1, dominio 62%, non passerebbe mai dalla prima.
+    favorita_ko = favorita_che_non_vince(fixture_id, score_home, score_away, minuto)
+
+    if DOMINIO_GATE_NOTIFICHE_ATTIVO and not favorita_ko:
         dominio = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
         if not dominio:
             return _verdetto_notifica(
@@ -6318,6 +6380,21 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         return _verdetto_notifica(
             fixture_id, False,
             f"già inviato un aggiornamento nel blocco {blocco}-{blocco + 14}'")
+
+    # La favorita che non vince notifica da sola, senza passare dalle quattro regole qui sotto:
+    # quelle misurano il ritmo, e il punto qui non e' il ritmo. City-Bournemouth al 38' aveva
+    # differenza tiri 2 e delta quasi piatto - nessuna delle quattro sarebbe scattata, e la
+    # notizia ("la favorita e' sotto") sarebbe andata persa lo stesso.
+    #
+    # Passa comunque dal freno per blocco qui sopra: la notizia e' una, non va ripetuta ogni tre
+    # minuti per il resto della partita.
+    if favorita_ko:
+        lato, probabilita = favorita_ko
+        chi = "in casa" if lato == "casa" else "in trasferta"
+        situazione = "sotto" if (score_home < score_away if lato == "casa" else score_away < score_home) else "in parità"
+        return _verdetto_notifica(
+            fixture_id, True,
+            f"favorita {chi} al {probabilita * 100:.0f}% ma {situazione} al {minuto}'")
 
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)
