@@ -4266,7 +4266,8 @@ def spiega_momentum_insufficiente(history):
     if n == 0:
         return ("Il bot non ha ancora nessuna statistica per questa partita: monitoraggio appena "
                 "iniziato, oppure questa lega/incontro non ha statistiche disponibili dall'API "
-                "(succede per alcuni campionati minori - stesso motivo del 'N/D' nelle notifiche).")
+                "(succede per alcuni campionati minori - è lo stesso motivo per cui una partita "
+                "così non arriva in chat).")
     if n < MOMENTUM_MIN_STORICO:
         mancanti = MOMENTUM_MIN_STORICO - n
         return (f"Solo {n} rilevazion{'e' if n == 1 else 'i'} su {MOMENTUM_MIN_STORICO} necessarie: "
@@ -5499,9 +5500,11 @@ LEGENDA_DIAGNOSTICA = (
     "avute: qui la pipeline ha funzionato e si è interrotta a metà, quindi i dati mostrati sono "
     "vecchi anche se ci sono. Di solito è l'API che smette di pubblicare per un po'.\n"
     "COPERTURA STATISTICHE: l'API risponde regolarmente ma per quella partita non pubblica "
-    "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita (gol, cartellini, "
-    "rigori, recuperi) ma mostrerà N/D al posto di tiri/corner e non potrà far scattare le "
-    "strategie. Capita anche a partite della stessa lega in cui invece le statistiche arrivano.\n"
+    "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita e continua ad "
+    "alimentare gli shadow-log, ma non manda notifiche - gol e cartellini compresi - finché "
+    "l'API non pubblica i primi dati, e non può far scattare nessuna strategia. Torna a parlare "
+    "da sola appena i dati arrivano. Capita anche a partite della stessa lega in cui invece le "
+    "statistiche arrivano.\n"
     "Ogni anomalia viene segnalata una volta sola per partita: se resta uguale non viene "
     "ripetuta ad ogni controllo, e ricompare in chat solo se rientra e si ripresenta.\n"
     "(xG e quota 1X2 non generano anomalie automatiche: mancano spesso per motivi normali - lega "
@@ -5619,7 +5622,8 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 trovate["COPERTURA STATISTICHE"] = (
                     f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
                     f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
-                    f"seguita, ma senza statistiche mostrerà N/D e non potrà far scattare strategie.")
+                    f"seguita e negli shadow-log, ma non manda notifiche - gol compresi - finché "
+                    f"l'API non pubblica i primi dati.")
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
