@@ -4319,6 +4319,98 @@ def cmd_funzioni(chat_id):
         json={"chat_id": chat_id, "text": parte2}, timeout=5)
 
 
+# Abbreviazioni comuni delle squadre di calcio: la chiave e' la forma corta (lowercase,
+# senza accenti), il valore e' l'espansione. Serve a matchare "Man Utd" con "Manchester
+# United", "Ath Bilbao" con "Athletic Bilbao", ecc. I prefissi/suffissi societari
+# (FC, AC, SC, ...) sono mappati a stringa vuota cosi' vengono ignorati nel match:
+# l'utente puo' chiedere "milan" e trovare "AC Milan".
+ABBREVIAZIONI_SQUADRE = {
+    "utd": "united",
+    "ath": "athletic",
+    "atl": "atletico",
+    "wolves": "wolverhampton",
+    "brgh": "brighton",
+    "psg": "paris saint germain",
+    "juve": "juventus",
+    "fc": "",
+    "ac": "",
+    "cf": "",
+    "sc": "",
+    "sk": "",
+    "afc": "",
+    "cfc": "",
+    "fk": "",
+}
+
+
+def _normalizza_nome_squadra(testo):
+    """Toglie accenti (unicode NFKD), converte in lowercase e comprime gli spazi.
+    Cosi' "Málaga" e "malaga" diventano la stessa stringa, e la query utente non deve
+    replicare esattamente i caratteri accentati che l'API restituisce."""
+    if not testo:
+        return ""
+    testo_norm = unicodedata.normalize("NFKD", testo)
+    testo_norm = "".join(c for c in testo_norm if not unicodedata.combining(c))
+    return " ".join(testo_norm.lower().split())
+
+
+def _sigla_squadra(nome_normalizzato):
+    """Prime lettere di ogni parola (split su spazi/trattini/punti). 'paris saint-germain'
+    -> 'psg'. Serve a matchare la sigla comune (PSG, RCD, ecc.) col nome per esteso."""
+    parole = re.split(r"[\s\-\.]+", nome_normalizzato)
+    return "".join(p[0] for p in parole if p)
+
+
+def _nomi_squadra_matchano(query, nome_squadra):
+    """Ritorna True se la query dell'utente identifica la squadra. Quattro strategie
+    provate in cascata (dalla piu' precisa alla piu' fuzzy):
+    1) sottostringa in entrambe le direzioni sui nomi normalizzati (accenti eliminati)
+    2) sigla: query == prime lettere delle parole del nome (es. 'psg' vs 'Paris Saint-Germain')
+    3) token-based: ogni token della query (>=2 char) e' prefisso di un token del nome
+       (es. 'man city' vs 'manchester city')
+    4) alias noti: sostituisce 'utd'->'united', 'ath'->'athletic', droppa 'fc'/'ac',
+       poi ritenta il substring match
+
+    Le strategie 2 e 3 richiedono almeno 2 caratteri per token per evitare match troppo
+    permissivi (una singola lettera matcherebbe qualunque cosa). Il comportamento della
+    strategia 1 e' invece identico a prima (case-insensitive) piu' l'accento-agnosticita'."""
+    if not query or not nome_squadra:
+        return False
+    q = _normalizza_nome_squadra(query)
+    n = _normalizza_nome_squadra(nome_squadra)
+    if not q or not n:
+        return False
+    if q in n or n in q:
+        return True
+    if len(q.replace(" ", "")) >= 2 and q.replace(" ", "") == _sigla_squadra(n):
+        return True
+    tokens_q = [t for t in q.split() if len(t) >= 2]
+    tokens_n = n.split()
+    if tokens_q and all(
+        any(tn.startswith(tq) for tn in tokens_n)
+        for tq in tokens_q
+    ):
+        return True
+    espansi_q = " ".join(
+        ABBREVIAZIONI_SQUADRE.get(t, t) for t in q.split()
+    )
+    espansi_q = " ".join(espansi_q.split())
+    if espansi_q and espansi_q != q:
+        if espansi_q in n or n in espansi_q:
+            return True
+        # Riprova anche il token-prefix sull'espansione: "man utd" -> "man united",
+        # cosi' matcha "Manchester United" (dove "united" == "united" e "man" prefisso di
+        # "manchester"). Senza questo, l'alias 'utd'->'united' fallirebbe perche' "man
+        # united" non e' sottostringa di "manchester united".
+        tokens_esp = [t for t in espansi_q.split() if len(t) >= 2]
+        if tokens_esp and all(
+            any(tn.startswith(te) for tn in tokens_n)
+            for te in tokens_esp
+        ):
+            return True
+    return False
+
+
 def cmd_status(chat_id, query):
     """/status <squadra>: info live sulla partita trovata, statistiche totali casa/trasferta,
     intensità (ultimi 15 min) calcolata solo per questa partita — funziona anche su partite fuori
@@ -4327,9 +4419,9 @@ def cmd_status(chat_id, query):
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
-        home = f.get("teams", {}).get("home", {}).get("name", "").lower()
-        away = f.get("teams", {}).get("away", {}).get("name", "").lower()
-        if query in home or query in away or home in query or away in query:
+        home = f.get("teams", {}).get("home", {}).get("name", "")
+        away = f.get("teams", {}).get("away", {}).get("name", "")
+        if _nomi_squadra_matchano(query, home) or _nomi_squadra_matchano(query, away):
             trovate.append(f)
     if not trovate:
         requests.post(
