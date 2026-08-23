@@ -349,6 +349,27 @@ CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
 DOMINIO_GATE_NOTIFICHE_ATTIVO = True
 SOGLIA_QUOTA_DOMINIO_NOTIFICA = 65
 
+# LA FAVORITA CHE NON STA VINCENDO: seconda porta accanto al gate del dominio.
+#
+# Il gate chiede una cosa sola - chi tira di piu' - e non chiede mai chi DOVEVA vincere. Il 23/08
+# Manchester City-Bournemouth e' finito 0-1 all'intervallo senza mai arrivare in chat: il bot
+# vedeva Tiri 5-2, Porta 2-2, Area 4-2, cioe' dominio 62%, sotto la soglia. E aveva ragione sui
+# tiri: gli xG dicevano 0.49 City contro 0.53 Bournemouth, il dominio del City era tutto possesso
+# (68%) e passaggi (330 contro 157), che di proposito qui non contano perche' non anticipano i gol.
+#
+# Solo che una super-favorita in casa sotto all'intervallo e' esattamente la divergenza che
+# interessa: il campo e il tabellone dicono cose diverse da quello che il mercato si aspettava.
+# Quella domanda il dominio non la pone, perche' guarda la partita e non il pronostico.
+#
+# Il dato serve gia' ed e' gia' in casa: le quote 1X2 pre-match sono scaricate col piano giornata e
+# calcola_probabilita_no_vig() toglie il margine del bookmaker. Zero chiamate API in piu'.
+#
+# "Non sta vincendo" comprende il pareggio, non solo la sconfitta: per una squadra data al 75%+ un
+# pareggio e' gia' un risultato che il mercato non aveva messo in conto.
+FAVORITA_IN_DIFFICOLTA_ATTIVO = True
+SOGLIA_PROB_FAVORITA = 0.75   # probabilita' no-vig pre-match per considerarla favorita netta
+MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = 30
+
 # Un aggiornamento di routine per blocco di 15 minuti e per partita, nella chat principale (vedi il
 # commento esteso dentro deve_notificare). Serve perche' le quattro regole generali guardano lo
 # stato assoluto e non il cambiamento: una volta che una partita e' sbilanciata restano vere per
@@ -391,6 +412,10 @@ ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = True
 # richiesta resta memorizzata per il resto della partita e ogni notifica successiva nasce gia'
 # combinata (barre + momentum), esattamente come succede da sempre per i preferiti.
 MOMENTUM_PERSISTENTE_ATTIVO = True
+
+# Backoff sulle statistiche che non arrivano mai per una singola partita (soglie e motivazione
+# estesa accanto a SOGLIA_SENZA_STATISTICHE, dove sta il resto della copertura statistiche).
+BACKOFF_STATISTICHE_ASSENTI_ATTIVO = True
 
 # Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
 # della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
@@ -715,6 +740,10 @@ try:
     DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
+    BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
+    FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
+    SOGLIA_PROB_FAVORITA = config.get("soglia_prob_favorita", SOGLIA_PROB_FAVORITA)
+    MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = config.get("minuto_minimo_favorita_in_difficolta", MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA)
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = config.get("elimina_scheda_precedente_attivo", ELIMINA_SCHEDA_PRECEDENTE_ATTIVO)
     MOMENTUM_PERSISTENTE_ATTIVO = config.get("momentum_persistente_attivo", MOMENTUM_PERSISTENTE_ATTIVO)
@@ -758,6 +787,10 @@ try:
     print(f"Gate dominio notifiche generali: {'ATTIVO' if DOMINIO_GATE_NOTIFICHE_ATTIVO else 'disattivo'} "
           f"(quota >= {SOGLIA_QUOTA_DOMINIO_NOTIFICA}%) | messaggio live preferiti: "
           f"{'ATTIVO' if MESSAGGIO_LIVE_PREFERITI_ATTIVO else 'disattivo'}", flush=True)
+    print(f"Favorita che non vince: {'ATTIVA' if FAVORITA_IN_DIFFICOLTA_ATTIVO else 'disattiva'} "
+          f"(favorita dal {SOGLIA_PROB_FAVORITA * 100:.0f}% no-vig, dal {MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA}')", flush=True)
+    print(f"Backoff statistiche assenti: "
+          f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}", flush=True)
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
           f"{'ATTIVO' if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO else 'disattivo'} | "
           f"UptimeRobot: {'collegato' if UPTIMEROBOT_API_KEY else 'non collegato'}", flush=True)
@@ -868,6 +901,29 @@ COPPE_NAZIONALI_ESCLUSE = [
 # il contatore prima che arrivasse mai a 3, rendendo l'esclusione di fatto inefficace.
 LEGHE_SENZA_STATISTICHE_FILE = data_path("leghe_senza_statistiche.json")
 SOGLIA_SENZA_STATISTICHE = 3
+
+# BACKOFF SULLE STATISTICHE CHE NON ARRIVANO MAI PER QUELLA PARTITA.
+#
+# L'esclusione per lega qui sopra non copre le coppe nazionali e le internazionali
+# (COMPETIZIONI_COPERTURA_VARIABILE), ed e' giusto cosi': in DFB Pokal il Bayern-Dortmund le
+# statistiche le ha, il Bahlinger SC-Magdeburg no. La copertura e' una proprieta' della singola
+# partita, non del torneo. Il risultato pero' era che quelle partite venivano richieste ad ogni
+# ciclo per tutti i 90 minuti, sapendo gia' dal decimo che non avrebbero mai risposto.
+#
+# Log del 23/08, primo turno di DFB Pokal: sei partite in parallelo che contano insieme
+# "2 volte di fila", "3 volte", "4", "5", "6", "7"... una chiamata sprecata a testa ad ogni giro.
+# Su una giornata di coppa con trenta partite di questo tipo sono centinaia di chiamate che non
+# produrranno mai un dato - e il 22/08 la quota giornaliera si e' esaurita davvero, lasciando il
+# bot cieco dalle 23:30 alle 02:00.
+#
+# Non uno stop netto, pero': una partita muta puo' ancora svegliarsi. Il 20/08 Fenerbahce-Lyon era
+# vuota al 13' e aveva le statistiche al 17'; il 16/08 Beveren e Bielefeld sono rimaste vuote oltre
+# il 40'. Smettere di chiedere per sempre farebbe perdere quelle partite. Si continua a chiedere,
+# solo piu' di rado: un tentativo ogni CICLI_* invece che ad ogni ciclo, e la prima risposta con
+# dati azzera tutto e riporta al ritmo normale.
+CICLI_BACKOFF_STATISTICHE = 3        # da SOGLIA_SENZA_STATISTICHE vuote in poi: 1 tentativo ogni 3 cicli
+CICLI_BACKOFF_STATISTICHE_LUNGO = 6  # da SOGLIA_BACKOFF_LUNGO in poi: 1 ogni 6
+SOGLIA_BACKOFF_LUNGO = 6
 DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
 # Prima di questo minuto una risposta senza statistiche non dice niente sulla copertura della
 # lega: nei primissimi minuti l'API spesso non ha ancora pubblicato nulla anche per campionati
@@ -972,6 +1028,27 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
             f"{stato['senza_stats_consecutive']} partite senza statistiche")
     LEGHE_SENZA_STATISTICHE[chiave] = stato
     salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
+
+
+def deve_chiedere_statistiche(fixture_id):
+    """False quando conviene saltare la chiamata statistiche di questo ciclo per QUESTA partita.
+
+    Vale solo dopo SOGLIA_SENZA_STATISTICHE risposte vuote di fila, cioe' quando l'API ha gia'
+    detto tre volte che per questa partita non pubblica niente. Da li' in poi si continua a
+    chiedere - una partita muta puo' svegliarsi - ma a intervalli, e l'intervallo si allarga se il
+    silenzio continua.
+
+    Chi chiama azzera cicli_saltati_statistiche quando la chiamata viene fatta davvero, e
+    stats_vuote_consecutive quando arrivano dati: una risposta buona riporta tutto al ritmo pieno."""
+    if not BACKOFF_STATISTICHE_ASSENTI_ATTIVO:
+        return True
+    stato = stato_partite.get(fixture_id, {})
+    vuote = stato.get("stats_vuote_consecutive", 0)
+    if vuote < SOGLIA_SENZA_STATISTICHE:
+        return True
+    ogni = CICLI_BACKOFF_STATISTICHE if vuote < SOGLIA_BACKOFF_LUNGO else CICLI_BACKOFF_STATISTICHE_LUNGO
+    # "ogni 3 cicli" = due saltati e poi uno buono.
+    return stato.get("cicli_saltati_statistiche", 0) >= ogni - 1
 
 
 def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
@@ -4352,6 +4429,36 @@ def calcola_dominio(current_stats, score_home, score_away):
     return {"lato": lato, "quota": quota, "situazione": situazione, "priorita": priorita}
 
 
+def favorita_che_non_vince(fixture_id, score_home, score_away, minuto):
+    """La squadra data favorita dal mercato pre-partita non sta vincendo.
+
+    Ritorna (lato, probabilita) - es. ("casa", 0.78) - oppure None. Il lato serve solo al testo del
+    motivo: chi chiama deve sapere DI CHI si parla, altrimenti "favorita al 78%" non dice quale.
+
+    Guarda solo le quote iniziali, mai quelle live: il punto e' il confronto fra quello che il
+    mercato si aspettava PRIMA e quello che sta succedendo adesso. Una quota live si e' gia'
+    aggiornata al risultato, e confrontarla col risultato non direbbe piu' niente."""
+    if not FAVORITA_IN_DIFFICOLTA_ATTIVO:
+        return None
+    if minuto is None or minuto < MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA:
+        return None
+    if score_home is None or score_away is None:
+        return None
+    # quote_1x2_per_fixture ritorna il dizionario, oppure False quando il bookmaker non le ha
+    # pubblicate, oppure None se la partita non e' nel piano: solo il primo caso e' utilizzabile.
+    quote = quote_1x2_per_fixture(fixture_id)
+    if not isinstance(quote, dict):
+        return None
+    probabilita = calcola_probabilita_no_vig(quote)
+    if not probabilita:
+        return None
+    if probabilita["casa"] >= SOGLIA_PROB_FAVORITA and score_home <= score_away:
+        return "casa", probabilita["casa"]
+    if probabilita["ospite"] >= SOGLIA_PROB_FAVORITA and score_away <= score_home:
+        return "ospite", probabilita["ospite"]
+    return None
+
+
 def motivo_assenza_dominio(current_stats):
     """Perche' calcola_dominio() non ha dichiarato un dominio: il numero che e' mancato.
 
@@ -6235,7 +6342,13 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # non e' un buco nuovo: senza statistiche tiri e delta valgono zero, e le quattro regole qui
     # sotto non scattavano gia' prima (diff 0, totali 0, delta 0). I gol continuano ad arrivare
     # comunque, perche' passano molto piu' in alto.
-    if DOMINIO_GATE_NOTIFICHE_ATTIVO:
+    # Due strade per qualificare la partita, non una: il dominio sul campo (sotto) oppure la
+    # favorita di mercato che non sta vincendo (vedi favorita_che_non_vince). La seconda scavalca il
+    # gate perche' risponde a una domanda diversa - non "chi comanda" ma "chi doveva vincere" - e
+    # una partita come City-Bournemouth 0-1, dominio 62%, non passerebbe mai dalla prima.
+    favorita_ko = favorita_che_non_vince(fixture_id, score_home, score_away, minuto)
+
+    if DOMINIO_GATE_NOTIFICHE_ATTIVO and not favorita_ko:
         dominio = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
         if not dominio:
             return _verdetto_notifica(
@@ -6267,6 +6380,21 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         return _verdetto_notifica(
             fixture_id, False,
             f"già inviato un aggiornamento nel blocco {blocco}-{blocco + 14}'")
+
+    # La favorita che non vince notifica da sola, senza passare dalle quattro regole qui sotto:
+    # quelle misurano il ritmo, e il punto qui non e' il ritmo. City-Bournemouth al 38' aveva
+    # differenza tiri 2 e delta quasi piatto - nessuna delle quattro sarebbe scattata, e la
+    # notizia ("la favorita e' sotto") sarebbe andata persa lo stesso.
+    #
+    # Passa comunque dal freno per blocco qui sopra: la notizia e' una, non va ripetuta ogni tre
+    # minuti per il resto della partita.
+    if favorita_ko:
+        lato, probabilita = favorita_ko
+        chi = "in casa" if lato == "casa" else "in trasferta"
+        situazione = "sotto" if (score_home < score_away if lato == "casa" else score_away < score_home) else "in parità"
+        return _verdetto_notifica(
+            fixture_id, True,
+            f"favorita {chi} al {probabilita * 100:.0f}% ma {situazione} al {minuto}'")
 
     tiri_totali = tiri_casa + tiri_ospite
     diff = abs(tiri_casa - tiri_ospite)
@@ -6540,7 +6668,16 @@ def processa_partita(fixture, notifiche_attive=True):
         # live si arriva facilmente a 100+ richieste/minuto, il limite per-minuto dell'abbonamento
         # API-Football (visto coi rate-limit sporadici anche a traffico medio basso). Ora ogni
         # partita costa 2 chiamate ben distanziate invece di una raffica.
-        time.sleep(1)
+        # Backoff: se questa partita ha gia' dimostrato di non avere statistiche, si salta il giro -
+        # e con esso anche la pausa qui sotto, che serve a distanziare le chiamate che non facciamo.
+        chiamata_saltata = not deve_chiedere_statistiche(fixture_id)
+        if chiamata_saltata:
+            stato_partite[fixture_id]["cicli_saltati_statistiche"] = (
+                stato_partite[fixture_id].get("cicli_saltati_statistiche", 0) + 1)
+            stats = None
+        else:
+            stato_partite[fixture_id]["cicli_saltati_statistiche"] = 0
+            time.sleep(1)
 
         # Tre esiti diversi, che prima finivano tutti e tre in due soli rami:
         #  - stats is None            -> la CHIAMATA è fallita (rate-limit, timeout, rete)
@@ -6553,7 +6690,8 @@ def processa_partita(fixture, notifiche_attive=True):
         # squadre ma tutti i valori a null (tipica dei primi minuti), che estrai_current_stats
         # traduce in zeri - finivano nello storico come punti finti e in notifica come "0 - 0"
         # invece che "N/D".
-        stats = get_statistiche_partita(fixture_id)
+        if not chiamata_saltata:
+            stats = get_statistiche_partita(fixture_id)
         if ha_statistiche_disponibili(stats):
             stats_home = stats[0].get("statistics", [])
             stats_away = stats[1].get("statistics", [])
@@ -6595,7 +6733,16 @@ def processa_partita(fixture, notifiche_attive=True):
             tiri_casa = tiri_ospite = tiri_p_casa = tiri_p_ospite = corner_casa = corner_ospite = 0
             tiri_area_casa = tiri_area_ospite = 0
             xg_casa = xg_ospite = None
-            if stats is None:
+            if chiamata_saltata:
+                # Nessuna notizia nuova, perche' non abbiamo chiesto: si lascia intatto tutto lo
+                # stato precedente (esito, contatore delle vuote) invece di inventare un esito che
+                # non c'e' stato. La partita resta seguita: gol, cartellini e rigori arrivano dalla
+                # chiamata eventi, che non e' toccata dal backoff.
+                vuote_note = stato_partite[fixture_id].get("stats_vuote_consecutive", 0)
+                saltati = stato_partite[fixture_id].get("cicli_saltati_statistiche", 0)
+                log(f"    ⏭️ Statistiche non richieste: assenti {vuote_note} volte di fila, "
+                    f"si riprova tra {max(0, (CICLI_BACKOFF_STATISTICHE if vuote_note < SOGLIA_BACKOFF_LUNGO else CICLI_BACKOFF_STATISTICHE_LUNGO) - 1 - saltati)} cicli")
+            elif stats is None:
                 # Chiamata fallita: non dice nulla sulla copertura della lega, si riprova al ciclo
                 # dopo. Il contatore delle risposte vuote NON va azzerato (non abbiamo notizie
                 # nuove) ma nemmeno incrementato.
