@@ -380,7 +380,13 @@ SILENZIO_SENZA_STATISTICHE_ATTIVO = True
 # 7-1 di tiri e 3-0 di corner. Il bot la spegneva con "nessun tiro cambiato" e non arrivava mai in
 # chat - proprio una di quelle che vanno viste (75% di possesso, xG 0.59 contro 0.04).
 FEED_CONGELATO_ATTIVO = True
-MINUTI_FEED_CONGELATO = 10  # minuti di GIOCO con la risposta identica prima di dichiararlo bloccato
+# Le partite congelate trovate nel ciclo corrente, raccolte qui e mandate in UN messaggio solo da
+# invia_riepilogo_feed_congelati(). Un avviso per partita si e' rivelato insostenibile: il 23/08 ne
+# sono partiti otto in due minuti, perche' il blocco del feed non e' l'eccezione che sembrava -
+# Trabzonspor-Basaksehir e' rimasta ferma su "Tiri 14-7 | Porta 7-2 | Corner 5-1" per 17 minuti, e
+# non era sola.
+FEED_CONGELATI_CICLO = []
+MINUTI_FEED_CONGELATO = 15  # minuti di GIOCO con la risposta identica prima di dichiararlo bloccato
 
 # Lo scarto goleada blocca anche i gol (motivazione estesa in testa a deve_notificare): a
 # SOGLIA_GOLEADA_STOP_NOTIFICHE+1 gol di distanza la partita e' decisa, e sapere quale gol l'ha
@@ -3023,6 +3029,29 @@ def testo_feed_congelato(minuti_fermo, current_stats):
             f"(ferme su Tiri {tiri[0]}-{tiri[1]}). I numeri qui sopra sono probabilmente vecchi.")
 
 
+def invia_riepilogo_feed_congelati(notifiche_attive=True):
+    """UN messaggio per ciclo con tutte le partite congelate, invece di uno per partita.
+
+    Il 23/08 la prima versione ne ha mandati otto in due minuti. Non erano falsi allarmi - i log
+    confermano che erano ferme davvero - ma e' proprio questo il punto: se il fenomeno e' comune,
+    un messaggio per partita e' una raffica, e una raffica non si legge. Raggruppare tiene la
+    stessa informazione in una riga per partita."""
+    partite = list(FEED_CONGELATI_CICLO)
+    FEED_CONGELATI_CICLO.clear()
+    if not partite or not notifiche_attive:
+        return
+    plurale = "partita" if len(partite) == 1 else "partite"
+    righe = [f"🧊 STATISTICHE FERME · {len(partite)} {plurale}",
+             "L'API ha smesso di aggiornare i numeri: finché non riparte il bot non può "
+             "valutarle. Se una ti interessa, controllala a mano.", ""]
+    for p in sorted(partite, key=lambda x: (not x["preferita"], -x["fermo_da"])):
+        stella = "⭐ " if p["preferita"] else ""
+        righe.append(f"{stella}{p['home']} vs {p['away']} · {p['lega']}")
+        righe.append(f"   {p['minuto']}' | {p['score']} — ferme da {p['fermo_da']}' "
+                     f"su Tiri {p['tiri']}")
+    invia_messaggio_telegram("\n".join(righe))
+
+
 def estrai_current_stats(stats_home, stats_away):
     """Le 4 statistiche (casa, trasferta) usate ovunque nel bot: tiri totali, tiri in porta,
     corner, tiri in area. Chi non usa "Tiri in area" può semplicemente ignorare quella chiave."""
@@ -4266,7 +4295,8 @@ def spiega_momentum_insufficiente(history):
     if n == 0:
         return ("Il bot non ha ancora nessuna statistica per questa partita: monitoraggio appena "
                 "iniziato, oppure questa lega/incontro non ha statistiche disponibili dall'API "
-                "(succede per alcuni campionati minori - stesso motivo del 'N/D' nelle notifiche).")
+                "(succede per alcuni campionati minori - è lo stesso motivo per cui una partita "
+                "così non arriva in chat).")
     if n < MOMENTUM_MIN_STORICO:
         mancanti = MOMENTUM_MIN_STORICO - n
         return (f"Solo {n} rilevazion{'e' if n == 1 else 'i'} su {MOMENTUM_MIN_STORICO} necessarie: "
@@ -5499,9 +5529,11 @@ LEGENDA_DIAGNOSTICA = (
     "avute: qui la pipeline ha funzionato e si è interrotta a metà, quindi i dati mostrati sono "
     "vecchi anche se ci sono. Di solito è l'API che smette di pubblicare per un po'.\n"
     "COPERTURA STATISTICHE: l'API risponde regolarmente ma per quella partita non pubblica "
-    "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita (gol, cartellini, "
-    "rigori, recuperi) ma mostrerà N/D al posto di tiri/corner e non potrà far scattare le "
-    "strategie. Capita anche a partite della stessa lega in cui invece le statistiche arrivano.\n"
+    "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita e continua ad "
+    "alimentare gli shadow-log, ma non manda notifiche - gol e cartellini compresi - finché "
+    "l'API non pubblica i primi dati, e non può far scattare nessuna strategia. Torna a parlare "
+    "da sola appena i dati arrivano. Capita anche a partite della stessa lega in cui invece le "
+    "statistiche arrivano.\n"
     "Ogni anomalia viene segnalata una volta sola per partita: se resta uguale non viene "
     "ripetuta ad ogni controllo, e ricompare in chat solo se rientra e si ripresenta.\n"
     "(xG e quota 1X2 non generano anomalie automatiche: mancano spesso per motivi normali - lega "
@@ -5619,7 +5651,8 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 trovate["COPERTURA STATISTICHE"] = (
                     f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
                     f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
-                    f"seguita, ma senza statistiche mostrerà N/D e non potrà far scattare strategie.")
+                    f"seguita e negli shadow-log, ma non manda notifiche - gol compresi - finché "
+                    f"l'API non pubblica i primi dati.")
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
@@ -6966,19 +6999,19 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["feed_congelato_segnalato"] = True
                 log(f"    🧊 Feed statistiche bloccato da {minuti_feed_fermo}' di gioco "
                     f"(fermo su Tiri {tiri_casa}-{tiri_ospite})")
-                if notifiche_attive and str(fixture_id) not in SILENCED_MATCHES:
-                    invia_messaggio_telegram(
-                        f"🧊 STATISTICHE BLOCCATE\n"
-                        f"{home} vs {away}\n"
-                        f"{formatta_lega(league_name, league_country)}\n"
-                        f"{minuto}' | {score_home} - {score_away}\n\n"
-                        f"L'API non aggiorna le statistiche di questa partita da "
-                        f"{minuti_feed_fermo}' di gioco: ferme su Tiri {tiri_casa}-{tiri_ospite}, "
-                        f"Porta {tiri_p_casa}-{tiri_p_ospite}, Corner {corner_casa}-{corner_ospite}.\n\n"
-                        f"Il bot non può valutarla finché il feed non riparte: se ti interessa, "
-                        f"controllala a mano.",
-                        chat_id=(TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES
-                                 else TELEGRAM_CHAT_ID))
+                # Una partita gia' decisa non serve segnalarla: con le statistiche ferme non
+                # si puo' leggere niente, e a quel punto non c'e' nemmeno niente da leggere.
+                scarto_gol = abs((score_home or 0) - (score_away or 0))
+                if (str(fixture_id) not in SILENCED_MATCHES
+                        and scarto_gol <= SOGLIA_GOLEADA_STOP_NOTIFICHE):
+                    FEED_CONGELATI_CICLO.append({
+                        "home": home, "away": away,
+                        "lega": formatta_lega(league_name, league_country),
+                        "minuto": minuto, "score": f"{score_home}-{score_away}",
+                        "fermo_da": minuti_feed_fermo,
+                        "tiri": f"{tiri_casa}-{tiri_ospite}",
+                        "preferita": str(fixture_id) in FAVORITE_MATCHES,
+                    })
 
             # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
             # /momentum per disegnare l'andamento su tutta la partita, non solo il blocco di 15 min
@@ -7342,6 +7375,23 @@ def processa_partita(fixture, notifiche_attive=True):
                     fixture_id, current_stats, score_home, score_away, minuto)
                 if promuovi_dominio:
                     promuovi, motivo = True, motivo_dominio
+            # Il silenzio senza statistiche vale anche qui. Una partita di cui l'API non pubblica i
+            # numeri non manda NESSUNA notifica (vedi deve_notificare): promuoverla vorrebbe dire
+            # occupare uno dei MAX_PREFERITI_SIMULTANEI posti e pagare il triplo di chiamate (60s
+            # invece di 180s) per una partita che nel canale resta muta - annunciandola per giunta
+            # con un "Statistiche: N/D", cioe' proprio il messaggio che non si vuole piu' vedere.
+            #
+            # E' lo stesso motivo per cui un preferito che smette di dare statistiche viene tolto
+            # poco piu' sopra ("meglio liberare il posto per una partita che i dati li ha"): qui si
+            # evita di farlo entrare, invece di annunciarlo e poi cacciarlo con un secondo
+            # messaggio. Vale solo per la rotta gol: quella dominio le statistiche le richiede gia'
+            # per definizione, senza non calcola niente.
+            #
+            # Non si marca "auto_preferito_processato": se le statistiche arrivano prima del
+            # MINUTO_GOL_AUTO_PREFERITI la partita puo' ancora entrare al ciclo successivo.
+            if promuovi and SILENZIO_SENZA_STATISTICHE_ATTIVO and not current_stats:
+                promuovi = False
+                motivo = "statistiche non pubblicate: nel canale resterebbe muta"
             if promuovi:
                 FAVORITE_MATCHES.add(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
@@ -7929,6 +7979,9 @@ if __name__ == "__main__":
             else:
                 pulisci_partite_terminate(fixture_ids_live)
             salva_stato_partite(stato_partite)
+            # Un solo messaggio per ciclo con tutte le partite dal feed congelato, invece
+            # di uno per partita mentre si scorre l'elenco.
+            invia_riepilogo_feed_congelati(notifiche_attive)
             invia_report_intensita_automatico(partite_valide, notifiche_attive)
             esegui_diagnostica_automatica(partite_valide, notifiche_attive)
             aggiorna_storico_minutaggi_automatico()

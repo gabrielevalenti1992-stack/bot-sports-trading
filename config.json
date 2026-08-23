@@ -25,7 +25,7 @@
   "silenzio_senza_statistiche_attivo": true,
   "chiusura_shadow_log_partite_sparite_attiva": true,
   "feed_congelato_attivo": true,
-  "minuti_feed_congelato": 10,
+  "minuti_feed_congelato": 15,
   "goleada_blocca_anche_i_gol": true,
   "soglia_prob_favorita": 0.75,
   "minuto_minimo_favorita_in_difficolta": 30,
