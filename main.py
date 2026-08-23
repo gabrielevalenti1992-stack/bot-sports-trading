@@ -3077,6 +3077,61 @@ def invia_riepilogo_feed_congelati(notifiche_attive=True):
         invia_messaggio_telegram(_testo_riepilogo_feed_congelati(elenco), chat_id=chat)
 
 
+def conta_autogol(events, home, away):
+    """Autogol accreditati a ciascuna squadra, come (pro_casa, pro_ospite).
+
+    API-Football attribuisce l'evento alla squadra del GIOCATORE che ha segnato, cioe' a quella
+    che subisce: un autogol di un difensore di casa vale un gol per gli ospiti. Serve saperlo qui
+    perche' e' l'unico modo lecito in cui una squadra puo' avere piu' gol che tiri in porta."""
+    pro_casa = pro_ospite = 0
+    for ev in events or []:
+        if ev.get("type") != "Goal":
+            continue
+        if (ev.get("detail") or "").lower() != "own goal":
+            continue
+        squadra = ((ev.get("team") or {}).get("name") or "")
+        if squadra == home:
+            pro_ospite += 1
+        elif squadra == away:
+            pro_casa += 1
+    return pro_casa, pro_ospite
+
+
+def statistiche_indietro_sul_punteggio(current_stats, score_home, score_away, events, home, away):
+    """True se i numeri contraddicono il risultato: piu' gol che tiri in porta.
+
+    Un gol richiede un tiro in porta - l'unica eccezione e' l'autogol, che si conta a parte e si
+    sottrae. Quando la disuguaglianza salta, le statistiche non sono "poche": sono INDIETRO.
+
+    Serve perche' gli altri due controlli non prendono questo caso. Il gate sulle statistiche
+    assenti vede dei numeri e li accetta; il rilevatore di feed bloccato aspetta che la risposta
+    resti identica per minuti, e qui invece la risposta cambia - solo che arriva in ritardo.
+    Questo e' un errore visibile SUBITO, da una risposta sola, perche' e' una contraddizione
+    logica e non una misura di tempo.
+
+    Il caso: Pogon Szczecin-Wisla Krakow, 23/08. Al 23' il bot annunciava "1-1" con "Tiri 1-0",
+    cioe' una squadra che aveva segnato senza aver tirato; al 34' era 2-2 con "Porta 2-1". Nessun
+    autogol nella partita. E' lo stesso difetto gia' visto il 16/08 su Djurgardens-AIK ("gol al
+    10' e 0-0 tiri al 12'"), che allora era stato affrontato solo per i valori nulli.
+
+    Ritorna (indietro, dettaglio) - il dettaglio e' la riga da mostrare, vuota se tutto torna."""
+    if not current_stats or score_home is None or score_away is None:
+        return False, ""
+    porta_casa, porta_ospite = current_stats.get("Tiri in porta", (0, 0))
+    autogol_casa, autogol_ospite = conta_autogol(events, home, away)
+    gol_casa = max(0, score_home - autogol_casa)
+    gol_ospite = max(0, score_away - autogol_ospite)
+    mancanti = []
+    if gol_casa > porta_casa:
+        mancanti.append(f"{home}: {gol_casa} gol ma {porta_casa} tiri in porta")
+    if gol_ospite > porta_ospite:
+        mancanti.append(f"{away}: {gol_ospite} gol ma {porta_ospite} tiri in porta")
+    if not mancanti:
+        return False, ""
+    return True, ("\n⏳ Statistiche in ritardo sul risultato (" + "; ".join(mancanti)
+                  + "): i numeri qui sopra non sono ancora aggiornati.\n")
+
+
 def estrai_current_stats(stats_home, stats_away):
     """Le 4 statistiche (casa, trasferta) usate ovunque nel bot: tiri totali, tiri in porta,
     corner, tiri in area. Chi non usa "Tiri in area" può semplicemente ignorare quella chiave."""
@@ -4314,6 +4369,13 @@ def cmd_status(chat_id, query):
         events = fetch_fixture_events(fid)
         goals = extract_goals(events)
         goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
+        # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
+        # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
+        # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
+        _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
+            current_stats, score_h, score_a, events, home, away)
+        if _indietro_status:
+            stats_text += riga_ritardo_status.rstrip()
         last_text = ""
         if goals:
             last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
@@ -7652,6 +7714,14 @@ def processa_partita(fixture, notifiche_attive=True):
         # partita", che è una cosa cumulativa. Si calcola una volta e finisce sia in notifica sia
         # nel log, così a colpo d'occhio si legge chi comanda senza confrontare due colonne.
         dominio_partita = calcola_dominio(current_stats, score_home, score_away) if current_stats else None
+        # Statistiche che contraddicono il risultato (piu' gol che tiri in porta): non sono poche,
+        # sono indietro. Va detto accanto ai numeri, altrimenti un "Tiri 1-0" su un 1-1 si legge
+        # come un dato vero. Vedi statistiche_indietro_sul_punteggio.
+        _indietro, riga_ritardo_stats = statistiche_indietro_sul_punteggio(
+            current_stats, score_home, score_away, events, home, away)
+        if _indietro:
+            log(f"  ⏳ Statistiche indietro sul risultato ({score_home}-{score_away} con "
+                f"{current_stats.get('Tiri in porta', (0, 0))} in porta)")
         riga_dominio_notifica = ""
         if dominio_partita:
             riga_dominio_notifica = riga_dominio(dominio_partita, home, away, current_stats) + "\n"
@@ -7704,6 +7774,7 @@ def processa_partita(fixture, notifiche_attive=True):
             f"- Tiri totali: {tot_c_txt} - {tot_o_txt}{freccia}\n"
             f"- Tiri in porta: {porta_c_txt} - {porta_o_txt}\n"
             f"- Corner: {corner_line}\n"
+            f"{riga_ritardo_stats}"
             f"{riga_dominio_notifica}"
             f"{tempi_text}"
             f"{nota_momentum}"
