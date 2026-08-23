@@ -7346,6 +7346,23 @@ def processa_partita(fixture, notifiche_attive=True):
                     fixture_id, current_stats, score_home, score_away, minuto)
                 if promuovi_dominio:
                     promuovi, motivo = True, motivo_dominio
+            # Il silenzio senza statistiche vale anche qui. Una partita di cui l'API non pubblica i
+            # numeri non manda NESSUNA notifica (vedi deve_notificare): promuoverla vorrebbe dire
+            # occupare uno dei MAX_PREFERITI_SIMULTANEI posti e pagare il triplo di chiamate (60s
+            # invece di 180s) per una partita che nel canale resta muta - annunciandola per giunta
+            # con un "Statistiche: N/D", cioe' proprio il messaggio che non si vuole piu' vedere.
+            #
+            # E' lo stesso motivo per cui un preferito che smette di dare statistiche viene tolto
+            # poco piu' sopra ("meglio liberare il posto per una partita che i dati li ha"): qui si
+            # evita di farlo entrare, invece di annunciarlo e poi cacciarlo con un secondo
+            # messaggio. Vale solo per la rotta gol: quella dominio le statistiche le richiede gia'
+            # per definizione, senza non calcola niente.
+            #
+            # Non si marca "auto_preferito_processato": se le statistiche arrivano prima del
+            # MINUTO_GOL_AUTO_PREFERITI la partita puo' ancora entrare al ciclo successivo.
+            if promuovi and SILENZIO_SENZA_STATISTICHE_ATTIVO and not current_stats:
+                promuovi = False
+                motivo = "statistiche non pubblicate: nel canale resterebbe muta"
             if promuovi:
                 FAVORITE_MATCHES.add(str(fixture_id))
                 save_favorites(FAVORITE_MATCHES)
