@@ -386,7 +386,10 @@ FEED_CONGELATO_ATTIVO = True
 # Trabzonspor-Basaksehir e' rimasta ferma su "Tiri 14-7 | Porta 7-2 | Corner 5-1" per 17 minuti, e
 # non era sola.
 FEED_CONGELATI_CICLO = []
-MINUTI_FEED_CONGELATO = 15  # minuti di GIOCO con la risposta identica prima di dichiararlo bloccato
+MINUTI_FEED_CONGELATO = 25  # minuti di GIOCO con la risposta identica prima di dichiararlo bloccato
+# Ogni buco di almeno tanti minuti viene loggato quando si RICHIUDE (non in chat, solo nei log):
+# serve a misurare la distribuzione vera dei buchi invece di tarare la soglia sopra a occhio.
+MINUTI_GAP_FEED_DA_MISURARE = 5
 
 # Lo scarto goleada blocca anche i gol (motivazione estesa in testa a deve_notificare): a
 # SOGLIA_GOLEADA_STOP_NOTIFICHE+1 gol di distanza la partita e' decisa, e sapere quale gol l'ha
@@ -3009,6 +3012,15 @@ def aggiorna_feed_congelato(fixture_id, stats, minuto, registra=True):
         # Risposta nuova: il feed si e' mosso. Si riparte da qui, e un blocco successivo potra'
         # essere segnalato di nuovo.
         if registra:
+            # Il buco appena chiuso finisce nei log (mai in chat): e' l'unico modo per sapere
+            # quanto durano DAVVERO, invece di tarare MINUTI_FEED_CONGELATO a occhio. Il 23/08 il
+            # confronto fra l'avviso delle 20:27 e un /status di quattro minuti dopo ha mostrato
+            # che due partite su tre erano gia' ripartite: l'API non si blocca, pubblica a
+            # raffiche - Verona-Ascoli e' saltata da 10-4 a 13-9 in un colpo solo.
+            fermo_precedente = stato.get("impronta_minuto")
+            if (fermo_precedente is not None
+                    and minuto - fermo_precedente >= MINUTI_GAP_FEED_DA_MISURARE):
+                log(f"    📈 Feed ripartito dopo {minuto - fermo_precedente}' di gioco fermi")
             stato["impronta_stats"] = impronta
             stato["impronta_minuto"] = minuto
             stato["feed_congelato_segnalato"] = False
