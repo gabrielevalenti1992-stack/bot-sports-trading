@@ -3029,27 +3029,40 @@ def testo_feed_congelato(minuti_fermo, current_stats):
             f"(ferme su Tiri {tiri[0]}-{tiri[1]}). I numeri qui sopra sono probabilmente vecchi.")
 
 
+def _testo_riepilogo_feed_congelati(partite):
+    """Una riga per partita, le piu' ferme in cima."""
+    plurale = "partita" if len(partite) == 1 else "partite"
+    righe = [f"🧊 STATISTICHE FERME · {len(partite)} {plurale}",
+             "L'API ha smesso di aggiornare i numeri: finché non riparte il bot non può "
+             "valutarle. Se una ti interessa, controllala a mano.", ""]
+    for p in sorted(partite, key=lambda x: -x["fermo_da"]):
+        righe.append(f"{p['home']} vs {p['away']} · {p['lega']}")
+        righe.append(f"   {p['minuto']}' | {p['score']} — ferme da {p['fermo_da']}' "
+                     f"su Tiri {p['tiri']}")
+    return "\n".join(righe)
+
+
 def invia_riepilogo_feed_congelati(notifiche_attive=True):
     """UN messaggio per ciclo con tutte le partite congelate, invece di uno per partita.
 
     Il 23/08 la prima versione ne ha mandati otto in due minuti. Non erano falsi allarmi - i log
     confermano che erano ferme davvero - ma e' proprio questo il punto: se il fenomeno e' comune,
     un messaggio per partita e' una raffica, e una raffica non si legge. Raggruppare tiene la
-    stessa informazione in una riga per partita."""
+    stessa informazione in una riga per partita.
+
+    I preferiti restano nel LORO canale: un riepilogo unico li porterebbe nella chat principale,
+    riaprendo li' il flusso che il canale dedicato serve proprio a tenere separato. Se il canale
+    dedicato non e' configurato le due destinazioni coincidono, e il messaggio torna uno solo."""
     partite = list(FEED_CONGELATI_CICLO)
     FEED_CONGELATI_CICLO.clear()
     if not partite or not notifiche_attive:
         return
-    plurale = "partita" if len(partite) == 1 else "partite"
-    righe = [f"🧊 STATISTICHE FERME · {len(partite)} {plurale}",
-             "L'API ha smesso di aggiornare i numeri: finché non riparte il bot non può "
-             "valutarle. Se una ti interessa, controllala a mano.", ""]
-    for p in sorted(partite, key=lambda x: (not x["preferita"], -x["fermo_da"])):
-        stella = "⭐ " if p["preferita"] else ""
-        righe.append(f"{stella}{p['home']} vs {p['away']} · {p['lega']}")
-        righe.append(f"   {p['minuto']}' | {p['score']} — ferme da {p['fermo_da']}' "
-                     f"su Tiri {p['tiri']}")
-    invia_messaggio_telegram("\n".join(righe))
+    per_chat = {}
+    for p in partite:
+        chat = TELEGRAM_CHAT_ID_PREFERITI if p["preferita"] else TELEGRAM_CHAT_ID
+        per_chat.setdefault(chat, []).append(p)
+    for chat, elenco in per_chat.items():
+        invia_messaggio_telegram(_testo_riepilogo_feed_congelati(elenco), chat_id=chat)
 
 
 def estrai_current_stats(stats_home, stats_away):
@@ -3512,15 +3525,32 @@ def _percentile(valori_ordinati, percentuale):
     return round(valori_ordinati[basso] + (valori_ordinati[alto] - valori_ordinati[basso]) * (posizione - basso), 1)
 
 
-def cmd_shadowlogdominio(chat_id):
-    """Riepilogo + file di shadow_log_auto_preferiti_dominio.jsonl: a che quota di dominio sono
-    arrivate davvero le partite osservate, e quante sarebbero entrate nei preferiti con le soglie
-    attualmente impostate.
+def _cascata_soglie_dominio(osservate, quota, volume, cicli):
+    """Quante partite superano quota, poi quota+volume, poi tutti e tre i filtri."""
+    passa_q = [o for o in osservate if o["quota"] >= quota]
+    passa_qv = [o for o in passa_q if (o["volume"] or 0) >= volume]
+    passa_qvc = [o for o in passa_qv if (o["cicli"] or 0) >= cicli]
+    return len(passa_q), len(passa_qv), len(passa_qvc)
 
-    E' il comando che serve per decidere se accendere la rotta dominio
-    (AUTO_PREFERITI_DOMINIO_ATTIVO): finche' e' spenta il bot registra tutto senza promuovere
-    nulla, e le soglie 78%/16 restano stime a occhio. I percentili qui sotto le sostituiscono con
-    numeri veri - la stessa disciplina usata per calibrare la rotta gol."""
+
+def cmd_shadowlogdominio(chat_id):
+    """Riepilogo + file di shadow_log_auto_preferiti_dominio.jsonl: quante partite entrerebbero
+    davvero nei preferiti dalla rotta dominio, con le soglie attuali e con altre.
+
+    E' il comando che serve per decidere se accendere la rotta (AUTO_PREFERITI_DOMINIO_ATTIVO):
+    finche' e' spenta il bot registra tutto senza promuovere nulla, e le soglie 78%/16 restano
+    stime a occhio.
+
+    La prima versione riportava solo quante partite superavano la soglia di QUOTA, avvertendo che
+    era "prima di applicare volume e cicli" - cioe' il piu' permissivo dei tre filtri, quello che
+    da solo non decide niente. Con 255 partite osservate diceva "57%", un numero che sembrava
+    condannare la soglia mentre non stava misurando la regola vera. Ora si mostra la cascata
+    completa e il ritmo che ne uscirebbe in partite al giorno, che e' la cosa da guardare per
+    capire se il canale resterebbe leggibile.
+
+    Approssimazione dichiarata: quota_max e volume_al_max sono la coppia dell'istante di picco,
+    mentre cicli_consecutivi_max e' la striscia piu' lunga della partita, che puo' non coincidere
+    col picco. Va letta come stima del limite superiore, non come conteggio esatto."""
     if not os.path.exists(SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE):
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -3531,8 +3561,8 @@ def cmd_shadowlogdominio(chat_id):
                            "partita seguita fin li'.")}, timeout=5)
         return
 
-    picchi, scattate, righe_totali, malformate = [], 0, 0, 0
-    strisce = []
+    osservate, scattate, righe_totali, malformate = [], 0, 0, 0
+    primo_ts = ultimo_ts = None
     try:
         with open(SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE, "r") as f:
             for riga in f:
@@ -3547,10 +3577,17 @@ def cmd_shadowlogdominio(chat_id):
                     continue
                 if dato.get("auto_preferiti_dominio_scattato"):
                     scattate += 1
+                ts = dato.get("timestamp")
+                if ts:
+                    primo_ts = ts if primo_ts is None else min(primo_ts, ts)
+                    ultimo_ts = ts if ultimo_ts is None else max(ultimo_ts, ts)
                 quota_max = dato.get("quota_max")
                 if quota_max is not None:
-                    picchi.append(quota_max)
-                strisce.append(dato.get("cicli_consecutivi_max", 0))
+                    osservate.append({
+                        "quota": quota_max,
+                        "volume": dato.get("volume_al_max"),
+                        "cicli": dato.get("cicli_consecutivi_max", 0),
+                    })
     except Exception as e:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -3558,34 +3595,52 @@ def cmd_shadowlogdominio(chat_id):
                   "text": f"Errore leggendo shadow_log_auto_preferiti_dominio.jsonl: {e}"}, timeout=5)
         return
 
-    picchi.sort()
-    # Quante partite avrebbero superato la sola soglia di quota: e' il numero che dice se 78% e'
-    # troppo alto (nessuna entra mai) o troppo basso (entra mezzo campionato).
-    sopra_soglia = sum(1 for p in picchi if p >= SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI)
+    picchi = sorted(o["quota"] for o in osservate)
+    giorni = max(1.0, ((ultimo_ts - primo_ts) / 86400) if (primo_ts and ultimo_ts) else 1.0)
     righe = [
         "Shadow-log rotta dominio - riepilogo:",
         f"- Partite osservate: {righe_totali}"
         + (f" ({malformate} riga malformata)" if malformate == 1
            else f" ({malformate} righe malformate)" if malformate else ""),
+        f"- Con dominio misurabile: {len(osservate)}",
         f"- Promosse davvero dalla rotta dominio: {scattate}",
         f"- Promozione: {'ATTIVA' if AUTO_PREFERITI_DOMINIO_ATTIVO else 'spenta (sola osservazione)'}",
+        f"- Giorni di raccolta: {giorni:.1f}",
         "",
         f"Soglie attuali: quota {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%, volume "
         f"{VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI}, {CICLI_DOMINIO_PER_AUTO_PREFERITI} cicli di fila",
     ]
-    if picchi:
+    if osservate:
+        q, v, c = (SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI, VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI,
+                   CICLI_DOMINIO_PER_AUTO_PREFERITI)
+        solo_q, con_v, con_c = _cascata_soglie_dominio(osservate, q, v, c)
+        tot = len(osservate)
         righe += [
             "",
-            "Picco di dominio raggiunto (percentili sulle partite osservate):",
+            f"QUANTE ENTREREBBERO DAVVERO (su {tot} partite):",
+            f"- solo quota >= {q}%: {solo_q} ({round(solo_q / tot * 100)}%)",
+            f"- + volume >= {v}: {con_v} ({round(con_v / tot * 100)}%)",
+            f"- + {c} cicli di fila: {con_c} ({round(con_c / tot * 100)}%)",
+            f"=> circa {con_c / giorni:.1f} partite al giorno nel canale preferiti",
+            "",
+            "Picco di dominio raggiunto (percentili):",
             f"- mediana: {_percentile(picchi, 50)}%",
             f"- 75°: {_percentile(picchi, 75)}%   90°: {_percentile(picchi, 90)}%   "
             f"95°: {_percentile(picchi, 95)}%",
             f"- massimo visto: {picchi[-1]}%",
             "",
-            f"Con la soglia di quota attuale ({SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%) sarebbero "
-            f"passate {sopra_soglia} partite su {len(picchi)} "
-            f"({round(sopra_soglia / len(picchi) * 100)}%), prima di applicare volume e cicli.",
-            f"- striscia consecutiva piu' lunga vista: {max(strisce) if strisce else 0} cicli",
+            "E SE SI STRINGESSE (quota / volume, stessi cicli):",
+        ]
+        for qq, vv in ((q, v), (q, v + 8), (88, v), (88, v + 8), (95, v + 8)):
+            _, _, passate = _cascata_soglie_dominio(osservate, qq, vv, c)
+            marca = "  <- attuale" if (qq, vv) == (q, v) else ""
+            righe.append(f"- {qq}% / vol {vv}: {passate} partite "
+                         f"({passate / giorni:.1f} al giorno){marca}")
+        righe += [
+            "",
+            "Nota: quota e volume sono presi all'istante di picco, i cicli sono la striscia piu'",
+            "lunga della partita, che puo' non coincidere col picco. E' una stima del limite",
+            "superiore: le partite vere saranno queste o meno.",
         ]
     else:
         righe.append("\nNessuna partita ha ancora raggiunto un dominio misurabile "
