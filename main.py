@@ -1,4 +1,5 @@
 import collections
+import hashlib
 import json
 import re
 import unicodedata
@@ -373,6 +374,14 @@ FAVORITA_IN_DIFFICOLTA_ATTIVO = True
 # dalla chat, e ci torna da sola appena arrivano i primi dati.
 SILENZIO_SENZA_STATISTICHE_ATTIVO = True
 
+# Feed statistiche bloccato: l'API continua a rispondere, ma con la STESSA IDENTICA risposta di
+# prima mentre la partita va avanti (motivazione estesa in impronta_statistiche). Visto il 23/08 su
+# Venezia-Lecce: ferma su "Tiri 3-0, Corner 0-0" dal 24' al 44', mentre la partita era davvero a
+# 7-1 di tiri e 3-0 di corner. Il bot la spegneva con "nessun tiro cambiato" e non arrivava mai in
+# chat - proprio una di quelle che vanno viste (75% di possesso, xG 0.59 contro 0.04).
+FEED_CONGELATO_ATTIVO = True
+MINUTI_FEED_CONGELATO = 10  # minuti di GIOCO con la risposta identica prima di dichiararlo bloccato
+
 # Lo scarto goleada blocca anche i gol (motivazione estesa in testa a deve_notificare): a
 # SOGLIA_GOLEADA_STOP_NOTIFICHE+1 gol di distanza la partita e' decisa, e sapere quale gol l'ha
 # decisa non cambia niente di operativo.
@@ -452,6 +461,14 @@ SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE = data_path("shadow_log_auto_preferiti_do
 # "risultato_finale" a fine partita, da incrociare offline per fixture_id. Nessuna soglia o
 # semaforo finché non ci sono abbastanza partite reali per calibrarli (vedi Fase 2).
 SHADOW_LOG_VALORE_FILE = data_path("shadow_log_valore.jsonl")
+
+# Chiusura degli shadow-log delle partite sparite dal feed live (motivazione estesa in
+# chiudi_shadow_log_partite_sparite): senza, gli snapshot raccolti durante la partita restano
+# orfani per sempre, ed e' esattamente cio' che era successo - 642 partite con snapshot e ZERO
+# risultati finali.
+CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = True
+MAX_CHIUSURE_SHADOW_LOG_PER_CICLO = 10  # tetto: quando finisce un turno intero non si ammassano chiamate
+TENTATIVI_MAX_CHIUSURA_SHADOW_LOG = 3   # oltre si rinuncia: meglio perdere una partita che riprovare per sempre
 
 # Shadow-log strategie: stesso principio, ma per le sei strategie (Assedio, Fascia calda,
 # Rimonta, Concretezza, xG per tiro, Qualità - non più comandi Telegram, solo logica interna).
@@ -753,6 +770,9 @@ try:
     BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
     FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
     SILENZIO_SENZA_STATISTICHE_ATTIVO = config.get("silenzio_senza_statistiche_attivo", SILENZIO_SENZA_STATISTICHE_ATTIVO)
+    CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = config.get("chiusura_shadow_log_partite_sparite_attiva", CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA)
+    FEED_CONGELATO_ATTIVO = config.get("feed_congelato_attivo", FEED_CONGELATO_ATTIVO)
+    MINUTI_FEED_CONGELATO = config.get("minuti_feed_congelato", MINUTI_FEED_CONGELATO)
     GOLEADA_BLOCCA_ANCHE_I_GOL = config.get("goleada_blocca_anche_i_gol", GOLEADA_BLOCCA_ANCHE_I_GOL)
     SOGLIA_PROB_FAVORITA = config.get("soglia_prob_favorita", SOGLIA_PROB_FAVORITA)
     MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = config.get("minuto_minimo_favorita_in_difficolta", MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA)
@@ -806,6 +826,12 @@ try:
           flush=True)
     print(f"Favorita che non vince: {'ATTIVA' if FAVORITA_IN_DIFFICOLTA_ATTIVO else 'disattiva'} "
           f"(favorita dal {SOGLIA_PROB_FAVORITA * 100:.0f}% no-vig, dal {MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA}')", flush=True)
+    print(f"Rilevatore feed statistiche bloccato: "
+          f"{'ATTIVO' if FEED_CONGELATO_ATTIVO else 'disattivo'} "
+          f"(avviso dopo {MINUTI_FEED_CONGELATO}' di gioco con risposta identica)", flush=True)
+    print(f"Chiusura shadow-log a fine partita: "
+          f"{'ATTIVA' if CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA else 'disattiva'} "
+          f"(max {MAX_CHIUSURE_SHADOW_LOG_PER_CICLO} partite per ciclo)", flush=True)
     print(f"Backoff statistiche assenti: "
           f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}", flush=True)
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
@@ -2353,6 +2379,11 @@ def get_partite_live():
 # =============================================================================
 STATUS_NON_LIVE_FUTURI = {"PST", "CANC", "ABD", "AWD", "WO"}  # rinviata/annullata/a tavolino: mai live
 
+# Stati in cui la partita e' davvero finita. AWD/WO restano fuori di proposito (sono sopra, fra i
+# "mai live"): un risultato assegnato a tavolino non e' una partita giocata, e non e' un esito da
+# cui lo shadow-log possa imparare qualcosa.
+STATI_PARTITA_CONCLUSA = {"FT", "AET", "PEN"}
+
 # Tempi regolamentari (90') finiti in parità, partita di coppa proseguita a supplementari/rigori:
 # BT = pausa tra 2°T e supplementari (o tra i due tempi supplementari), ET = supplementari in
 # corso, P = rigori in corso. Su richiesta esplicita: da qui in poi nessuna notifica per quella
@@ -2924,6 +2955,72 @@ def ha_statistiche_disponibili(stats):
     return any(s.get("value") is not None
                for s in stats_home + stats_away
                if s.get("type", "").lower() in STATISTICHE_USATE)
+
+
+def impronta_statistiche(stats):
+    """Impronta dell'INTERA risposta statistiche, non solo delle quattro voci che il bot usa.
+
+    E' il punto su cui regge tutto il rilevatore di feed bloccato. Tiri e corner possono benissimo
+    restare fermi per qualche minuto in una partita vera: con il ciclo da 3 minuti succede di
+    continuo, e infatti "nessun tiro cambiato" e' lo skip piu' frequente dei log. Possesso palla,
+    passaggi e falli invece non stanno mai fermi - cambiano ogni manciata di secondi.
+
+    Quindi: se e' identica anche quella parte, la risposta non descrive una partita ferma, e' la
+    stessa identica risposta di prima. Cioe' un feed che non si aggiorna. Che quei campi ci siano e
+    si muovano per conto loro e' gia' documentato in ha_statistiche_disponibili ("l'API pubblica i
+    dati generali prima di tiri e corner"), che proprio per questo li esclude dal suo controllo.
+
+    md5 e non hash(): l'impronta finisce in stato_partite, che viene salvato su disco e riletto
+    dopo un riavvio, e hash() sulle stringhe cambia ad ogni processo."""
+    if not stats or len(stats) < 2:
+        return None
+    parti = []
+    for lato in stats[:2]:
+        for voce in (lato.get("statistics") or []):
+            parti.append(f"{voce.get('type')}={voce.get('value')}")
+    if not parti:
+        return None
+    return hashlib.md5("|".join(parti).encode("utf-8")).hexdigest()
+
+
+def aggiorna_feed_congelato(fixture_id, stats, minuto, registra=True):
+    """Tiene il conto di da quanti minuti di gioco la risposta statistiche non cambia di una virgola.
+
+    Ritorna (congelato, minuti_fermo). Il conto e' in minuti di PARTITA, non di orologio: cosi'
+    l'intervallo non lo fa crescere (a meta' tempo il minuto non avanza) e il numero detto
+    all'utente e' quello che gli serve davvero.
+
+    registra=False per chi legge soltanto (i comandi come /status): non tocca stato_partite, cosi'
+    una consultazione non sposta il conteggio del ciclo live ne' crea uno stato per una partita che
+    il loop non segue nemmeno."""
+    if not FEED_CONGELATO_ATTIVO or minuto is None:
+        return False, 0
+    impronta = impronta_statistiche(stats)
+    if impronta is None:
+        return False, 0
+    stato = stato_partite.setdefault(fixture_id, {}) if registra else stato_partite.get(fixture_id, {})
+    if stato.get("impronta_stats") != impronta:
+        # Risposta nuova: il feed si e' mosso. Si riparte da qui, e un blocco successivo potra'
+        # essere segnalato di nuovo.
+        if registra:
+            stato["impronta_stats"] = impronta
+            stato["impronta_minuto"] = minuto
+            stato["feed_congelato_segnalato"] = False
+        return False, 0
+    fermo_dal_minuto = stato.get("impronta_minuto")
+    if fermo_dal_minuto is None:
+        if registra:
+            stato["impronta_minuto"] = minuto
+        return False, 0
+    minuti_fermo = max(0, minuto - fermo_dal_minuto)
+    return minuti_fermo >= MINUTI_FEED_CONGELATO, minuti_fermo
+
+
+def testo_feed_congelato(minuti_fermo, current_stats):
+    """Riga di avviso da mettere dove si mostrano statistiche che potrebbero essere ferme."""
+    tiri = current_stats.get("Tiri totali", (0, 0)) if current_stats else (0, 0)
+    return (f"\n\n🧊 ATTENZIONE: l'API non aggiorna queste statistiche da {minuti_fermo}' di gioco "
+            f"(ferme su Tiri {tiri[0]}-{tiri[1]}). I numeri qui sopra sono probabilmente vecchi.")
 
 
 def estrai_current_stats(stats_home, stats_away):
@@ -4091,6 +4188,13 @@ def cmd_status(chat_id, query):
             cc, co = current_stats["Corner"]
             ta, tao = current_stats["Tiri in area"]
             stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
+            # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
+            # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
+            # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
+            congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
+                fid, stats, minuto, registra=False)
+            if congelato_status:
+                stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
 
         intensita_text = ""
         if current_stats:
@@ -6211,6 +6315,104 @@ def registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, 
     })
 
 
+def recupera_esito_finale_fixture(fixture_id):
+    """Stato e punteggio finale di UNA partita, con una chiamata mirata /fixtures?id=X.
+
+    Serve per le partite sparite dall'elenco live: quell'endpoint smette di restituirle appena
+    finiscono, quindi chiederlo esplicitamente e' l'unico modo per sapere com'e' andata.
+
+    Ritorna (conclusa, score_home, score_away), oppure None se la CHIAMATA e' fallita. I due casi
+    vanno tenuti distinti: "non conclusa" e' una risposta valida (partita sospesa, rinviata,
+    fixture sconosciuto) e non c'e' niente da registrare, mentre una chiamata fallita merita un
+    altro tentativo - confonderle butterebbe via il campione al primo rate-limit."""
+    if not API_FOOTBALL_KEY:
+        return None
+    data, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/fixtures", {"id": fixture_id}, timeout=15,
+        contesto=f"recupera_esito_finale_fixture({fixture_id})")
+    if data is None:
+        return None
+    risposta = data.get("response") or []
+    if not risposta:
+        return False, None, None
+    fixture_info = risposta[0].get("fixture") or {}
+    if (fixture_info.get("status") or {}).get("short") not in STATI_PARTITA_CONCLUSA:
+        return False, None, None
+    goals = risposta[0].get("goals") or {}
+    score_home, score_away = goals.get("home"), goals.get("away")
+    if score_home is None or score_away is None:
+        return False, None, None
+    return True, score_home, score_away
+
+
+def _shadow_log_ha_snapshot_aperti(fixture_id):
+    """True se questa partita ha snapshot registrati ma non ancora il suo risultato finale."""
+    stato = stato_partite.get(fixture_id, {})
+    if stato.get("notified_final"):
+        return False  # gia' chiusa dal ramo di fine partita dentro processa_partita
+    return bool(stato.get("ultimo_snapshot_valore") or stato.get("ultimo_snapshot_strategie"))
+
+
+def chiudi_shadow_log_partite_sparite(fixture_ids):
+    """Scrive il "risultato_finale" delle partite appena sparite dal feed live.
+
+    L'esito veniva registrato SOLO dentro processa_partita, nel ramo
+    `status_short in STATI_PARTITA_CONCLUSA`. Ma processa_partita vede soltanto cio' che
+    l'endpoint live restituisce, e una partita finita da quell'elenco sparisce e basta: quel ramo
+    in produzione non scattava quasi mai. I numeri del 23/08 non lasciano dubbi - 642 partite con
+    snapshot e ZERO risultati finali nello shadow-log valore, con "RISULTATO FINALE" mai comparso
+    in due giorni interi di log mentre "Partite terminate rimosse" compariva decine di volte.
+
+    Senza l'esito gli snapshot non valgono nulla: esistono proprio per essere incrociati con come
+    la partita e' finita davvero. Qui il cerchio si chiude, subito prima che
+    pulisci_partite_terminate cancelli lo stato, e solo per le partite che hanno snapshot aperti.
+
+    Ritorna gli id da NON cancellare in questo giro: quelli oltre il tetto di chiamate e quelli la
+    cui chiamata e' fallita ma ha ancora tentativi disponibili. Restano in stato_partite e si
+    riprovano al ciclo dopo, invece di sparire portandosi via il campione."""
+    if not CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA:
+        return set()
+
+    da_chiudere = [fid for fid in fixture_ids if _shadow_log_ha_snapshot_aperti(fid)]
+    if not da_chiudere:
+        return set()
+
+    rimandate, chiuse = set(), 0
+    for indice, fid in enumerate(da_chiudere):
+        if indice >= MAX_CHIUSURE_SHADOW_LOG_PER_CICLO:
+            rimandate.update(da_chiudere[indice:])
+            break
+        if indice:
+            time.sleep(1)  # stesso ritmo del loop live: mai piu' chiamate nello stesso secondo
+        esito = recupera_esito_finale_fixture(fid)
+        if esito is None:
+            stato = stato_partite.setdefault(fid, {})
+            tentativi = stato.get("tentativi_chiusura_shadow_log", 0) + 1
+            stato["tentativi_chiusura_shadow_log"] = tentativi
+            if tentativi < TENTATIVI_MAX_CHIUSURA_SHADOW_LOG:
+                rimandate.add(fid)
+            else:
+                log(f"    Shadow-log: rinuncio a chiudere la partita {fid} dopo {tentativi} tentativi falliti")
+            continue
+        conclusa, score_home, score_away = esito
+        if not conclusa:
+            continue  # sospesa, rinviata o sconosciuta: nessun esito reale da registrare
+        registra_shadow_log_valore_risultato(fid, score_home, score_away)
+        # I gol servono allo shadow-log strategie per sapere QUANDO e' arrivato il gol dopo un
+        # segnale, non solo com'e' finita: e' il dato per cui quel file esiste, e vale la seconda
+        # chiamata. Se gli eventi non arrivano si registra lo stesso con la lista vuota - il
+        # risultato finale e' comunque meglio di un altro snapshot orfano.
+        eventi = fetch_fixture_events(fid)
+        registra_shadow_log_strategie_risultato(
+            fid, score_home, score_away, extract_goals(eventi) if eventi else [])
+        chiuse += 1
+
+    if chiuse or rimandate:
+        log(f"Shadow-log chiusi a fine partita: {chiuse}"
+            + (f" ({len(rimandate)} rimandati al prossimo ciclo)" if rimandate else ""))
+    return rimandate
+
+
 def classifica_cambio_punteggio(fixture_id, score_home, score_away):
     """Confronta il punteggio appena letto dall'API con quello dell'ultimo ciclo per questa
     partita, e ritorna (gol_appena_segnato, punteggio_corretto_al_ribasso).
@@ -6754,6 +6956,30 @@ def processa_partita(fixture, notifiche_attive=True):
             xg_casa, xg_ospite = estrai_xg(stats_home), estrai_xg(stats_away)
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
 
+            # Feed bloccato (vedi impronta_statistiche): l'API risponde, ma con la stessa identica
+            # risposta di prima mentre la partita va avanti. Senza dirlo, la partita si spegne da
+            # sola con "nessun tiro cambiato" e non arriva mai in chat: e' quello che il 23/08 ha
+            # tenuto fuori Venezia-Lecce, ferma su 3-0 dal 24' al 44' mentre era davvero 7-1.
+            # Un avviso solo per blocco, non ad ogni ciclo.
+            feed_congelato, minuti_feed_fermo = aggiorna_feed_congelato(fixture_id, stats, minuto)
+            if feed_congelato and not stato_partite[fixture_id].get("feed_congelato_segnalato"):
+                stato_partite[fixture_id]["feed_congelato_segnalato"] = True
+                log(f"    🧊 Feed statistiche bloccato da {minuti_feed_fermo}' di gioco "
+                    f"(fermo su Tiri {tiri_casa}-{tiri_ospite})")
+                if notifiche_attive and str(fixture_id) not in SILENCED_MATCHES:
+                    invia_messaggio_telegram(
+                        f"🧊 STATISTICHE BLOCCATE\n"
+                        f"{home} vs {away}\n"
+                        f"{formatta_lega(league_name, league_country)}\n"
+                        f"{minuto}' | {score_home} - {score_away}\n\n"
+                        f"L'API non aggiorna le statistiche di questa partita da "
+                        f"{minuti_feed_fermo}' di gioco: ferme su Tiri {tiri_casa}-{tiri_ospite}, "
+                        f"Porta {tiri_p_casa}-{tiri_p_ospite}, Corner {corner_casa}-{corner_ospite}.\n\n"
+                        f"Il bot non può valutarla finché il feed non riparte: se ti interessa, "
+                        f"controllala a mano.",
+                        chat_id=(TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES
+                                 else TELEGRAM_CHAT_ID))
+
             # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
             # /momentum per disegnare l'andamento su tutta la partita, non solo il blocco di 15 min
             # corrente. _calcola_delta_15min_da_storico filtra già da sé i punti del blocco che le
@@ -6831,7 +7057,7 @@ def processa_partita(fixture, notifiche_attive=True):
                         stato_partite[fixture_id]["verdetto_lega_registrato"] = True
                         registra_esito_statistiche(league_country, league_name, False)
 
-        if status_short in ("FT", "AET", "PEN"):
+        if status_short in STATI_PARTITA_CONCLUSA:
             stato = stato_partite.get(fixture_id, {})
             if not stato.get("notified_final"):
                 muted_data = SILENCED_MATCHES.get(str(fixture_id))
@@ -7471,6 +7697,13 @@ def processa_partita(fixture, notifiche_attive=True):
 
 def pulisci_partite_terminate(fixture_ids_live):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
+    # Prima di cancellare lo stato: chi ha snapshot aperti va chiuso con il suo risultato finale,
+    # altrimenti tutto il campione raccolto durante la partita resta orfano per sempre. Le partite
+    # rimandate (tetto di chiamate raggiunto, o chiamata fallita) NON si cancellano: restano qui e
+    # si riprovano al giro dopo.
+    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere)
+    if rimandate:
+        ids_da_rimuovere = [fid for fid in ids_da_rimuovere if fid not in rimandate]
     for fid in ids_da_rimuovere:
         # Nessun messaggio di fine partita
         SILENCED_MATCHES.pop(str(fid), None)
