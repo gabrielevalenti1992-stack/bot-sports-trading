@@ -22,6 +22,8 @@
   "un_aggiornamento_per_blocco_attivo": true,
   "backoff_statistiche_assenti_attivo": true,
   "favorita_in_difficolta_attivo": true,
+  "silenzio_senza_statistiche_attivo": true,
+  "goleada_blocca_anche_i_gol": true,
   "soglia_prob_favorita": 0.75,
   "minuto_minimo_favorita_in_difficolta": 30,
   "messaggio_live_preferiti_attivo": true,
