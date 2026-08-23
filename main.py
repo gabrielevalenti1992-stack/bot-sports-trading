@@ -3029,27 +3029,40 @@ def testo_feed_congelato(minuti_fermo, current_stats):
             f"(ferme su Tiri {tiri[0]}-{tiri[1]}). I numeri qui sopra sono probabilmente vecchi.")
 
 
+def _testo_riepilogo_feed_congelati(partite):
+    """Una riga per partita, le piu' ferme in cima."""
+    plurale = "partita" if len(partite) == 1 else "partite"
+    righe = [f"🧊 STATISTICHE FERME · {len(partite)} {plurale}",
+             "L'API ha smesso di aggiornare i numeri: finché non riparte il bot non può "
+             "valutarle. Se una ti interessa, controllala a mano.", ""]
+    for p in sorted(partite, key=lambda x: -x["fermo_da"]):
+        righe.append(f"{p['home']} vs {p['away']} · {p['lega']}")
+        righe.append(f"   {p['minuto']}' | {p['score']} — ferme da {p['fermo_da']}' "
+                     f"su Tiri {p['tiri']}")
+    return "\n".join(righe)
+
+
 def invia_riepilogo_feed_congelati(notifiche_attive=True):
     """UN messaggio per ciclo con tutte le partite congelate, invece di uno per partita.
 
     Il 23/08 la prima versione ne ha mandati otto in due minuti. Non erano falsi allarmi - i log
     confermano che erano ferme davvero - ma e' proprio questo il punto: se il fenomeno e' comune,
     un messaggio per partita e' una raffica, e una raffica non si legge. Raggruppare tiene la
-    stessa informazione in una riga per partita."""
+    stessa informazione in una riga per partita.
+
+    I preferiti restano nel LORO canale: un riepilogo unico li porterebbe nella chat principale,
+    riaprendo li' il flusso che il canale dedicato serve proprio a tenere separato. Se il canale
+    dedicato non e' configurato le due destinazioni coincidono, e il messaggio torna uno solo."""
     partite = list(FEED_CONGELATI_CICLO)
     FEED_CONGELATI_CICLO.clear()
     if not partite or not notifiche_attive:
         return
-    plurale = "partita" if len(partite) == 1 else "partite"
-    righe = [f"🧊 STATISTICHE FERME · {len(partite)} {plurale}",
-             "L'API ha smesso di aggiornare i numeri: finché non riparte il bot non può "
-             "valutarle. Se una ti interessa, controllala a mano.", ""]
-    for p in sorted(partite, key=lambda x: (not x["preferita"], -x["fermo_da"])):
-        stella = "⭐ " if p["preferita"] else ""
-        righe.append(f"{stella}{p['home']} vs {p['away']} · {p['lega']}")
-        righe.append(f"   {p['minuto']}' | {p['score']} — ferme da {p['fermo_da']}' "
-                     f"su Tiri {p['tiri']}")
-    invia_messaggio_telegram("\n".join(righe))
+    per_chat = {}
+    for p in partite:
+        chat = TELEGRAM_CHAT_ID_PREFERITI if p["preferita"] else TELEGRAM_CHAT_ID
+        per_chat.setdefault(chat, []).append(p)
+    for chat, elenco in per_chat.items():
+        invia_messaggio_telegram(_testo_riepilogo_feed_congelati(elenco), chat_id=chat)
 
 
 def estrai_current_stats(stats_home, stats_away):
