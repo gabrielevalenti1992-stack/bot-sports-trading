@@ -1,4 +1,5 @@
 import collections
+import copy
 import hashlib
 import json
 import re
@@ -41,10 +42,14 @@ def salva_json_atomico(path, obj):
     include pid+thread id: più thread (loop live, worker quote, comandi Telegram) possono
     chiamare questa funzione sullo stesso path nello stesso momento, e con un nome fisso
     un thread può rinominare via il tmp file di un altro thread ancora in scrittura,
-    causando un FileNotFoundError su os.replace()."""
+    causando un FileNotFoundError su os.replace(). Snapshot deepcopy prima del dump: json.dump
+    itera l'oggetto e, se un altro thread muta un dict/list annidato durante la serializzazione,
+    salta un RuntimeError o scrive dati incoerenti. deepcopy sotto il GIL è atomica rispetto
+    alle strutture Python."""
+    snapshot = copy.deepcopy(obj)
     tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp_path, 'w') as f:
-        json.dump(obj, f)
+        json.dump(snapshot, f)
     os.replace(tmp_path, path)
 
 
@@ -3230,7 +3235,7 @@ def cmd_favorites(chat_id):
     lines = ["Partite preferite:"]
     partite_cmd = get_partite_live()
     live_map = {str(f["fixture"]["id"]): f for f in partite_cmd}
-    for fid in FAVORITE_MATCHES:
+    for fid in list(FAVORITE_MATCHES):
         f = live_map.get(fid)
         if f:
             home = f["teams"]["home"]["name"]
@@ -3260,7 +3265,7 @@ def cmd_silenced(chat_id):
         return
     lines = ["Partite silenziate:"]
     keyboard = {"inline_keyboard": []}
-    for fid, info in SILENCED_MATCHES.items():
+    for fid, info in list(SILENCED_MATCHES.items()):
         stato = stato_partite.get(int(fid), {})
         home = stato.get("home", f"ID {fid}")
         away = stato.get("away", "")
@@ -3797,7 +3802,7 @@ def cmd_dominio(chat_id):
     di /intensita, che ne fa una per partita e va aspettata). Serve a rispondere in un colpo
     d'occhio a "dove sta succedendo qualcosa che il punteggio non dice ancora"."""
     righe_sotto, righe_bloccate, righe_avanti, senza_dominio = [], [], [], 0
-    for fid, stato in stato_partite.items():
+    for fid, stato in list(stato_partite.items()):
         history = stato.get("history", [])
         if not history:
             continue
