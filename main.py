@@ -1,4 +1,5 @@
 import collections
+import hashlib
 import json
 import re
 import unicodedata
@@ -372,6 +373,14 @@ FAVORITA_IN_DIFFICOLTA_ATTIVO = True
 # deve_notificare). La partita resta seguita e continua ad alimentare gli shadow-log: sparisce solo
 # dalla chat, e ci torna da sola appena arrivano i primi dati.
 SILENZIO_SENZA_STATISTICHE_ATTIVO = True
+
+# Feed statistiche bloccato: l'API continua a rispondere, ma con la STESSA IDENTICA risposta di
+# prima mentre la partita va avanti (motivazione estesa in impronta_statistiche). Visto il 23/08 su
+# Venezia-Lecce: ferma su "Tiri 3-0, Corner 0-0" dal 24' al 44', mentre la partita era davvero a
+# 7-1 di tiri e 3-0 di corner. Il bot la spegneva con "nessun tiro cambiato" e non arrivava mai in
+# chat - proprio una di quelle che vanno viste (75% di possesso, xG 0.59 contro 0.04).
+FEED_CONGELATO_ATTIVO = True
+MINUTI_FEED_CONGELATO = 10  # minuti di GIOCO con la risposta identica prima di dichiararlo bloccato
 
 # Lo scarto goleada blocca anche i gol (motivazione estesa in testa a deve_notificare): a
 # SOGLIA_GOLEADA_STOP_NOTIFICHE+1 gol di distanza la partita e' decisa, e sapere quale gol l'ha
@@ -762,6 +771,8 @@ try:
     FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
     SILENZIO_SENZA_STATISTICHE_ATTIVO = config.get("silenzio_senza_statistiche_attivo", SILENZIO_SENZA_STATISTICHE_ATTIVO)
     CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = config.get("chiusura_shadow_log_partite_sparite_attiva", CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA)
+    FEED_CONGELATO_ATTIVO = config.get("feed_congelato_attivo", FEED_CONGELATO_ATTIVO)
+    MINUTI_FEED_CONGELATO = config.get("minuti_feed_congelato", MINUTI_FEED_CONGELATO)
     GOLEADA_BLOCCA_ANCHE_I_GOL = config.get("goleada_blocca_anche_i_gol", GOLEADA_BLOCCA_ANCHE_I_GOL)
     SOGLIA_PROB_FAVORITA = config.get("soglia_prob_favorita", SOGLIA_PROB_FAVORITA)
     MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = config.get("minuto_minimo_favorita_in_difficolta", MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA)
@@ -815,6 +826,9 @@ try:
           flush=True)
     print(f"Favorita che non vince: {'ATTIVA' if FAVORITA_IN_DIFFICOLTA_ATTIVO else 'disattiva'} "
           f"(favorita dal {SOGLIA_PROB_FAVORITA * 100:.0f}% no-vig, dal {MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA}')", flush=True)
+    print(f"Rilevatore feed statistiche bloccato: "
+          f"{'ATTIVO' if FEED_CONGELATO_ATTIVO else 'disattivo'} "
+          f"(avviso dopo {MINUTI_FEED_CONGELATO}' di gioco con risposta identica)", flush=True)
     print(f"Chiusura shadow-log a fine partita: "
           f"{'ATTIVA' if CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA else 'disattiva'} "
           f"(max {MAX_CHIUSURE_SHADOW_LOG_PER_CICLO} partite per ciclo)", flush=True)
@@ -2943,6 +2957,72 @@ def ha_statistiche_disponibili(stats):
                if s.get("type", "").lower() in STATISTICHE_USATE)
 
 
+def impronta_statistiche(stats):
+    """Impronta dell'INTERA risposta statistiche, non solo delle quattro voci che il bot usa.
+
+    E' il punto su cui regge tutto il rilevatore di feed bloccato. Tiri e corner possono benissimo
+    restare fermi per qualche minuto in una partita vera: con il ciclo da 3 minuti succede di
+    continuo, e infatti "nessun tiro cambiato" e' lo skip piu' frequente dei log. Possesso palla,
+    passaggi e falli invece non stanno mai fermi - cambiano ogni manciata di secondi.
+
+    Quindi: se e' identica anche quella parte, la risposta non descrive una partita ferma, e' la
+    stessa identica risposta di prima. Cioe' un feed che non si aggiorna. Che quei campi ci siano e
+    si muovano per conto loro e' gia' documentato in ha_statistiche_disponibili ("l'API pubblica i
+    dati generali prima di tiri e corner"), che proprio per questo li esclude dal suo controllo.
+
+    md5 e non hash(): l'impronta finisce in stato_partite, che viene salvato su disco e riletto
+    dopo un riavvio, e hash() sulle stringhe cambia ad ogni processo."""
+    if not stats or len(stats) < 2:
+        return None
+    parti = []
+    for lato in stats[:2]:
+        for voce in (lato.get("statistics") or []):
+            parti.append(f"{voce.get('type')}={voce.get('value')}")
+    if not parti:
+        return None
+    return hashlib.md5("|".join(parti).encode("utf-8")).hexdigest()
+
+
+def aggiorna_feed_congelato(fixture_id, stats, minuto, registra=True):
+    """Tiene il conto di da quanti minuti di gioco la risposta statistiche non cambia di una virgola.
+
+    Ritorna (congelato, minuti_fermo). Il conto e' in minuti di PARTITA, non di orologio: cosi'
+    l'intervallo non lo fa crescere (a meta' tempo il minuto non avanza) e il numero detto
+    all'utente e' quello che gli serve davvero.
+
+    registra=False per chi legge soltanto (i comandi come /status): non tocca stato_partite, cosi'
+    una consultazione non sposta il conteggio del ciclo live ne' crea uno stato per una partita che
+    il loop non segue nemmeno."""
+    if not FEED_CONGELATO_ATTIVO or minuto is None:
+        return False, 0
+    impronta = impronta_statistiche(stats)
+    if impronta is None:
+        return False, 0
+    stato = stato_partite.setdefault(fixture_id, {}) if registra else stato_partite.get(fixture_id, {})
+    if stato.get("impronta_stats") != impronta:
+        # Risposta nuova: il feed si e' mosso. Si riparte da qui, e un blocco successivo potra'
+        # essere segnalato di nuovo.
+        if registra:
+            stato["impronta_stats"] = impronta
+            stato["impronta_minuto"] = minuto
+            stato["feed_congelato_segnalato"] = False
+        return False, 0
+    fermo_dal_minuto = stato.get("impronta_minuto")
+    if fermo_dal_minuto is None:
+        if registra:
+            stato["impronta_minuto"] = minuto
+        return False, 0
+    minuti_fermo = max(0, minuto - fermo_dal_minuto)
+    return minuti_fermo >= MINUTI_FEED_CONGELATO, minuti_fermo
+
+
+def testo_feed_congelato(minuti_fermo, current_stats):
+    """Riga di avviso da mettere dove si mostrano statistiche che potrebbero essere ferme."""
+    tiri = current_stats.get("Tiri totali", (0, 0)) if current_stats else (0, 0)
+    return (f"\n\n🧊 ATTENZIONE: l'API non aggiorna queste statistiche da {minuti_fermo}' di gioco "
+            f"(ferme su Tiri {tiri[0]}-{tiri[1]}). I numeri qui sopra sono probabilmente vecchi.")
+
+
 def estrai_current_stats(stats_home, stats_away):
     """Le 4 statistiche (casa, trasferta) usate ovunque nel bot: tiri totali, tiri in porta,
     corner, tiri in area. Chi non usa "Tiri in area" può semplicemente ignorare quella chiave."""
@@ -4108,6 +4188,13 @@ def cmd_status(chat_id, query):
             cc, co = current_stats["Corner"]
             ta, tao = current_stats["Tiri in area"]
             stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
+            # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
+            # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
+            # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
+            congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
+                fid, stats, minuto, registra=False)
+            if congelato_status:
+                stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
 
         intensita_text = ""
         if current_stats:
@@ -6868,6 +6955,30 @@ def processa_partita(fixture, notifiche_attive=True):
             tiri_area_casa, tiri_area_ospite = current_stats["Tiri in area"]
             xg_casa, xg_ospite = estrai_xg(stats_home), estrai_xg(stats_away)
             log(f"    📊 Statistiche: Tiri {tiri_casa}-{tiri_ospite} | Porta {tiri_p_casa}-{tiri_p_ospite} | Corner {corner_casa}-{corner_ospite} | Area {tiri_area_casa}-{tiri_area_ospite}")
+
+            # Feed bloccato (vedi impronta_statistiche): l'API risponde, ma con la stessa identica
+            # risposta di prima mentre la partita va avanti. Senza dirlo, la partita si spegne da
+            # sola con "nessun tiro cambiato" e non arriva mai in chat: e' quello che il 23/08 ha
+            # tenuto fuori Venezia-Lecce, ferma su 3-0 dal 24' al 44' mentre era davvero 7-1.
+            # Un avviso solo per blocco, non ad ogni ciclo.
+            feed_congelato, minuti_feed_fermo = aggiorna_feed_congelato(fixture_id, stats, minuto)
+            if feed_congelato and not stato_partite[fixture_id].get("feed_congelato_segnalato"):
+                stato_partite[fixture_id]["feed_congelato_segnalato"] = True
+                log(f"    🧊 Feed statistiche bloccato da {minuti_feed_fermo}' di gioco "
+                    f"(fermo su Tiri {tiri_casa}-{tiri_ospite})")
+                if notifiche_attive and str(fixture_id) not in SILENCED_MATCHES:
+                    invia_messaggio_telegram(
+                        f"🧊 STATISTICHE BLOCCATE\n"
+                        f"{home} vs {away}\n"
+                        f"{formatta_lega(league_name, league_country)}\n"
+                        f"{minuto}' | {score_home} - {score_away}\n\n"
+                        f"L'API non aggiorna le statistiche di questa partita da "
+                        f"{minuti_feed_fermo}' di gioco: ferme su Tiri {tiri_casa}-{tiri_ospite}, "
+                        f"Porta {tiri_p_casa}-{tiri_p_ospite}, Corner {corner_casa}-{corner_ospite}.\n\n"
+                        f"Il bot non può valutarla finché il feed non riparte: se ti interessa, "
+                        f"controllala a mano.",
+                        chat_id=(TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES
+                                 else TELEGRAM_CHAT_ID))
 
             # Storico NON potato (a differenza di STATUS_HISTORY in cmd_status): serve per intero a
             # /momentum per disegnare l'andamento su tutta la partita, non solo il blocco di 15 min
