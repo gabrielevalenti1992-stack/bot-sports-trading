@@ -2,6 +2,7 @@ import collections
 import hashlib
 import json
 import re
+import traceback
 import unicodedata
 import time
 import datetime
@@ -1661,7 +1662,19 @@ def poll_callbacks():
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             r = requests.get(url, params={"offset": offset, "limit": 10}, timeout=10)
-            updates = r.json().get("result", [])
+            # Se Telegram restituisce 5xx o 429 (rate-limit), il corpo e' HTML/testo
+            # e r.json() lancia ValueError. Meglio distinguere HTTP errore da JSON
+            # malformato: cosi' il log dice cosa e' successo davvero, invece di
+            # "JSONDecodeError" opaco.
+            if not r.ok:
+                log(f"getUpdates HTTP {r.status_code}: {r.text[:200]}")
+                updates = []
+            else:
+                try:
+                    updates = r.json().get("result", [])
+                except ValueError:
+                    log(f"getUpdates risposta non-JSON: {r.text[:200]}")
+                    updates = []
             for upd in updates:
                 offset = upd["update_id"] + 1
                 # Salvato SUBITO, prima di eseguire l'azione: se il processo viene ucciso a
@@ -1921,7 +1934,7 @@ def poll_callbacks():
                     elif cmd == "/uptime":
                         esegui_comando_sicuro(chat_id, cmd_uptime)
         except Exception as e:
-            log(f"Errore poll callback: {e}")
+            log(f"Errore poll callback: {e}\n{traceback.format_exc()}")
         time.sleep(5)
 
 callback_thread = threading.Thread(target=poll_callbacks, daemon=True)
