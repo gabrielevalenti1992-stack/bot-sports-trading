@@ -367,6 +367,16 @@ SOGLIA_QUOTA_DOMINIO_NOTIFICA = 65
 # "Non sta vincendo" comprende il pareggio, non solo la sconfitta: per una squadra data al 75%+ un
 # pareggio e' gia' un risultato che il mercato non aveva messo in conto.
 FAVORITA_IN_DIFFICOLTA_ATTIVO = True
+
+# Silenzio finche' l'API non pubblica le statistiche di una partita (motivazione estesa in testa a
+# deve_notificare). La partita resta seguita e continua ad alimentare gli shadow-log: sparisce solo
+# dalla chat, e ci torna da sola appena arrivano i primi dati.
+SILENZIO_SENZA_STATISTICHE_ATTIVO = True
+
+# Lo scarto goleada blocca anche i gol (motivazione estesa in testa a deve_notificare): a
+# SOGLIA_GOLEADA_STOP_NOTIFICHE+1 gol di distanza la partita e' decisa, e sapere quale gol l'ha
+# decisa non cambia niente di operativo.
+GOLEADA_BLOCCA_ANCHE_I_GOL = True
 SOGLIA_PROB_FAVORITA = 0.75   # probabilita' no-vig pre-match per considerarla favorita netta
 MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = 30
 
@@ -742,6 +752,8 @@ try:
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
     FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
+    SILENZIO_SENZA_STATISTICHE_ATTIVO = config.get("silenzio_senza_statistiche_attivo", SILENZIO_SENZA_STATISTICHE_ATTIVO)
+    GOLEADA_BLOCCA_ANCHE_I_GOL = config.get("goleada_blocca_anche_i_gol", GOLEADA_BLOCCA_ANCHE_I_GOL)
     SOGLIA_PROB_FAVORITA = config.get("soglia_prob_favorita", SOGLIA_PROB_FAVORITA)
     MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = config.get("minuto_minimo_favorita_in_difficolta", MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA)
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
@@ -787,6 +799,11 @@ try:
     print(f"Gate dominio notifiche generali: {'ATTIVO' if DOMINIO_GATE_NOTIFICHE_ATTIVO else 'disattivo'} "
           f"(quota >= {SOGLIA_QUOTA_DOMINIO_NOTIFICA}%) | messaggio live preferiti: "
           f"{'ATTIVO' if MESSAGGIO_LIVE_PREFERITI_ATTIVO else 'disattivo'}", flush=True)
+    print(f"Silenzio senza statistiche: "
+          f"{'ATTIVO' if SILENZIO_SENZA_STATISTICHE_ATTIVO else 'disattivo'} | goleada oltre "
+          f"{SOGLIA_GOLEADA_STOP_NOTIFICHE} gol di scarto: "
+          f"{'blocca anche i gol' if GOLEADA_BLOCCA_ANCHE_I_GOL else 'i gol passano lo stesso'}",
+          flush=True)
     print(f"Favorita che non vince: {'ATTIVA' if FAVORITA_IN_DIFFICOLTA_ATTIVO else 'disattiva'} "
           f"(favorita dal {SOGLIA_PROB_FAVORITA * 100:.0f}% no-vig, dal {MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA}')", flush=True)
     print(f"Backoff statistiche assenti: "
@@ -6249,10 +6266,54 @@ def motivo_valutazione_notifica(fixture_id):
 
 def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None, gol_appena_segnato=False, recupero_lungo=False, score_home=None, score_away=None,
                     current_stats=None):
+    # SILENZIO FINCHE' L'API NON PUBBLICA LE STATISTICHE DI QUESTA PARTITA.
+    #
+    # Sta prima di tutto il resto, gol compresi, ed e' l'unica cosa che passa davanti a un evento
+    # forzato: senza tiri, tiri in porta, corner e area la notifica dice "Statistiche: N/D - N/D" e
+    # non puo' far scattare nessuna strategia. E' una riga di risultato, che si trova ovunque, non
+    # il motivo per cui questo bot esiste.
+    #
+    # Il 23/08 la chat si e' riempita cosi': Bahlinger SC-Magdeburg 0-1 all'8', BSC Young Boys-Vaduz
+    # 4-2 all'89', tutte le partite di DFB Pokal fra dilettanti e squadre di Bundesliga - notifiche
+    # arrivate solo perche' un gol passa sempre, e tutte senza un solo dato utile dentro.
+    #
+    # "Nascosta" non vuol dire "persa": la partita resta seguita e continua ad alimentare gli
+    # shadow-log (valore, strategie, auto-preferiti), che girano piu' in alto in processa_partita e
+    # non passano di qui. Appena l'API pubblica le prime statistiche la partita torna a notificare
+    # normalmente, e i gol nel frattempo non sono spariti - sono nel testo della prima notifica
+    # utile, con il minuto e il marcatore.
+    if SILENZIO_SENZA_STATISTICHE_ATTIVO and not current_stats:
+        return _verdetto_notifica(
+            fixture_id, False,
+            "statistiche non pubblicate: partita seguita in silenzio, solo shadow-log")
+
+    # GOLEADA, PRIMA ANCORA DEL GOL.
+    #
+    # Oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto la partita perde valore per il trading e si
+    # smette di notificarla del tutto, preferiti compresi.
+    #
+    # Il 23/08 PSV Eindhoven-Groningen e' arrivata in chat sul 5-1: il gol del 56' aveva appena
+    # portato lo scarto da 3 a 4, e i gol passavano davanti a questo controllo. La regola scritta
+    # allora diceva che quel gol e' "l'evento che ha creato la goleada" e quindi meritava di
+    # passare. Per un bot di trading non regge: a quattro gol di scarto la partita e' decisa, e
+    # sapere quale gol l'ha decisa non cambia niente di quello che si puo' fare. Con
+    # GOLEADA_BLOCCA_ANCHE_I_GOL spento si torna al comportamento di prima e il gol passa.
+    #
+    # Il pareggio NON ha un trattamento speciale: segue le regole di sempre piu' sotto. Il risultato
+    # finale arriva comunque a fine partita: e' un messaggio a parte e non passa di qui.
+    if score_home is not None and score_away is not None:
+        diff_gol = abs(score_home - score_away)
+        evento_forzato = gol_appena_segnato or recupero_lungo
+        if diff_gol > SOGLIA_GOLEADA_STOP_NOTIFICHE and (GOLEADA_BLOCCA_ANCHE_I_GOL
+                                                         or not evento_forzato):
+            return _verdetto_notifica(
+                fixture_id, False,
+                f"goleada: {diff_gol} gol di scarto (oltre {SOGLIA_GOLEADA_STOP_NOTIFICHE})"
+                + (", gol compresi" if evento_forzato else ""))
+
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
-    # passare). Un gol resta notificato anche se porta la partita in goleada (regola sotto): è
-    # l'evento che ha creato la goleada, non uno dei tanti aggiornamenti successivi ormai inutili.
+    # passare).
     if gol_appena_segnato or recupero_lungo:
         return _verdetto_notifica(
             fixture_id, True,
@@ -6272,16 +6333,6 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         return _verdetto_notifica(
             fixture_id, False,
             f"nessun tiro cambiato dall'ultimo controllo (fermi a {tiri_casa}-{tiri_ospite})")
-
-    # Goleada: oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto la partita perde valore per il
-    # trading, si smette di notificarla del tutto (preferiti compresi). Il pareggio NON ha un
-    # trattamento speciale: segue le stesse regole di sempre qui sotto (normali o preferiti).
-    if score_home is not None and score_away is not None:
-        diff_gol = abs(score_home - score_away)
-        if diff_gol > SOGLIA_GOLEADA_STOP_NOTIFICHE:
-            return _verdetto_notifica(
-                fixture_id, False,
-                f"goleada: {diff_gol} gol di scarto (oltre {SOGLIA_GOLEADA_STOP_NOTIFICHE})")
 
     # Preferiti: molto più reattivi delle altre partite (bypassano le soglie sotto), ma non per il
     # minimo indivisibile: serve un cambiamento comunque percepibile dall'ultimo invio. Con il
