@@ -453,6 +453,14 @@ SHADOW_LOG_AUTO_PREFERITI_DOMINIO_FILE = data_path("shadow_log_auto_preferiti_do
 # semaforo finché non ci sono abbastanza partite reali per calibrarli (vedi Fase 2).
 SHADOW_LOG_VALORE_FILE = data_path("shadow_log_valore.jsonl")
 
+# Chiusura degli shadow-log delle partite sparite dal feed live (motivazione estesa in
+# chiudi_shadow_log_partite_sparite): senza, gli snapshot raccolti durante la partita restano
+# orfani per sempre, ed e' esattamente cio' che era successo - 642 partite con snapshot e ZERO
+# risultati finali.
+CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = True
+MAX_CHIUSURE_SHADOW_LOG_PER_CICLO = 10  # tetto: quando finisce un turno intero non si ammassano chiamate
+TENTATIVI_MAX_CHIUSURA_SHADOW_LOG = 3   # oltre si rinuncia: meglio perdere una partita che riprovare per sempre
+
 # Shadow-log strategie: stesso principio, ma per le sei strategie (Assedio, Fascia calda,
 # Rimonta, Concretezza, xG per tiro, Qualità - non più comandi Telegram, solo logica interna).
 # Ad ogni ciclo (stesso ritmo dello snapshot valore sopra, dati
@@ -753,6 +761,7 @@ try:
     BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
     FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
     SILENZIO_SENZA_STATISTICHE_ATTIVO = config.get("silenzio_senza_statistiche_attivo", SILENZIO_SENZA_STATISTICHE_ATTIVO)
+    CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = config.get("chiusura_shadow_log_partite_sparite_attiva", CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA)
     GOLEADA_BLOCCA_ANCHE_I_GOL = config.get("goleada_blocca_anche_i_gol", GOLEADA_BLOCCA_ANCHE_I_GOL)
     SOGLIA_PROB_FAVORITA = config.get("soglia_prob_favorita", SOGLIA_PROB_FAVORITA)
     MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA = config.get("minuto_minimo_favorita_in_difficolta", MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA)
@@ -806,6 +815,9 @@ try:
           flush=True)
     print(f"Favorita che non vince: {'ATTIVA' if FAVORITA_IN_DIFFICOLTA_ATTIVO else 'disattiva'} "
           f"(favorita dal {SOGLIA_PROB_FAVORITA * 100:.0f}% no-vig, dal {MINUTO_MINIMO_FAVORITA_IN_DIFFICOLTA}')", flush=True)
+    print(f"Chiusura shadow-log a fine partita: "
+          f"{'ATTIVA' if CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA else 'disattiva'} "
+          f"(max {MAX_CHIUSURE_SHADOW_LOG_PER_CICLO} partite per ciclo)", flush=True)
     print(f"Backoff statistiche assenti: "
           f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}", flush=True)
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
@@ -2352,6 +2364,11 @@ def get_partite_live():
 # sapere in anticipo in quali fasce orarie vale la pena interrogare live=all a ritmo sostenuto.
 # =============================================================================
 STATUS_NON_LIVE_FUTURI = {"PST", "CANC", "ABD", "AWD", "WO"}  # rinviata/annullata/a tavolino: mai live
+
+# Stati in cui la partita e' davvero finita. AWD/WO restano fuori di proposito (sono sopra, fra i
+# "mai live"): un risultato assegnato a tavolino non e' una partita giocata, e non e' un esito da
+# cui lo shadow-log possa imparare qualcosa.
+STATI_PARTITA_CONCLUSA = {"FT", "AET", "PEN"}
 
 # Tempi regolamentari (90') finiti in parità, partita di coppa proseguita a supplementari/rigori:
 # BT = pausa tra 2°T e supplementari (o tra i due tempi supplementari), ET = supplementari in
@@ -6211,6 +6228,104 @@ def registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, 
     })
 
 
+def recupera_esito_finale_fixture(fixture_id):
+    """Stato e punteggio finale di UNA partita, con una chiamata mirata /fixtures?id=X.
+
+    Serve per le partite sparite dall'elenco live: quell'endpoint smette di restituirle appena
+    finiscono, quindi chiederlo esplicitamente e' l'unico modo per sapere com'e' andata.
+
+    Ritorna (conclusa, score_home, score_away), oppure None se la CHIAMATA e' fallita. I due casi
+    vanno tenuti distinti: "non conclusa" e' una risposta valida (partita sospesa, rinviata,
+    fixture sconosciuto) e non c'e' niente da registrare, mentre una chiamata fallita merita un
+    altro tentativo - confonderle butterebbe via il campione al primo rate-limit."""
+    if not API_FOOTBALL_KEY:
+        return None
+    data, _, _ = get_api_football(
+        "https://v3.football.api-sports.io/fixtures", {"id": fixture_id}, timeout=15,
+        contesto=f"recupera_esito_finale_fixture({fixture_id})")
+    if data is None:
+        return None
+    risposta = data.get("response") or []
+    if not risposta:
+        return False, None, None
+    fixture_info = risposta[0].get("fixture") or {}
+    if (fixture_info.get("status") or {}).get("short") not in STATI_PARTITA_CONCLUSA:
+        return False, None, None
+    goals = risposta[0].get("goals") or {}
+    score_home, score_away = goals.get("home"), goals.get("away")
+    if score_home is None or score_away is None:
+        return False, None, None
+    return True, score_home, score_away
+
+
+def _shadow_log_ha_snapshot_aperti(fixture_id):
+    """True se questa partita ha snapshot registrati ma non ancora il suo risultato finale."""
+    stato = stato_partite.get(fixture_id, {})
+    if stato.get("notified_final"):
+        return False  # gia' chiusa dal ramo di fine partita dentro processa_partita
+    return bool(stato.get("ultimo_snapshot_valore") or stato.get("ultimo_snapshot_strategie"))
+
+
+def chiudi_shadow_log_partite_sparite(fixture_ids):
+    """Scrive il "risultato_finale" delle partite appena sparite dal feed live.
+
+    L'esito veniva registrato SOLO dentro processa_partita, nel ramo
+    `status_short in STATI_PARTITA_CONCLUSA`. Ma processa_partita vede soltanto cio' che
+    l'endpoint live restituisce, e una partita finita da quell'elenco sparisce e basta: quel ramo
+    in produzione non scattava quasi mai. I numeri del 23/08 non lasciano dubbi - 642 partite con
+    snapshot e ZERO risultati finali nello shadow-log valore, con "RISULTATO FINALE" mai comparso
+    in due giorni interi di log mentre "Partite terminate rimosse" compariva decine di volte.
+
+    Senza l'esito gli snapshot non valgono nulla: esistono proprio per essere incrociati con come
+    la partita e' finita davvero. Qui il cerchio si chiude, subito prima che
+    pulisci_partite_terminate cancelli lo stato, e solo per le partite che hanno snapshot aperti.
+
+    Ritorna gli id da NON cancellare in questo giro: quelli oltre il tetto di chiamate e quelli la
+    cui chiamata e' fallita ma ha ancora tentativi disponibili. Restano in stato_partite e si
+    riprovano al ciclo dopo, invece di sparire portandosi via il campione."""
+    if not CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA:
+        return set()
+
+    da_chiudere = [fid for fid in fixture_ids if _shadow_log_ha_snapshot_aperti(fid)]
+    if not da_chiudere:
+        return set()
+
+    rimandate, chiuse = set(), 0
+    for indice, fid in enumerate(da_chiudere):
+        if indice >= MAX_CHIUSURE_SHADOW_LOG_PER_CICLO:
+            rimandate.update(da_chiudere[indice:])
+            break
+        if indice:
+            time.sleep(1)  # stesso ritmo del loop live: mai piu' chiamate nello stesso secondo
+        esito = recupera_esito_finale_fixture(fid)
+        if esito is None:
+            stato = stato_partite.setdefault(fid, {})
+            tentativi = stato.get("tentativi_chiusura_shadow_log", 0) + 1
+            stato["tentativi_chiusura_shadow_log"] = tentativi
+            if tentativi < TENTATIVI_MAX_CHIUSURA_SHADOW_LOG:
+                rimandate.add(fid)
+            else:
+                log(f"    Shadow-log: rinuncio a chiudere la partita {fid} dopo {tentativi} tentativi falliti")
+            continue
+        conclusa, score_home, score_away = esito
+        if not conclusa:
+            continue  # sospesa, rinviata o sconosciuta: nessun esito reale da registrare
+        registra_shadow_log_valore_risultato(fid, score_home, score_away)
+        # I gol servono allo shadow-log strategie per sapere QUANDO e' arrivato il gol dopo un
+        # segnale, non solo com'e' finita: e' il dato per cui quel file esiste, e vale la seconda
+        # chiamata. Se gli eventi non arrivano si registra lo stesso con la lista vuota - il
+        # risultato finale e' comunque meglio di un altro snapshot orfano.
+        eventi = fetch_fixture_events(fid)
+        registra_shadow_log_strategie_risultato(
+            fid, score_home, score_away, extract_goals(eventi) if eventi else [])
+        chiuse += 1
+
+    if chiuse or rimandate:
+        log(f"Shadow-log chiusi a fine partita: {chiuse}"
+            + (f" ({len(rimandate)} rimandati al prossimo ciclo)" if rimandate else ""))
+    return rimandate
+
+
 def classifica_cambio_punteggio(fixture_id, score_home, score_away):
     """Confronta il punteggio appena letto dall'API con quello dell'ultimo ciclo per questa
     partita, e ritorna (gol_appena_segnato, punteggio_corretto_al_ribasso).
@@ -6831,7 +6946,7 @@ def processa_partita(fixture, notifiche_attive=True):
                         stato_partite[fixture_id]["verdetto_lega_registrato"] = True
                         registra_esito_statistiche(league_country, league_name, False)
 
-        if status_short in ("FT", "AET", "PEN"):
+        if status_short in STATI_PARTITA_CONCLUSA:
             stato = stato_partite.get(fixture_id, {})
             if not stato.get("notified_final"):
                 muted_data = SILENCED_MATCHES.get(str(fixture_id))
@@ -7471,6 +7586,13 @@ def processa_partita(fixture, notifiche_attive=True):
 
 def pulisci_partite_terminate(fixture_ids_live):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
+    # Prima di cancellare lo stato: chi ha snapshot aperti va chiuso con il suo risultato finale,
+    # altrimenti tutto il campione raccolto durante la partita resta orfano per sempre. Le partite
+    # rimandate (tetto di chiamate raggiunto, o chiamata fallita) NON si cancellano: restano qui e
+    # si riprovano al giro dopo.
+    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere)
+    if rimandate:
+        ids_da_rimuovere = [fid for fid in ids_da_rimuovere if fid not in rimandate]
     for fid in ids_da_rimuovere:
         # Nessun messaggio di fine partita
         SILENCED_MATCHES.pop(str(fid), None)

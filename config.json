@@ -23,6 +23,7 @@
   "backoff_statistiche_assenti_attivo": true,
   "favorita_in_difficolta_attivo": true,
   "silenzio_senza_statistiche_attivo": true,
+  "chiusura_shadow_log_partite_sparite_attiva": true,
   "goleada_blocca_anche_i_gol": true,
   "soglia_prob_favorita": 0.75,
   "minuto_minimo_favorita_in_difficolta": 30,
