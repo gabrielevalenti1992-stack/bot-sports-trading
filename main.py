@@ -4610,9 +4610,9 @@ def cmd_momentum(chat_id, query):
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
-        home = f.get("teams", {}).get("home", {}).get("name", "").lower()
-        away = f.get("teams", {}).get("away", {}).get("name", "").lower()
-        if query in home or query in away or home in query or away in query:
+        home = f.get("teams", {}).get("home", {}).get("name", "")
+        away = f.get("teams", {}).get("away", {}).get("name", "")
+        if _nomi_squadra_matchano(query, home) or _nomi_squadra_matchano(query, away):
             trovate.append(f)
     if not trovate:
         requests.post(
@@ -4621,14 +4621,34 @@ def cmd_momentum(chat_id, query):
         return
 
     for f in trovate:
-        fid = f["fixture"]["id"]
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-        league = f.get("league", {}).get("name", "")
-        minuto = f["fixture"]["status"].get("elapsed") or 0
-        score_h = f["goals"]["home"] or 0
-        score_a = f["goals"]["away"] or 0
-        invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a)
+        # Stesso isolamento errori di cmd_status: se cerchi "man" e ci sono sia City
+        # che United, un fallimento su una (API stats vuote, sendPhoto rifiutato,
+        # grafico non generato) non deve interrompere il ciclo prima che l'altra
+        # venga inviata.
+        try:
+            fid = f["fixture"]["id"]
+            home = f["teams"]["home"]["name"]
+            away = f["teams"]["away"]["name"]
+            league = f.get("league", {}).get("name", "")
+            minuto = f["fixture"]["status"].get("elapsed") or 0
+            score_h = f["goals"]["home"] or 0
+            score_a = f["goals"]["away"] or 0
+            invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, score_a)
+        except Exception as e:
+            squadre_id = (
+                f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
+                f"{f.get('teams', {}).get('away', {}).get('name', '?')}"
+            )
+            log(f"Errore /momentum per {squadre_id}: {e}\n{traceback.format_exc()}")
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": f"Errore nel momentum di {squadre_id}. Le altre partite trovate proseguono."
+                    }, timeout=5)
+            except Exception:
+                pass
 
 
 def _invia_reply_con_fallback(chat_id, text, reply_to_message_id, contesto):
@@ -6172,14 +6192,17 @@ def aggiorna_storico_minutaggi_automatico():
 
 
 def trova_squadra_in_storico(nome_query):
-    """Cerca una squadra per nome (case-insensitive, match parziale) tra tutte le leghe salvate
-    nello storico. In caso di più corrispondenze sceglie quella con più partite giocate."""
-    query = nome_query.lower().strip()
+    """Cerca una squadra per nome tra tutte le leghe salvate nello storico. Usa lo stesso
+    matching di /status (accenti, sigle, abbreviazioni, alias noti) via _nomi_squadra_matchano,
+    cosi' /analisi Milan - Juve e la sezione grafico di /status accettano le stesse forme brevi.
+    In caso di piu' corrispondenze sceglie quella con piu' partite giocate."""
+    if not nome_query or not nome_query.strip():
+        return None
     candidati = []
     for lega_dati in STORICO_MINUTAGGI.values():
         for squadra in lega_dati.get("squadre", {}).values():
             nome = squadra.get("nome", "")
-            if query in nome.lower() or nome.lower() in query:
+            if _nomi_squadra_matchano(nome_query, nome):
                 partite_totali = squadra["casa"]["partite"] + squadra["trasferta"]["partite"]
                 candidati.append((partite_totali, squadra))
     if not candidati:
