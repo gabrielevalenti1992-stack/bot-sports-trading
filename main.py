@@ -4319,6 +4319,98 @@ def cmd_funzioni(chat_id):
         json={"chat_id": chat_id, "text": parte2}, timeout=5)
 
 
+# Abbreviazioni comuni delle squadre di calcio: la chiave e' la forma corta (lowercase,
+# senza accenti), il valore e' l'espansione. Serve a matchare "Man Utd" con "Manchester
+# United", "Ath Bilbao" con "Athletic Bilbao", ecc. I prefissi/suffissi societari
+# (FC, AC, SC, ...) sono mappati a stringa vuota cosi' vengono ignorati nel match:
+# l'utente puo' chiedere "milan" e trovare "AC Milan".
+ABBREVIAZIONI_SQUADRE = {
+    "utd": "united",
+    "ath": "athletic",
+    "atl": "atletico",
+    "wolves": "wolverhampton",
+    "brgh": "brighton",
+    "psg": "paris saint germain",
+    "juve": "juventus",
+    "fc": "",
+    "ac": "",
+    "cf": "",
+    "sc": "",
+    "sk": "",
+    "afc": "",
+    "cfc": "",
+    "fk": "",
+}
+
+
+def _normalizza_nome_squadra(testo):
+    """Toglie accenti (unicode NFKD), converte in lowercase e comprime gli spazi.
+    Cosi' "Málaga" e "malaga" diventano la stessa stringa, e la query utente non deve
+    replicare esattamente i caratteri accentati che l'API restituisce."""
+    if not testo:
+        return ""
+    testo_norm = unicodedata.normalize("NFKD", testo)
+    testo_norm = "".join(c for c in testo_norm if not unicodedata.combining(c))
+    return " ".join(testo_norm.lower().split())
+
+
+def _sigla_squadra(nome_normalizzato):
+    """Prime lettere di ogni parola (split su spazi/trattini/punti). 'paris saint-germain'
+    -> 'psg'. Serve a matchare la sigla comune (PSG, RCD, ecc.) col nome per esteso."""
+    parole = re.split(r"[\s\-\.]+", nome_normalizzato)
+    return "".join(p[0] for p in parole if p)
+
+
+def _nomi_squadra_matchano(query, nome_squadra):
+    """Ritorna True se la query dell'utente identifica la squadra. Quattro strategie
+    provate in cascata (dalla piu' precisa alla piu' fuzzy):
+    1) sottostringa in entrambe le direzioni sui nomi normalizzati (accenti eliminati)
+    2) sigla: query == prime lettere delle parole del nome (es. 'psg' vs 'Paris Saint-Germain')
+    3) token-based: ogni token della query (>=2 char) e' prefisso di un token del nome
+       (es. 'man city' vs 'manchester city')
+    4) alias noti: sostituisce 'utd'->'united', 'ath'->'athletic', droppa 'fc'/'ac',
+       poi ritenta il substring match
+
+    Le strategie 2 e 3 richiedono almeno 2 caratteri per token per evitare match troppo
+    permissivi (una singola lettera matcherebbe qualunque cosa). Il comportamento della
+    strategia 1 e' invece identico a prima (case-insensitive) piu' l'accento-agnosticita'."""
+    if not query or not nome_squadra:
+        return False
+    q = _normalizza_nome_squadra(query)
+    n = _normalizza_nome_squadra(nome_squadra)
+    if not q or not n:
+        return False
+    if q in n or n in q:
+        return True
+    if len(q.replace(" ", "")) >= 2 and q.replace(" ", "") == _sigla_squadra(n):
+        return True
+    tokens_q = [t for t in q.split() if len(t) >= 2]
+    tokens_n = n.split()
+    if tokens_q and all(
+        any(tn.startswith(tq) for tn in tokens_n)
+        for tq in tokens_q
+    ):
+        return True
+    espansi_q = " ".join(
+        ABBREVIAZIONI_SQUADRE.get(t, t) for t in q.split()
+    )
+    espansi_q = " ".join(espansi_q.split())
+    if espansi_q and espansi_q != q:
+        if espansi_q in n or n in espansi_q:
+            return True
+        # Riprova anche il token-prefix sull'espansione: "man utd" -> "man united",
+        # cosi' matcha "Manchester United" (dove "united" == "united" e "man" prefisso di
+        # "manchester"). Senza questo, l'alias 'utd'->'united' fallirebbe perche' "man
+        # united" non e' sottostringa di "manchester united".
+        tokens_esp = [t for t in espansi_q.split() if len(t) >= 2]
+        if tokens_esp and all(
+            any(tn.startswith(te) for tn in tokens_n)
+            for te in tokens_esp
+        ):
+            return True
+    return False
+
+
 def cmd_status(chat_id, query):
     """/status <squadra>: info live sulla partita trovata, statistiche totali casa/trasferta,
     intensità (ultimi 15 min) calcolata solo per questa partita — funziona anche su partite fuori
@@ -4327,9 +4419,9 @@ def cmd_status(chat_id, query):
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
-        home = f.get("teams", {}).get("home", {}).get("name", "").lower()
-        away = f.get("teams", {}).get("away", {}).get("name", "").lower()
-        if query in home or query in away or home in query or away in query:
+        home = f.get("teams", {}).get("home", {}).get("name", "")
+        away = f.get("teams", {}).get("away", {}).get("name", "")
+        if _nomi_squadra_matchano(query, home) or _nomi_squadra_matchano(query, away):
             trovate.append(f)
     if not trovate:
         requests.post(
@@ -4337,100 +4429,122 @@ def cmd_status(chat_id, query):
             json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
         return
     for f in trovate:
-        fid = f["fixture"]["id"]
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-        league = f.get("league", {}).get("name", "")
-        minuto = f["fixture"]["status"].get("elapsed") or 0
-        score_h = f["goals"]["home"] or 0
-        score_a = f["goals"]["away"] or 0
+        # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
+        # un fallimento su una (API 5xx, timeout del grafico, sendPhoto rifiutato) non
+        # deve piu' interrompere il ciclo prima che l'altra venga inviata. In caso di
+        # errore mando un avviso breve identificando la partita coinvolta, cosi' chi
+        # ha chiesto /status vede che una e' saltata invece di ricevere una risposta
+        # muta senza sapere perche' manca.
+        try:
+            fid = f["fixture"]["id"]
+            home = f["teams"]["home"]["name"]
+            away = f["teams"]["away"]["name"]
+            league = f.get("league", {}).get("name", "")
+            minuto = f["fixture"]["status"].get("elapsed") or 0
+            score_h = f["goals"]["home"] or 0
+            score_a = f["goals"]["away"] or 0
 
-        stats = get_statistiche_partita(fid)
-        stats_text = ""
-        current_stats = None
-        if stats and len(stats) >= 2:
-            sh = stats[0].get("statistics", [])
-            sa = stats[1].get("statistics", [])
-            current_stats = estrai_current_stats(sh, sa)
-            tc, to = current_stats["Tiri totali"]
-            tp, tpo = current_stats["Tiri in porta"]
-            cc, co = current_stats["Corner"]
-            ta, tao = current_stats["Tiri in area"]
-            stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
-            # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
-            # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
-            # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
-            congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
-                fid, stats, minuto, registra=False)
-            if congelato_status:
-                stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
+            stats = get_statistiche_partita(fid)
+            stats_text = ""
+            current_stats = None
+            if stats and len(stats) >= 2:
+                sh = stats[0].get("statistics", [])
+                sa = stats[1].get("statistics", [])
+                current_stats = estrai_current_stats(sh, sa)
+                tc, to = current_stats["Tiri totali"]
+                tp, tpo = current_stats["Tiri in porta"]
+                cc, co = current_stats["Corner"]
+                ta, tao = current_stats["Tiri in area"]
+                stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
+                # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
+                # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
+                # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
+                congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
+                    fid, stats, minuto, registra=False)
+                if congelato_status:
+                    stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
 
-        intensita_text = ""
-        if current_stats:
-            history = STATUS_HISTORY.get(fid, [])
-            history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
-            history = [h for h in history if time.time() - h["timestamp"] <= 1200]
-            STATUS_HISTORY[fid] = history
+            intensita_text = ""
+            if current_stats:
+                history = STATUS_HISTORY.get(fid, [])
+                history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
+                history = [h for h in history if time.time() - h["timestamp"] <= 1200]
+                STATUS_HISTORY[fid] = history
 
-            delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats, minuto)
-            if is_real:
-                punteggio = calcola_indice_intensita(delta_stats)
-                motivazioni = descrivi_motivazioni_intensita(delta_stats)
-                d_tiri = delta_stats.get("Tiri totali", (0, 0))
-                intensita_text = (
-                    f"\n\nIntensità (ultimi 15 min) di questa partita: {punteggio:.1f} pt\n"
-                    f"Casa {d_tiri[0]} - {d_tiri[1]} Fuori | {motivazioni}"
+                delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats, minuto)
+                if is_real:
+                    punteggio = calcola_indice_intensita(delta_stats)
+                    motivazioni = descrivi_motivazioni_intensita(delta_stats)
+                    d_tiri = delta_stats.get("Tiri totali", (0, 0))
+                    intensita_text = (
+                        f"\n\nIntensità (ultimi 15 min) di questa partita: {punteggio:.1f} pt\n"
+                        f"Casa {d_tiri[0]} - {d_tiri[1]} Fuori | {motivazioni}"
+                    )
+                else:
+                    intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
+
+            events = fetch_fixture_events(fid)
+            goals = extract_goals(events)
+            goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
+            # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
+            # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
+            # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
+            _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
+                current_stats, score_h, score_a, events, home, away)
+            if _indietro_status:
+                stats_text += riga_ritardo_status.rstrip()
+            last_text = ""
+            if goals:
+                last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
+
+            msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
+
+            squadra_casa = trova_squadra_in_storico(home)
+            squadra_trasferta = trova_squadra_in_storico(away)
+            foto_path = None
+            if (squadra_casa and squadra_casa["casa"]["partite"] > 0
+                    and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
+                foto_path = genera_grafico_minutaggi(
+                    squadra_casa["nome"], squadra_casa["casa"],
+                    squadra_trasferta["nome"], squadra_trasferta["trasferta"]
                 )
-            else:
-                intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
 
-        events = fetch_fixture_events(fid)
-        goals = extract_goals(events)
-        goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
-        # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
-        # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
-        # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
-        _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
-            current_stats, score_h, score_a, events, home, away)
-        if _indietro_status:
-            stats_text += riga_ritardo_status.rstrip()
-        last_text = ""
-        if goals:
-            last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
-
-        msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
-
-        squadra_casa = trova_squadra_in_storico(home)
-        squadra_trasferta = trova_squadra_in_storico(away)
-        foto_path = None
-        if (squadra_casa and squadra_casa["casa"]["partite"] > 0
-                and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
-            foto_path = genera_grafico_minutaggi(
-                squadra_casa["nome"], squadra_casa["casa"],
-                squadra_trasferta["nome"], squadra_trasferta["trasferta"]
-            )
-
-        if foto_path and os.path.exists(foto_path):
-            try:
-                with open(foto_path, 'rb') as photo:
+            if foto_path and os.path.exists(foto_path):
+                try:
+                    with open(foto_path, 'rb') as photo:
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                            data={"chat_id": chat_id, "caption": msg_text},
+                            files={"photo": photo}, timeout=15)
+                except Exception as e:
+                    log(f"Errore invio grafico /status: {e}")
                     requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                        data={"chat_id": chat_id, "caption": msg_text},
-                        files={"photo": photo}, timeout=15)
-            except Exception as e:
-                log(f"Errore invio grafico /status: {e}")
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                finally:
+                    try:
+                        os.remove(foto_path)
+                    except Exception:
+                        pass
+            else:
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
-            finally:
-                try:
-                    os.remove(foto_path)
-                except Exception:
-                    pass
-        else:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+        except Exception as e:
+            squadre_id = (
+                f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
+                f"{f.get('teams', {}).get('away', {}).get('name', '?')}"
+            )
+            log(f"Errore /status per {squadre_id}: {e}\n{traceback.format_exc()}")
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": f"Errore nel recupero di {squadre_id}. Le altre partite trovate proseguono."
+                    }, timeout=5)
+            except Exception:
+                pass
 
 
 def spiega_momentum_insufficiente(history):
