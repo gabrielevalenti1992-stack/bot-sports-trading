@@ -221,6 +221,7 @@ if not CONFIG_VALIDA:
 
 # --- SOGLIE NOTIFICHE: da config.json (opzionale, fallback a valori default) ---
 DIFF_TIRI_SOGLIA = 3
+DELTA_DIFF_TIRI_SOGLIA = 2
 TIRI_TOTALI_ATTIVA = 6
 MINUTI_ATTIVA = 25
 INTERVALLO_FORZATO = 1800
@@ -759,6 +760,7 @@ try:
     with open(config_path, 'r') as f:
         config = json.load(f)
     DIFF_TIRI_SOGLIA = config.get("diff_tiri_soglia", DIFF_TIRI_SOGLIA)
+    DELTA_DIFF_TIRI_SOGLIA = config.get("delta_diff_tiri_soglia", DELTA_DIFF_TIRI_SOGLIA)
     TIRI_TOTALI_ATTIVA = config.get("tiri_totali_attiva", TIRI_TOTALI_ATTIVA)
     MINUTI_ATTIVA = config.get("minuti_attiva", MINUTI_ATTIVA)
     INTERVALLO_FORZATO = config.get("intervallo_forzato", INTERVALLO_FORZATO)
@@ -821,7 +823,7 @@ try:
     ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
     ORARIO_ATTIVO_FINE_MINUTO = config.get("orario_attivo_fine_minuto", ORARIO_ATTIVO_FINE_MINUTO)
     INTERVALLO_SNAPSHOT_VALORE = config.get("intervallo_snapshot_valore", INTERVALLO_SNAPSHOT_VALORE)
-    print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
+    print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, delta_diff={DELTA_DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
     print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} "
@@ -6970,10 +6972,23 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     diff = abs(tiri_casa - tiri_ospite)
     tempo_passato = time.time() - ultimo_invio
 
-    # Regola 1: Differenza tiri significativa
-    if diff >= DIFF_TIRI_SOGLIA:
-        return _verdetto_notifica(
-            fixture_id, True, f"Regola 1: differenza tiri {diff} (soglia {DIFF_TIRI_SOGLIA})")
+    # Regola 1: Differenza tiri in ACCELERAZIONE.
+    # Prima notifica: usa soglia assoluta (DIFF_TIRI_SOGLIA). Successive: scatta solo se
+    # la differenza cresce di almeno DELTA_DIFF_TIRI_SOGLIA rispetto all'ultima notifica.
+    # Motivo: la soglia assoluta ripetuta era di fatto disattivata dal freno "una notifica
+    # per blocco di 15 minuti", che nei blocchi iniziali viene occupato dai GOL.
+    if ultima_casa < 0 or ultima_ospite < 0:
+        if diff >= DIFF_TIRI_SOGLIA:
+            return _verdetto_notifica(
+                fixture_id, True,
+                f"Regola 1: differenza tiri {diff} (prima notifica, soglia {DIFF_TIRI_SOGLIA})")
+    else:
+        diff_precedente = abs(ultima_casa - ultima_ospite)
+        delta_diff = diff - diff_precedente
+        if diff >= DIFF_TIRI_SOGLIA and delta_diff >= DELTA_DIFF_TIRI_SOGLIA:
+            return _verdetto_notifica(
+                fixture_id, True,
+                f"Regola 1: differenza tiri accelerata da {diff_precedente} a {diff} (+{delta_diff}, soglia delta {DELTA_DIFF_TIRI_SOGLIA})")
 
     # Regola 2: Partita molto attiva nei primi 25 min
     if minuto <= MINUTI_ATTIVA and tiri_totali >= TIRI_TOTALI_ATTIVA:
