@@ -6980,8 +6980,15 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
         return _verdetto_notifica(
             fixture_id, True, f"Regola 2: {tiri_totali} tiri entro il {MINUTI_ATTIVA}'")
 
-    # Regola 3: Forzata ogni 30 min se abbastanza tiri
-    if tempo_passato >= INTERVALLO_FORZATO and tiri_totali >= 4:
+    # Regola 3: Forzata ogni 30 min se abbastanza tiri.
+    #
+    # Alla prima notifica di una partita, "timestamp_notifica" non e' mai stato scritto e il default
+    # e' 0 (epoch 1970). Senza la guardia esplicita "ultimo_invio > 0", tempo_passato diventa
+    # time.time() - 0 = ~1.7 mld di secondi e la Regola 3 scatta sempre con un messaggio nonsense
+    # tipo "refresh dopo 29793349 min dall'ultimo invio" (visto in produzione). Se non c'e' un
+    # invio precedente non c'e' nemmeno un "refresh": la prima notifica per una partita non-
+    # preferita deve arrivare da Regola 1/2/4 (differenza tiri, prima fase attiva, momentum).
+    if ultimo_invio > 0 and tempo_passato >= INTERVALLO_FORZATO and tiri_totali >= 4:
         return _verdetto_notifica(
             fixture_id, True,
             f"Regola 3: refresh dopo {int(tempo_passato / 60)} min dall'ultimo invio")
@@ -8194,6 +8201,30 @@ if __name__ == "__main__":
 
             partite = get_partite_live()
             chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
+            # Deduplicazione per fixture_id: l'API a volte restituisce la stessa partita due volte
+            # nello stesso payload live (osservato 3 volte in 48h di log produzione), e senza questa
+            # guardia processa_partita() gira due volte a ~2s di distanza sullo stesso fixture. Il
+            # rilevamento gol confronta lo score con quello dell'ultimo ciclo (vedi
+            # classifica_cambio_punteggio): finche' il primo giro non aggiorna score_home/away in
+            # stato_partite, il secondo giro rilegge il prev_score vecchio e rigenera lo stesso
+            # "GOL RILEVATO! 0-0 -> 0-1" (con la relativa notifica gol duplicata in chat). Si tiene
+            # la prima occorrenza per fixture_id, in ordine di apparizione.
+            visti = set()
+            partite_deduplicate = []
+            duplicati_scartati = 0
+            for f in partite:
+                fid = f.get("fixture", {}).get("id")
+                if fid is None:
+                    partite_deduplicate.append(f)
+                    continue
+                if fid in visti:
+                    duplicati_scartati += 1
+                    continue
+                visti.add(fid)
+                partite_deduplicate.append(f)
+            if duplicati_scartati:
+                log(f"⚠️ API-Football ha restituito {duplicati_scartati} fixture duplicati nello stesso payload live: scartati")
+            partite = partite_deduplicate
             in_whitelist = [
                 f for f in partite
                 if fixture_in_whitelist(f)
