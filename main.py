@@ -4429,100 +4429,122 @@ def cmd_status(chat_id, query):
             json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
         return
     for f in trovate:
-        fid = f["fixture"]["id"]
-        home = f["teams"]["home"]["name"]
-        away = f["teams"]["away"]["name"]
-        league = f.get("league", {}).get("name", "")
-        minuto = f["fixture"]["status"].get("elapsed") or 0
-        score_h = f["goals"]["home"] or 0
-        score_a = f["goals"]["away"] or 0
+        # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
+        # un fallimento su una (API 5xx, timeout del grafico, sendPhoto rifiutato) non
+        # deve piu' interrompere il ciclo prima che l'altra venga inviata. In caso di
+        # errore mando un avviso breve identificando la partita coinvolta, cosi' chi
+        # ha chiesto /status vede che una e' saltata invece di ricevere una risposta
+        # muta senza sapere perche' manca.
+        try:
+            fid = f["fixture"]["id"]
+            home = f["teams"]["home"]["name"]
+            away = f["teams"]["away"]["name"]
+            league = f.get("league", {}).get("name", "")
+            minuto = f["fixture"]["status"].get("elapsed") or 0
+            score_h = f["goals"]["home"] or 0
+            score_a = f["goals"]["away"] or 0
 
-        stats = get_statistiche_partita(fid)
-        stats_text = ""
-        current_stats = None
-        if stats and len(stats) >= 2:
-            sh = stats[0].get("statistics", [])
-            sa = stats[1].get("statistics", [])
-            current_stats = estrai_current_stats(sh, sa)
-            tc, to = current_stats["Tiri totali"]
-            tp, tpo = current_stats["Tiri in porta"]
-            cc, co = current_stats["Corner"]
-            ta, tao = current_stats["Tiri in area"]
-            stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
-            # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
-            # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
-            # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
-            congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
-                fid, stats, minuto, registra=False)
-            if congelato_status:
-                stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
+            stats = get_statistiche_partita(fid)
+            stats_text = ""
+            current_stats = None
+            if stats and len(stats) >= 2:
+                sh = stats[0].get("statistics", [])
+                sa = stats[1].get("statistics", [])
+                current_stats = estrai_current_stats(sh, sa)
+                tc, to = current_stats["Tiri totali"]
+                tp, tpo = current_stats["Tiri in porta"]
+                cc, co = current_stats["Corner"]
+                ta, tao = current_stats["Tiri in area"]
+                stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
+                # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
+                # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
+                # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
+                congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
+                    fid, stats, minuto, registra=False)
+                if congelato_status:
+                    stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
 
-        intensita_text = ""
-        if current_stats:
-            history = STATUS_HISTORY.get(fid, [])
-            history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
-            history = [h for h in history if time.time() - h["timestamp"] <= 1200]
-            STATUS_HISTORY[fid] = history
+            intensita_text = ""
+            if current_stats:
+                history = STATUS_HISTORY.get(fid, [])
+                history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
+                history = [h for h in history if time.time() - h["timestamp"] <= 1200]
+                STATUS_HISTORY[fid] = history
 
-            delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats, minuto)
-            if is_real:
-                punteggio = calcola_indice_intensita(delta_stats)
-                motivazioni = descrivi_motivazioni_intensita(delta_stats)
-                d_tiri = delta_stats.get("Tiri totali", (0, 0))
-                intensita_text = (
-                    f"\n\nIntensità (ultimi 15 min) di questa partita: {punteggio:.1f} pt\n"
-                    f"Casa {d_tiri[0]} - {d_tiri[1]} Fuori | {motivazioni}"
+                delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats, minuto)
+                if is_real:
+                    punteggio = calcola_indice_intensita(delta_stats)
+                    motivazioni = descrivi_motivazioni_intensita(delta_stats)
+                    d_tiri = delta_stats.get("Tiri totali", (0, 0))
+                    intensita_text = (
+                        f"\n\nIntensità (ultimi 15 min) di questa partita: {punteggio:.1f} pt\n"
+                        f"Casa {d_tiri[0]} - {d_tiri[1]} Fuori | {motivazioni}"
+                    )
+                else:
+                    intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
+
+            events = fetch_fixture_events(fid)
+            goals = extract_goals(events)
+            goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
+            # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
+            # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
+            # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
+            _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
+                current_stats, score_h, score_a, events, home, away)
+            if _indietro_status:
+                stats_text += riga_ritardo_status.rstrip()
+            last_text = ""
+            if goals:
+                last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
+
+            msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
+
+            squadra_casa = trova_squadra_in_storico(home)
+            squadra_trasferta = trova_squadra_in_storico(away)
+            foto_path = None
+            if (squadra_casa and squadra_casa["casa"]["partite"] > 0
+                    and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
+                foto_path = genera_grafico_minutaggi(
+                    squadra_casa["nome"], squadra_casa["casa"],
+                    squadra_trasferta["nome"], squadra_trasferta["trasferta"]
                 )
-            else:
-                intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
 
-        events = fetch_fixture_events(fid)
-        goals = extract_goals(events)
-        goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
-        # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
-        # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
-        # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
-        _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
-            current_stats, score_h, score_a, events, home, away)
-        if _indietro_status:
-            stats_text += riga_ritardo_status.rstrip()
-        last_text = ""
-        if goals:
-            last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
-
-        msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
-
-        squadra_casa = trova_squadra_in_storico(home)
-        squadra_trasferta = trova_squadra_in_storico(away)
-        foto_path = None
-        if (squadra_casa and squadra_casa["casa"]["partite"] > 0
-                and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
-            foto_path = genera_grafico_minutaggi(
-                squadra_casa["nome"], squadra_casa["casa"],
-                squadra_trasferta["nome"], squadra_trasferta["trasferta"]
-            )
-
-        if foto_path and os.path.exists(foto_path):
-            try:
-                with open(foto_path, 'rb') as photo:
+            if foto_path and os.path.exists(foto_path):
+                try:
+                    with open(foto_path, 'rb') as photo:
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                            data={"chat_id": chat_id, "caption": msg_text},
+                            files={"photo": photo}, timeout=15)
+                except Exception as e:
+                    log(f"Errore invio grafico /status: {e}")
                     requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                        data={"chat_id": chat_id, "caption": msg_text},
-                        files={"photo": photo}, timeout=15)
-            except Exception as e:
-                log(f"Errore invio grafico /status: {e}")
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                finally:
+                    try:
+                        os.remove(foto_path)
+                    except Exception:
+                        pass
+            else:
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                     json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
-            finally:
-                try:
-                    os.remove(foto_path)
-                except Exception:
-                    pass
-        else:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+        except Exception as e:
+            squadre_id = (
+                f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
+                f"{f.get('teams', {}).get('away', {}).get('name', '?')}"
+            )
+            log(f"Errore /status per {squadre_id}: {e}\n{traceback.format_exc()}")
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": f"Errore nel recupero di {squadre_id}. Le altre partite trovate proseguono."
+                    }, timeout=5)
+            except Exception:
+                pass
 
 
 def spiega_momentum_insufficiente(history):
