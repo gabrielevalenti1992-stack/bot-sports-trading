@@ -1921,6 +1921,8 @@ def poll_callbacks():
                             esegui_comando_sicuro(chat_id, cmd_testpreferiti)
                         elif azione == "intensita":
                             esegui_comando_sicuro(chat_id, cmd_intensita)
+                        elif azione == "dominio":
+                            esegui_comando_sicuro(chat_id, cmd_dominio)
                         elif azione == "help":
                             esegui_comando_sicuro(chat_id, cmd_help)
 
@@ -5849,7 +5851,8 @@ def cmd_setup(chat_id):
             [{"text": "🔕 Modalità essenziale", "callback_data": "cmd:modalitaessenziale"},
              {"text": "🔔 Modalità completa", "callback_data": "cmd:modalitacompleta"}],
             [{"text": "🧪 Test canale preferiti", "callback_data": "cmd:testpreferiti"}],
-            [{"text": "🔥 Intensità partite live", "callback_data": "cmd:intensita"}],
+            [{"text": "🔥 Intensità", "callback_data": "cmd:intensita"},
+             {"text": "⚡ Dominio", "callback_data": "cmd:dominio"}],
             [{"text": "❓ Help", "callback_data": "cmd:help"}],
         ]
     }
@@ -8937,6 +8940,7 @@ def imposta_comandi_telegram():
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "apiusage", "description": "Chiamate API-Football fatte al giorno"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
+        {"command": "dominio", "description": "Classifica partite live per dominio (chi fa la partita)"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
