@@ -1437,6 +1437,80 @@ def salva_backup_history_momentum(dati):
 
 BACKUP_HISTORY_MOMENTUM = carica_backup_history_momentum()
 
+# =============================================================================
+# CLASSIFICA DOMINANZA-GOL: per ogni squadra, quante volte ha segnato con alle spalle un
+# vantaggio (stretto) in TUTTE E TRE tiri totali, corner e tiri in area rispetto all'avversario,
+# nell'ultima lettura statistiche prima di quel gol - contro quante volte ha segnato in totale
+# con statistiche disponibili in quel momento. Persistito su disco (sopravvive ai riavvii):
+# a differenza del resto dello stato partita, questo è un conteggio che si accumula per sempre,
+# non per singola partita, quindi non va mai ripulito da pulisci_partite_terminate().
+# =============================================================================
+CLASSIFICA_DOMINANZA_FILE = data_path("classifica_dominanza_gol.json")
+
+
+def carica_classifica_dominanza():
+    if os.path.exists(CLASSIFICA_DOMINANZA_FILE):
+        try:
+            with open(CLASSIFICA_DOMINANZA_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {CLASSIFICA_DOMINANZA_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_classifica_dominanza(dati):
+    salva_json_atomico(CLASSIFICA_DOMINANZA_FILE, dati)
+
+
+CLASSIFICA_DOMINANZA = carica_classifica_dominanza()
+
+
+def squadra_dominava_prima_del_gol(stats_precedenti, lato_che_segna):
+    """True/False se, nell'ultima lettura statistiche PRIMA del gol, la squadra che ha segnato
+    era in vantaggio stretto in tiri totali, corner e tiri in area, tutti e tre insieme. None se
+    non c'e' ancora nessuna lettura precedente per questa partita (gol arrivato prima delle prime
+    statistiche, o lega senza copertura tiri/corner/area: in quel caso il gol non e' valutabile)."""
+    if not stats_precedenti:
+        return None
+    tiri = stats_precedenti.get("Tiri totali", (0, 0))
+    corner = stats_precedenti.get("Corner", (0, 0))
+    area = stats_precedenti.get("Tiri in area", (0, 0))
+    if lato_che_segna == "home":
+        return tiri[0] > tiri[1] and corner[0] > corner[1] and area[0] > area[1]
+    return tiri[1] > tiri[0] and corner[1] > corner[0] and area[1] > area[0]
+
+
+def registra_gol_dominanza(squadra, ha_dominato):
+    if ha_dominato is None:
+        return
+    voce = CLASSIFICA_DOMINANZA.setdefault(squadra, {"gol_con_stats": 0, "gol_da_dominanza": 0})
+    voce["gol_con_stats"] += 1
+    if ha_dominato:
+        voce["gol_da_dominanza"] += 1
+    salva_classifica_dominanza(CLASSIFICA_DOMINANZA)
+
+
+def testo_classifica_dominanza(minimo_gol=2, top_n=20):
+    """Classifica delle squadre per gol segnati subito dopo aver dominato tiri, corner e tiri in
+    area (tutti e tre insieme) nell'ultima lettura statistiche precedente. minimo_gol filtra le
+    squadre con troppo pochi gol valutabili per non far salire in classifica un 1/1 (100%) casuale."""
+    righe = [
+        (squadra, dati["gol_da_dominanza"], dati["gol_con_stats"])
+        for squadra, dati in CLASSIFICA_DOMINANZA.items()
+        if dati["gol_con_stats"] >= minimo_gol
+    ]
+    if not righe:
+        return ("📊 Classifica dominanza-gol: ancora nessun dato sufficiente "
+                f"(serve almeno {minimo_gol} gol con statistiche disponibili per squadra).")
+    righe.sort(key=lambda r: (-r[1], -(r[1] / r[2]), r[0]))
+    testo = ("📊 Classifica dominanza-gol\n"
+             "Squadre che segnano più spesso dopo aver dominato tiri + corner + tiri in area:\n\n")
+    for i, (squadra, dominanza, totali) in enumerate(righe[:top_n], 1):
+        pct = round(dominanza / totali * 100)
+        testo += f"{i}. {squadra}: {dominanza}/{totali} gol da dominanza ({pct}%)\n"
+    return testo
+
+
 # Storico dei 15 minuti usato da /status, separato da stato_partite: quest'ultimo viene ripulito
 # ad ogni ciclo per le partite non più whitelist (pulisci_partite_terminate), quindi una partita
 # fuori whitelist (es. una coppa) controllata a mano con /status perderebbe subito lo storico se
@@ -1941,6 +2015,9 @@ def poll_callbacks():
 
                     elif cmd == "/dominio":
                         esegui_comando_sicuro(chat_id, cmd_dominio)
+
+                    elif cmd == "/classificadominanza":
+                        esegui_comando_sicuro(chat_id, cmd_classificadominanza)
 
                     elif cmd == "/funzioni":
                         esegui_comando_sicuro(chat_id, cmd_funzioni)
@@ -3693,6 +3770,8 @@ def cmd_help(chat_id):
         "eventuali anomalie\n"
         "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
         "rispecchia ancora (in cima le partite che dominano e perdono). Nessuna chiamata API\n"
+        "/classificadominanza - Classifica di sempre: le squadre che segnano più spesso subito "
+        "dopo aver dominato tiri totali, corner e tiri in area tutti e tre insieme\n"
         "/coperturaleghe - Quali campionati pubblicano statistiche reali e quante giornate senza "
         "dati ha accumulato ciascuno (da quale giornata è partita la verifica)\n"
         "/funzioni - Cosa fa il bot: funzioni stabili, in validazione, novità recenti\n"
@@ -4289,6 +4368,14 @@ def cmd_shadowlogstrategie(chat_id):
                 files={"document": f}, timeout=30)
     except Exception as e:
         log(f"Errore invio file shadow_log_strategie.jsonl: {e}")
+
+
+def cmd_classificadominanza(chat_id):
+    """Classifica persistente (tutte le partite mai osservate, non solo quelle live ora): quali
+    squadre segnano più spesso subito dopo aver dominato tiri totali, corner e tiri in area tutti
+    e tre insieme. Zero chiamate API - legge solo CLASSIFICA_DOMINANZA, aggiornata gol per gol dal
+    ciclo principale (vedi registra_gol_dominanza)."""
+    invia_messaggio_telegram(testo_classifica_dominanza(), chat_id=chat_id)
 
 
 def cmd_dominio(chat_id):
@@ -7800,6 +7887,12 @@ def processa_partita(fixture, notifiche_attive=True):
             fixture_id, score_home, score_away)
         if gol_appena_segnato:
             log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
+            history_precedente = stato_precedente.get("history", [])
+            stats_precedenti = history_precedente[-1]["stats"] if history_precedente else None
+            if score_home > prev_score_home:
+                registra_gol_dominanza(home, squadra_dominava_prima_del_gol(stats_precedenti, "home"))
+            if score_away > prev_score_away:
+                registra_gol_dominanza(away, squadra_dominava_prima_del_gol(stats_precedenti, "away"))
         elif punteggio_corretto_al_ribasso:
             # Nessuna notifica: il risultato mostrato resta comunque aggiornato (lo stato viene
             # riscritto poco più sotto), ma dire "gol" per un gol tolto è il contrario di quello
