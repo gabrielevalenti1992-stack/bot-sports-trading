@@ -5895,16 +5895,19 @@ LEGENDA_DIAGNOSTICA = (
     "(rate-limit, timeout, errore di rete). È l'unico caso in cui le statistiche mancanti sono "
     "davvero un problema di pipeline: di solito rientra da solo al ciclo dopo, se persiste "
     "controllare quota giornaliera e stato dell'API.\n"
-    "STATISTICHE FERME: la partita le statistiche le aveva, e poi ha smesso di riceverne per un "
-    "pezzo (15 minuti o più). Diverso da STATISTICHE, che riguarda le partite che non ne hanno mai "
-    "avute: qui la pipeline ha funzionato e si è interrotta a metà, quindi i dati mostrati sono "
-    "vecchi anche se ci sono. Di solito è l'API che smette di pubblicare per un po'.\n"
+    "STATISTICHE FERME: la partita le statistiche le aveva, e poi ha smesso di riceverne per più "
+    "della pausa normale del feed (la stessa soglia usata per i feed bloccati). Diverso da "
+    "STATISTICHE, che riguarda le partite che non ne hanno mai avute: qui la pipeline ha "
+    "funzionato e si è interrotta a metà, quindi i dati mostrati sono vecchi anche se ci sono. "
+    "Di solito è l'API che smette di pubblicare per un po'.\n"
     "COPERTURA STATISTICHE: l'API risponde regolarmente ma per quella partita non pubblica "
     "statistiche. Non c'è niente da riparare nel bot: la partita resta seguita e continua ad "
     "alimentare gli shadow-log, ma non manda notifiche - gol e cartellini compresi - finché "
     "l'API non pubblica i primi dati, e non può far scattare nessuna strategia. Torna a parlare "
     "da sola appena i dati arrivano. Capita anche a partite della stessa lega in cui invece le "
-    "statistiche arrivano.\n"
+    "statistiche arrivano. Arriva in chat solo da metà ripresa in poi: prima di quel minuto le "
+    "statistiche che mancano sono quasi sempre solo il ritardo con cui l'API pubblica i primi "
+    "dati, e la segnalazione resta nei log di Render (STATISTICHE IN RITARDO).\n"
     "Ogni anomalia viene segnalata una volta sola per partita: se resta uguale non viene "
     "ripetuta ad ogni controllo, e ricompare in chat solo se rientra e si ripresenta.\n"
     "(xG e quota 1X2 non generano anomalie automatiche: mancano spesso per motivi normali - lega "
@@ -5975,6 +5978,9 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
         # Anomalie di QUESTO giro per questa partita, indicizzate per categoria: sotto si notifica
         # solo ciò che non era già stato notificato prima (vedi ANOMALIE_DIAGNOSTICA_NOTIFICATE).
         trovate = {}
+        # Righe che vanno nei log di Render ma NON in chat, e che quindi non passano dal dedup di
+        # _anomalie_nuove(): rilievi veri, ma troppo presto per essere un verdetto.
+        solo_log = {}
 
         if not stato:
             trovate["TRACCIAMENTO"] = (
@@ -5993,7 +5999,14 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
         # Età dell'ultimo punto raccolto: "ci sono statistiche" non vuol dire "ne stanno arrivando".
         eta_stats = (ora - history[-1]["timestamp"]) if history else None
         stats_fresche = eta_stats is not None and eta_stats <= SOGLIA_STATISTICHE_FERME
-        if history and not stats_fresche and minuto_api > 10:
+        # Soglia dell'ALLARME, tenuta distinta da stats_fresche (che serve anche altrove): 15
+        # minuti stanno SOTTO il buco di pubblicazione normale dell'API, misurato su 90 gap reali
+        # (mediana 15', 90esimo percentile 19', massimo 24'), quindi segnalavano come stallo la
+        # pausa ordinaria del feed. MINUTI_FEED_CONGELATO e' la soglia gia' tarata su quelle
+        # stesse misure: si riusa quella invece di tenerne due scollegate che dicono cose diverse
+        # sullo stesso fenomeno.
+        soglia_allarme_ferme = max(SOGLIA_STATISTICHE_FERME, MINUTI_FEED_CONGELATO * 60)
+        if history and eta_stats > soglia_allarme_ferme and minuto_api > 10:
             # La partita ha raccolto statistiche e poi si è fermata: non lo vedeva nessun controllo,
             # perché tutti guardavano solo se lo storico fosse vuoto (vedi SOGLIA_STATISTICHE_FERME).
             dettaglio_fermo = {
@@ -6019,7 +6032,8 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             # tutte le chiamate rimaste nel ciclo, il rimbalzo colpiva molte partite insieme.
             evidenza_non_copertura = stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE
             if esito_stats in ("vuote", "errore") and evidenza_non_copertura:
-                trovate["COPERTURA STATISTICHE"] = (
+                categoria = "COPERTURA STATISTICHE"
+                testo_anomalia = (
                     f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
                     f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
                     f"seguita e negli shadow-log, ma non manda notifiche - gol compresi - finché "
@@ -6027,8 +6041,29 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
-                trovate["STATISTICHE"] = (
+                categoria = "STATISTICHE"
+                testo_anomalia = (
                     f"STATISTICHE - {home}-{away}: nessuna statistica arrivata al {minuto_api}' ({dettaglio})")
+            # Prima del minuto in cui il bot stesso si fida di questa evidenza per condannare una
+            # LEGA (MINUTO_MINIMO_VERDETTO_STATISTICHE), non se ne puo' ricavare un verdetto sulla
+            # PARTITA: a inizio gara le statistiche mancano perche' l'API le pubblica in ritardo,
+            # non perche' non le pubblichi. La diagnostica era piu' severa del verdetto sulla lega
+            # pur usando la stessa prova, e mandava in chat "l'API non pubblica statistiche per
+            # questa partita" su Serie A, Ligue 1, Liga Portugal, Super Lig e DFB Pokal - partite
+            # che le statistiche le avevano di li' a poco: Atalanta-Sassuolo segnalata al 17'
+            # mentre il /live check le dava DISPONIBILI due minuti PRIMA dell'allarme, e al 45'
+            # risultava gia' "stats=si (fresche)". Sotto quella soglia la riga resta nei log di
+            # Render - dove serve a ricostruire quanto e' durata l'attesa - ma non va in chat: la
+            # partita e' gia' muta da sola per via del gate del silenzio, e un allarme per ogni
+            # gara che parte in ritardo e' solo rumore. La chiamata che FALLISCE resta un'altra
+            # cosa: li' il problema e' nel bot o nella rete, e va detto subito.
+            if minuto_api >= MINUTO_MINIMO_VERDETTO_STATISTICHE or esito_stats == "errore":
+                trovate[categoria] = testo_anomalia
+            else:
+                solo_log["STATISTICHE IN RITARDO"] = (
+                    f"STATISTICHE IN RITARDO - {home}-{away}: l'API non ha ancora pubblicato statistiche "
+                    f"al {minuto_api}'. Sotto il {MINUTO_MINIMO_VERDETTO_STATISTICHE}' non è un verdetto "
+                    f"di non copertura: la partita intanto resta muta.")
 
         quote = quote_1x2_per_fixture(fid)
         ultimo_val = stato.get("ultimo_snapshot_valore")
@@ -6047,6 +6082,7 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 f"SHADOW-LOG STRATEGIE - {home}-{away}: statistiche presenti ma nessuno snapshot scritto al {minuto_api}'")
 
         anomalie.extend(trovate.values())
+        anomalie.extend(solo_log.values())
         anomalie_nuove.extend(_anomalie_nuove(fid, trovate, registra=notifiche_attive))
 
         # L'età dell'ultimo punto va scritta anche quando è tutto a posto: è il dato che rende la
@@ -6076,7 +6112,10 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
     if not anomalie_nuove:
         # Le stesse anomalie di prima, sulle stesse partite: restano nei log ma non si rimanda lo
         # stesso messaggio (con legenda annessa) ogni 30 minuti per tutta la durata della partita.
-        log(f"Diagnostica automatica: {len(anomalie)} anomalie già notificate in precedenza, nessun nuovo messaggio in chat.")
+        # Oppure sono rilievi che in chat non ci vanno mai (vedi solo_log): il messaggio non può
+        # più dire "già notificate", perché quelle in chat non ci sono mai passate.
+        log(f"Diagnostica automatica: {len(anomalie)} anomalie, nessuna nuova da mandare in chat "
+            f"(già notificate, o troppo presto per essere un verdetto).")
         return
 
     testo = (
