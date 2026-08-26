@@ -1950,6 +1950,12 @@ def poll_callbacks():
 
                     elif cmd == "/uptime":
                         esegui_comando_sicuro(chat_id, cmd_uptime)
+        except requests.exceptions.RequestException as e:
+            # Timeout e disconnessioni verso api.telegram.org sono il rumore di fondo di qualunque
+            # polling: nei log del 25-26/08 sono comparsi quattro volte, ognuna con una sessantina
+            # di righe di traceback per dire "read timeout". Il traceback resta per tutto il resto,
+            # dove invece serve davvero a capire cosa e' andato storto.
+            log(f"Errore di rete nel poll callback (si riprova): {type(e).__name__}: {e}")
         except Exception as e:
             log(f"Errore poll callback: {e}\n{traceback.format_exc()}")
         time.sleep(5)
@@ -2245,6 +2251,86 @@ def _attendi_slot_rate_limit_globale():
             attesa = 60 - (ora - _TIMESTAMP_CHIAMATE_RECENTI[0]) + 0.05
         time.sleep(max(attesa, 0.05))
 
+
+def chiamate_api_ultimo_minuto():
+    """Quante richieste ha fatto il bot negli ultimi 60 secondi, contando TUTTI i suoi thread.
+
+    E' il numero che manca ogni volta che l'API risponde "too many requests": senza, non c'e' modo
+    di distinguere "siamo noi ad aver esagerato" da "il limite l'ha applicato l'API per conto
+    suo". Vedi valuta_rate_limit()."""
+    with _LOCK_RATE_LIMIT_GLOBALE:
+        ora = time.time()
+        while _TIMESTAMP_CHIAMATE_RECENTI and ora - _TIMESTAMP_CHIAMATE_RECENTI[0] >= 60:
+            _TIMESTAMP_CHIAMATE_RECENTI.popleft()
+        return len(_TIMESTAMP_CHIAMATE_RECENTI)
+
+
+# =============================================================================
+# QUANTO DEVE DURARE IL RAFFREDDAMENTO: dipende da CHI ha causato il rate-limit
+#
+# Il raffreddamento unico da 65s trattava allo stesso modo tre situazioni molto diverse, e nei log
+# del 25-26/08 quella costosa e' proprio la piu' frequente:
+#
+#   26/08 17:40:50  Ciclo #86, PRIMA chiamata del giro -> "Too many requests ... per minute".
+#                   Nel ciclo precedente (17:37:47) il bot aveva fatto TRE chiamate in tutto, poi
+#                   180s di attesa. Zero chiamate nell'ultimo minuto: il limite non era nostro.
+#   25/08 23:42:50  "You have reached your DAILY request limit", mentre l'header della risposta
+#                   buona di tre minuti prima (23:39:49) diceva 5067/7500 richieste rimaste.
+#                   Il testo del messaggio non e' un dato affidabile.
+#   25/08 19:09:34  Rate-limit a meta' ciclo: le ~40 chiamate successive dello stesso giro sono
+#                   state saltate una per secondo, cioe' una ventina di partite rimaste senza
+#                   statistiche e senza eventi per quel ciclo.
+#
+# Da qui tre durate invece di una, decise sui NOSTRI numeri e non sul testo dell'API:
+#  - quota giornaliera davvero finita (lo dice l'header, non il messaggio) -> attesa lunga: prima
+#    del reset non tornera' a funzionare, e insistere serve solo a sporcare i log;
+#  - rate-limit al minuto con un traffico nostro alto -> il vecchio raffreddamento pieno, e'
+#    plausibile che il picco sia nostro;
+#  - rate-limit al minuto con traffico nostro basso -> attesa breve: il freno lungo punirebbe il
+#    bot per un limite che non ha superato lui.
+RATE_LIMIT_COOLDOWN_BREVE_SECONDI = 10
+RATE_LIMIT_COOLDOWN_QUOTA_FINITA_SECONDI = 900
+# Sotto questa soglia di chiamate nostre nell'ultimo minuto, il rate-limit non puo' essere colpa
+# del nostro ritmo: meta' del margine di sicurezza che ci siamo dati e' gia' molto generoso.
+SOGLIA_CHIAMATE_NOSTRE_SOSPETTE = max(1, LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA // 2)
+# Quante richieste devono restare perche' la giornata si consideri finita davvero.
+SOGLIA_QUOTA_GIORNALIERA_FINITA = 5
+# Oltre questa eta' l'ultimo valore di quota letto non dice piu' niente sull'adesso.
+ETA_MASSIMA_QUOTA_ATTENDIBILE = 1800
+
+
+def quota_giornaliera_finita():
+    """True/False se l'ultima quota letta dagli header dice che la giornata e' finita, None se non
+    lo sappiamo (nessuna lettura, o troppo vecchia per valerne la pena).
+
+    Gli header valgono piu' del testo dell'errore: il 25/08 alle 23:42 l'API ha risposto "hai
+    raggiunto il limite giornaliero" quando lei stessa, tre minuti prima, dichiarava 5067 richieste
+    ancora disponibili su 7500."""
+    residuo = ULTIMA_QUOTA_API.get("residuo")
+    if residuo is None or (time.time() - ULTIMA_QUOTA_API.get("aggiornata", 0)) > ETA_MASSIMA_QUOTA_ATTENDIBILE:
+        return None
+    try:
+        return int(residuo) <= SOGLIA_QUOTA_GIORNALIERA_FINITA
+    except (TypeError, ValueError):
+        return None
+
+
+def valuta_rate_limit(testo_errore):
+    """(secondi_di_raffreddamento, tipo_errore, spiegazione) per un rate-limit appena incassato."""
+    nostre = chiamate_api_ultimo_minuto()
+    finita = quota_giornaliera_finita()
+    dice_giornaliero = "daily" in testo_errore.lower() or "giornalier" in testo_errore.lower()
+    if finita is True or (finita is None and dice_giornaliero):
+        return (RATE_LIMIT_COOLDOWN_QUOTA_FINITA_SECONDI, "rate_limit",
+                "quota giornaliera esaurita")
+    if nostre >= SOGLIA_CHIAMATE_NOSTRE_SOSPETTE:
+        return (RATE_LIMIT_COOLDOWN_SECONDI, "rate_limit",
+                f"limite al minuto, {nostre} chiamate nostre negli ultimi 60s")
+    return (RATE_LIMIT_COOLDOWN_BREVE_SECONDI, "rate_limit_transitorio",
+            f"limite al minuto non attribuibile al bot ({nostre} chiamate nostre negli ultimi 60s"
+            + (f", quota residua {ULTIMA_QUOTA_API.get('residuo')}" if ULTIMA_QUOTA_API.get("residuo") else "")
+            + ")")
+
 # =============================================================================
 # CONTATORE CHIAMATE API-FOOTBALL: quante richieste il bot fa davvero, per farsi un'idea concreta
 # della quota usata al giorno e valutare se il piano attivo (limite giornaliero/al minuto) è
@@ -2257,7 +2343,8 @@ CHIAMATE_API_FILE = data_path("chiamate_api_giornaliere.json")
 CHIAMATE_API_GIORNI_STORICO = 30
 # Quota residua vista nell'header dell'ultima risposta API (x-ratelimit-requests-*): un dato più
 # autorevole del nostro conteggio per "quanto mi resta OGGI", perché viene da API-Football stessa.
-ULTIMA_QUOTA_API = {"limite": None, "residuo": None, "aggiornata": 0}
+ULTIMA_QUOTA_API = {"limite": None, "residuo": None, "aggiornata": 0,
+                    "limite_minuto": None, "residuo_minuto": None}
 
 
 def carica_chiamate_api():
@@ -2301,14 +2388,37 @@ def _e_errore_rate_limit(errori):
     return "ratelimit" in testo.replace(" ", "") or "too many requests" in testo
 
 
+# Sotto questa soglia di richieste ancora disponibili NEL MINUTO in corso vale la pena scriverlo
+# nel log: sopra sarebbe una riga in piu' per ogni singola chiamata, senza dire niente.
+SOGLIA_LOG_QUOTA_AL_MINUTO = 20
+
+
 def _log_quota_headers(response):
     """Logga la quota residua che l'API restituisce già negli header di ogni risposta, e la tiene
     anche in ULTIMA_QUOTA_API (usata da /apiusage) - senza bisogno di una chiamata dedicata per
-    controllarla."""
+    controllarla.
+
+    API-Football espone DUE coppie di header, e finora il bot ne leggeva una sola:
+      x-ratelimit-requests-limit / -remaining  -> la quota del GIORNO (quella che gia' loggavamo);
+      x-ratelimit-limit / x-ratelimit-remaining -> il limite AL MINUTO, cioe' esattamente quello
+      che l'API cita quando risponde "Too many requests ... per minute".
+    Senza la seconda, ogni rate-limit al minuto restava una parola dell'API contro un numero che
+    non avevamo. Ora il numero c'e', e valuta_rate_limit() lo usa per decidere quanto fermarsi."""
     limite = response.headers.get("x-ratelimit-requests-limit")
     residuo = response.headers.get("x-ratelimit-requests-remaining")
+    limite_minuto = response.headers.get("x-ratelimit-limit")
+    residuo_minuto = response.headers.get("x-ratelimit-remaining")
+    if limite_minuto or residuo_minuto:
+        ULTIMA_QUOTA_API["limite_minuto"] = limite_minuto
+        ULTIMA_QUOTA_API["residuo_minuto"] = residuo_minuto
     if limite or residuo:
-        log(f"    [quota API-Football] {residuo}/{limite} richieste rimaste oggi")
+        riga = f"    [quota API-Football] {residuo}/{limite} richieste rimaste oggi"
+        try:
+            if residuo_minuto is not None and int(residuo_minuto) <= SOGLIA_LOG_QUOTA_AL_MINUTO:
+                riga += f" | {residuo_minuto}/{limite_minuto} in questo minuto"
+        except (TypeError, ValueError):
+            pass
+        log(riga)
         ULTIMA_QUOTA_API["limite"] = limite
         ULTIMA_QUOTA_API["residuo"] = residuo
         ULTIMA_QUOTA_API["aggiornata"] = time.time()
@@ -2316,10 +2426,49 @@ def _log_quota_headers(response):
 
 def _classifica_errore_http(status_code):
     if status_code == 429:
-        return "rate_limit", "limite di richieste (al minuto o giornaliero) superato"
+        return "rate_limit", "limite di richieste superato"
     if status_code in (401, 403):
         return "auth", "chiave API non valida o piano non abilitato per questa risorsa"
     return f"http_{status_code}", f"HTTP {status_code}"
+
+
+def _arma_raffreddamento(contesto, testo_errore, motivo):
+    """Attiva il raffreddamento della durata giusta per il rate-limit appena ricevuto e ritorna
+    (tipo_errore, motivo) da propagare a chi ha chiamato.
+
+    Il log dice sempre PERCHE' quella durata: la domanda "e' colpa nostra?" e' quella a cui i log
+    di produzione non sapevano rispondere, ed e' quella che decide tutto il resto."""
+    global PROSSIMA_CHIAMATA_API_CONSENTITA
+    secondi, tipo, spiegazione = valuta_rate_limit(testo_errore)
+    PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + secondi
+    log(f"[{contesto}] Raffreddamento API-Football attivato per {secondi}s ({spiegazione})")
+    return tipo, f"{motivo} - {spiegazione}"
+
+
+def attendi_fine_raffreddamento_api(contesto, limite=None):
+    """Aspetta che scada il raffreddamento in corso invece di lasciar morire il giro. Ritorna True
+    se al ritorno le chiamate sono di nuovo permesse.
+
+    Il raffreddamento e' pensato per non peggiorare un rate-limit, ma nel ciclo principale il suo
+    effetto collaterale era piu' caro del problema: il 25/08 alle 19:09:34 un rate-limit ha fatto
+    saltare le ~40 chiamate rimanenti del giro, una al secondo, lasciando una ventina di partite
+    senza statistiche e senza eventi per quel ciclo - e poi il bot ha comunque aspettato i suoi
+    180s. Fermarsi una volta sola e riprendere costa meno che perdere tutte le partite del giro.
+
+    Il tetto (di default poco piu' di un raffreddamento pieno) esiste per il caso opposto: se la
+    quota giornaliera e' finita davvero l'attesa e' lunga, e li' non ha senso restare fermi dentro
+    il ciclo - si torna False e il chiamante prosegue come prima."""
+    residuo = PROSSIMA_CHIAMATA_API_CONSENTITA - time.time()
+    if residuo <= 0:
+        return True
+    tetto = RATE_LIMIT_COOLDOWN_SECONDI + 5 if limite is None else limite
+    if residuo > tetto:
+        log(f"[{contesto}] Raffreddamento troppo lungo ({int(residuo)}s): non lo aspetto, "
+            f"il giro prosegue e si riprende quando scade")
+        return False
+    log(f"[{contesto}] Raffreddamento in corso: aspetto {int(residuo) + 1}s invece di perdere il resto del giro")
+    time.sleep(residuo + 0.5)
+    return time.time() >= PROSSIMA_CHIAMATA_API_CONSENTITA
 
 
 def get_api_football(url, params, timeout, contesto):
@@ -2337,14 +2486,16 @@ def get_api_football(url, params, timeout, contesto):
     raffreddamento sopra, questo non salta la chiamata ma la mette in coda - conta le chiamate di
     TUTTI i thread del bot insieme, non solo quelle di chi chiama in questo momento, per evitare di
     arrivare al rate-limit prima ancora che scatti la protezione reattiva."""
-    global PROSSIMA_CHIAMATA_API_CONSENTITA
     if not API_FOOTBALL_KEY:
         return None, "config", "API_FOOTBALL_KEY mancante"
     now = time.time()
     if now < PROSSIMA_CHIAMATA_API_CONSENTITA:
         attesa = int(PROSSIMA_CHIAMATA_API_CONSENTITA - now)
         log(f"[{contesto}] Rate-limit ancora in raffreddamento, chiamata saltata (riprova tra {attesa}s)")
-        return None, "rate_limit", "raffreddamento dopo un rate-limit recente, chiamata saltata"
+        # Tipo dedicato: questa non e' una nuova diagnosi dell'API, e' una conseguenza di quella
+        # di prima. Trattarla come un rate-limit a se' stante voleva dire far ripartire allarmi e
+        # contatori per ogni chiamata saltata dello stesso raffreddamento.
+        return None, "rate_limit_raffreddamento", "raffreddamento dopo un rate-limit recente, chiamata saltata"
     _attendi_slot_rate_limit_globale()
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
     # Contata qui, non dopo: la chiamata sta per partire davvero (passato il controllo del
@@ -2364,8 +2515,7 @@ def get_api_football(url, params, timeout, contesto):
         tipo, motivo = _classifica_errore_http(response.status_code)
         log(f"[{contesto}] {motivo} - corpo: {response.text[:500]}")
         if tipo == "rate_limit":
-            PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + RATE_LIMIT_COOLDOWN_SECONDI
-            log(f"[{contesto}] Raffreddamento API-Football attivato per {RATE_LIMIT_COOLDOWN_SECONDI}s")
+            tipo, motivo = _arma_raffreddamento(contesto, response.text, motivo)
         return None, tipo, motivo
 
     data = response.json()
@@ -2373,12 +2523,27 @@ def get_api_football(url, params, timeout, contesto):
     if errori:
         log(f"[{contesto}] Errore applicativo API: {errori}")
         if _e_errore_rate_limit(errori):
-            PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + RATE_LIMIT_COOLDOWN_SECONDI
-            log(f"[{contesto}] Raffreddamento API-Football attivato per {RATE_LIMIT_COOLDOWN_SECONDI}s")
-            return None, "rate_limit", str(errori)
+            tipo, motivo = _arma_raffreddamento(contesto, str(errori), str(errori))
+            return None, tipo, motivo
         return None, "api_errors", str(errori)
 
     return data, None, None
+
+
+# Un rate-limit che non e' attribuibile al nostro traffico si risolve quasi sempre da solo: il
+# 26/08 la chiamata fallita alle 17:40:50 e' tornata a funzionare al primo tentativo utile, alle
+# 17:43:51. Avvisare in chat al primo colpo significa mandare "Errore API: limite di richieste
+# superato" per un intoppo gia' rientrato - e per giunta far sospettare che serva un piano piu'
+# grande, quando quel giorno il bot aveva consumato poco piu' di 300 richieste su 7500.
+#
+# La soglia e' 3 e non 2 perche' il ciclo principale, quando la chiamata live fallisce, riprova
+# subito: quel secondo tentativo e' una mossa NOSTRA, non una nuova diagnosi dell'API, e da solo
+# non deve bastare a far scattare l'avviso. Tre rifiuti in un quarto d'ora vogliono dire due
+# episodi distinti, e a quel punto e' una cosa che vale la pena sapere - col dettaglio dei numeri
+# nostri allegato, cosi' il messaggio non lascia credere a una quota esaurita che non c'e'.
+FINESTRA_RATE_LIMIT_TRANSITORI = 900
+RATE_LIMIT_TRANSITORI_PRIMA_DI_AVVISARE = 3
+RATE_LIMIT_TRANSITORI = {"conteggio": 0, "primo": 0}
 
 
 def notifica_errore_api_throttled(tipo, dettaglio, contesto):
@@ -2387,6 +2552,21 @@ def notifica_errore_api_throttled(tipo, dettaglio, contesto):
     chat ad ogni ciclo mentre l'errore persiste (es. quota esaurita per ore)."""
     global ULTIMO_ERRORE_API
     now = time.time()
+    if tipo == "rate_limit_raffreddamento":
+        # La chiamata e' stata saltata da noi, non rifiutata dall'API: l'allarme, se serviva, e'
+        # gia' partito quando il raffreddamento e' stato armato.
+        log(f"[{contesto}] Chiamata saltata dal raffreddamento in corso, nessuna notifica")
+        return
+    if tipo == "rate_limit_transitorio":
+        if now - RATE_LIMIT_TRANSITORI["primo"] > FINESTRA_RATE_LIMIT_TRANSITORI:
+            RATE_LIMIT_TRANSITORI["primo"] = now
+            RATE_LIMIT_TRANSITORI["conteggio"] = 0
+        RATE_LIMIT_TRANSITORI["conteggio"] += 1
+        if RATE_LIMIT_TRANSITORI["conteggio"] < RATE_LIMIT_TRANSITORI_PRIMA_DI_AVVISARE:
+            log(f"[{contesto}] Rate-limit non attribuibile al bot "
+                f"({RATE_LIMIT_TRANSITORI['conteggio']} in {FINESTRA_RATE_LIMIT_TRANSITORI // 60} min, "
+                f"si avvisa da {RATE_LIMIT_TRANSITORI_PRIMA_DI_AVVISARE}): nessuna notifica, si riprova")
+            return
     if ULTIMO_ERRORE_API["tipo"] == tipo and (now - ULTIMO_ERRORE_API["timestamp"]) < INTERVALLO_NOTIFICA_ERRORE_API:
         log(f"[{contesto}] Errore '{tipo}' ripetuto, notifica Telegram soppressa (ancora in cooldown)")
         return
@@ -2409,6 +2589,10 @@ def get_partite_live():
             notifica_errore_api_throttled(tipo_errore, dettaglio, "get_partite_live")
             ULTIMO_ERRORE_GET_PARTITE_LIVE = time.time()
         return []
+    # Azzerato appena la chiamata riesce: chiamata_partite_live_fallita nel ciclo principale si
+    # basa sull'ETA' di questo marcatore, quindi senza il reset un tentativo andato a buon fine
+    # subito dopo uno fallito continuava a risultare "fallito" per i 20s successivi.
+    ULTIMO_ERRORE_GET_PARTITE_LIVE = 0
     partite = data.get("response", [])
     # Popola la mappa fixture->lega usata dalla blacklist statistiche (miglioramento #1)
     for f in partite:
@@ -2937,15 +3121,30 @@ def get_statistiche_partita(fixture_id, debug=False):
 
 
 def fetch_fixture_events(fixture_id):
+    """Eventi della partita, o None se la CHIAMATA e' fallita.
+
+    None e lista vuota non sono la stessa cosa, esattamente come in get_statistiche_partita():
+    "l'API ha risposto e non ci sono eventi" e "non siamo riusciti a chiedere" portano a decisioni
+    opposte. Prima tornavano entrambi [], e da li' nascevano tre danni distinti, tutti visti nei
+    log del 25-26/08:
+      - "Nessun gol registrato" su partite che i gol li avevano (Celje-Slovan, 3 gol, 26/08 21:17);
+      - cartellini e rigori gia' notificati dimenticati e rimandati in chat al ciclo successivo;
+      - lo storico minutaggi che registrava la partita come "0 gol" e la marcava come processata,
+        senza piu' riprovare.
+    Le chiamate fallite non finiscono in cache, per lo stesso motivo per cui non ci finiscono
+    quelle delle statistiche: altrimenti anche un /status o un /live lanciati subito dopo
+    resterebbero ciechi per altri CACHE_TTL_STATS_EVENTI secondi."""
     now = time.time()
     voce_cache = _CACHE_EVENTI_PARTITA.get(fixture_id)
     if voce_cache and (now - voce_cache[0]) < CACHE_TTL_STATS_EVENTI:
         return voce_cache[1]
     if not API_FOOTBALL_KEY:
-        return []
+        return None
     url = "https://v3.football.api-sports.io/fixtures/events"
     data, _, _ = get_api_football(url, {"fixture": fixture_id}, timeout=10, contesto=f"fetch_fixture_events({fixture_id})")
-    risultato = [] if data is None else data.get("response", [])
+    if data is None:
+        return None
+    risultato = data.get("response", [])
     _CACHE_EVENTI_PARTITA[fixture_id] = (now, risultato)
     return risultato
 
@@ -3049,6 +3248,101 @@ def extract_rigori(events):
         })
     rigori.sort(key=lambda r: r["minute"])
     return rigori
+
+
+# Quanto puo' spostarsi il minuto di UNO STESSO evento fra due letture dell'API. Non e' una stima
+# prudenziale: e' quello che i log di produzione mostrano succedere di continuo.
+#
+#   25/08 19:05:48  Nuovo cartellino rosso: 4'  G. Crettaz (NEC Nijmegen)
+#   25/08 19:13:27  Nuovo cartellino rosso: 3'  G. Crettaz (NEC Nijmegen)   <- stesso rosso
+#   25/08 20:11:32  Nuovo cartellino rosso: 47' G. Florentin (Oriente Petrolero)
+#   25/08 20:15:24  Nuovo cartellino rosso: 45' G. Florentin (Oriente Petrolero)
+#   26/08 12:00:50  Nuovo cartellino rosso: 69' Hong Chul (Gangwon FC)
+#   26/08 12:03:56  Nuovo cartellino rosso: 68' Hong Chul (Gangwon FC)
+#   26/08 18:23:22  Nuovo cartellino rosso: 77' Sconosciuto (Heart Of Midlothian)
+#   26/08 18:26:25  Nuovo cartellino rosso: 76' T. Magnusson (Heart Of Midlothian)
+#   26/08 19:37:31  Nuovo rigore:           33' S. Seslar (Celje)
+#   26/08 19:40:49  Nuovo rigore:           34' S. Seslar (Celje)
+#
+# Ogni coppia e' UN evento solo, notificato DUE volte in chat: cartellini e rigori nuovi sono
+# eventi forzati (vedi evento_forzato in processa_partita), quindi scavalcano ogni filtro e il
+# duplicato arriva sempre.
+#
+# La chiave usata prima - (minuto, squadra, dettaglio) - era stata scelta apposta per non farsi
+# ingannare dal campo "player", che l'API riempie in ritardo ("Sconosciuto" nei primi cicli). Il
+# caso Hearts qui sopra mostra il difetto: il nome si e' risolto E il minuto e' cambiato nello
+# stesso momento, quindi qualunque chiave esatta risultava diversa. Il minuto di un evento gia'
+# avvenuto non e' un dato stabile: l'API lo ricalcola quando arriva il tempo di recupero o quando
+# corregge la cronologia.
+#
+# 3 minuti coprono tutte le derive osservate (max 2') con un margine, e restano ben sotto la
+# distanza fra due cartellini/rigori diversi della STESSA squadra - evento gia' raro di suo.
+TOLLERANZA_MINUTI_STESSO_EVENTO = 3
+
+
+def _stesso_giocatore(a, b):
+    """True/False se i due eventi si possono attribuire allo stesso giocatore, None se il dato non
+    permette di deciderlo (nome ancora non risolto dall'API in almeno uno dei due)."""
+    na = (a.get("player") or "").strip().lower()
+    nb = (b.get("player") or "").strip().lower()
+    if not na or not nb or na == "sconosciuto" or nb == "sconosciuto":
+        return None
+    return na == nb
+
+
+def _distanza_minuti(a, b):
+    ma, mb = a.get("minute"), b.get("minute")
+    if ma is None or mb is None:
+        return 0 if ma == mb else None
+    return abs(ma - mb)
+
+
+def _indice_evento_corrispondente(evento, candidati, tolleranza):
+    """Posizione in 'candidati' dell'evento gia' noto che e' plausibilmente LO STESSO di 'evento',
+    o None se non ce n'e' nessuno.
+
+    Tre condizioni, in ordine di forza:
+      - stessa squadra (obbligatoria);
+      - nomi diversi quando entrambi sono noti -> sono due eventi diversi, si scarta il candidato
+        (e' cosi' che una serie di rigori tirati tutti al 120' resta una serie e non collassa in
+        uno solo);
+      - minuto entro 'tolleranza'.
+    Il nome uguale non basta da solo a far combaciare due eventi lontani nel tempo: lo stesso
+    giocatore puo' segnare due rigori nella stessa partita, a mezz'ora di distanza."""
+    migliore = None
+    chiave_migliore = None
+    for i, candidato in enumerate(candidati):
+        if candidato.get("team") != evento.get("team"):
+            continue
+        stesso_nome = _stesso_giocatore(evento, candidato)
+        if stesso_nome is False:
+            continue
+        distanza = _distanza_minuti(evento, candidato)
+        if distanza is None or distanza > tolleranza:
+            continue
+        # A parita' di distanza vince il candidato col nome uguale: e' l'abbinamento piu' sicuro.
+        chiave = (0 if stesso_nome else 1, distanza)
+        if chiave_migliore is None or chiave < chiave_migliore:
+            migliore, chiave_migliore = i, chiave
+    return migliore
+
+
+def eventi_davvero_nuovi(correnti, precedenti, tolleranza=TOLLERANZA_MINUTI_STESSO_EVENTO):
+    """Gli eventi di 'correnti' che non risultano gia' presenti in 'precedenti'.
+
+    L'abbinamento CONSUMA il candidato trovato: due rigori identici della stessa squadra allo
+    stesso minuto restano due, perche' il secondo non puo' riusare l'abbinamento del primo. Era il
+    punto delicato da non rompere - una serie di rigori e' fatta di eventi tutti al 120' - e un
+    semplice confronto fra insiemi di chiavi non lo garantisce."""
+    disponibili = list(precedenti)
+    nuovi = []
+    for evento in correnti:
+        indice = _indice_evento_corrispondente(evento, disponibili, tolleranza)
+        if indice is None:
+            nuovi.append(evento)
+        else:
+            disponibili.pop(indice)
+    return nuovi
 
 
 def estrai_valore_stat(stats_team, nome_stat):
@@ -4224,6 +4518,15 @@ def cmd_apiusage(chat_id):
             f"\nQuota residua secondo API-Football ({eta}s fa): "
             f"{ULTIMA_QUOTA_API['residuo']}/{ULTIMA_QUOTA_API['limite']} oggi")
 
+    # Il limite AL MINUTO e' l'altra meta' della risposta, e finora non si vedeva da nessuna parte:
+    # quando l'API risponde "hai superato il limite al minuto" serve sapere quale sia quel limite e
+    # quanto ci va vicino il bot davvero. Vedi valuta_rate_limit().
+    if ULTIMA_QUOTA_API.get("limite_minuto"):
+        righe.append(
+            f"Limite al minuto del piano: {ULTIMA_QUOTA_API['limite_minuto']} richieste "
+            f"(il bot si autolimita a {LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA})")
+    righe.append(f"Chiamate del bot negli ultimi 60s: {chiamate_api_ultimo_minuto()}")
+
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=5)
@@ -4608,16 +4911,26 @@ def cmd_status(chat_id, query):
                 else:
                     intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
 
+            # None = chiamata eventi fallita (vedi fetch_fixture_events). Chi ha chiesto /status
+            # deve saperlo: senza gli eventi, "nessun gol" non e' un'informazione ma un buco, e la
+            # riga "Ultimo gol" sparirebbe in silenzio da una partita che i gol li ha.
             events = fetch_fixture_events(fid)
+            eventi_ok = events is not None
+            events = events or []
             goals = extract_goals(events)
             goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
             # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
             # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
             # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
-            _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
-                current_stats, score_h, score_a, events, home, away)
-            if _indietro_status:
-                stats_text += riga_ritardo_status.rstrip()
+            # Senza eventi non si puo' contare gli autogol, quindi il controllo si salta invece di
+            # dare un falso "statistiche in ritardo".
+            if eventi_ok:
+                _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
+                    current_stats, score_h, score_a, events, home, away)
+                if _indietro_status:
+                    stats_text += riga_ritardo_status.rstrip()
+            else:
+                stats_text += "\n⚠️ Marcatori non disponibili: la chiamata eventi non e' andata a buon fine."
             last_text = ""
             if goals:
                 last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
@@ -6267,6 +6580,19 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
         away_id = f["teams"]["away"]["id"]
         away_name = f["teams"]["away"]["name"]
 
+        # Gli eventi si chiedono PRIMA di toccare i contatori: se la chiamata fallisce
+        # (rate-limit, timeout, rete) questa partita non va contata affatto. Prima gli eventi
+        # falliti tornavano [], quindi la partita entrava nello storico come "0 gol" - e siccome
+        # subito dopo il fixture_id finiva in fixture_ids_processati, quel dato falso restava li'
+        # per sempre, senza nessun tentativo successivo. Lo storico minutaggi e' il dato su cui si
+        # basa /analisi: una partita fantasma senza gol sposta le fasce di tutte e due le squadre.
+        eventi = fetch_fixture_events(fixture_id)
+        if eventi is None:
+            log(f"Storico minutaggi: eventi non recuperati per la partita {fixture_id}, "
+                f"non registrata (si riprova al prossimo aggiornamento)")
+            time.sleep(0.3)
+            continue
+
         for team_id, nome in ((home_id, home_name), (away_id, away_name)):
             squadra = lega_dati["squadre"].setdefault(str(team_id), {
                 "nome": nome,
@@ -6278,7 +6604,6 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
         lega_dati["squadre"][str(home_id)]["casa"]["partite"] += 1
         lega_dati["squadre"][str(away_id)]["trasferta"]["partite"] += 1
 
-        eventi = fetch_fixture_events(fixture_id)
         for ev in eventi:
             if ev.get("type") != "Goal":
                 continue
@@ -6884,6 +7209,13 @@ def chiudi_shadow_log_partite_sparite(fixture_ids):
         # chiamata. Se gli eventi non arrivano si registra lo stesso con la lista vuota - il
         # risultato finale e' comunque meglio di un altro snapshot orfano.
         eventi = fetch_fixture_events(fid)
+        if eventi is None:
+            # Il risultato finale si registra comunque (e' meglio di uno snapshot orfano), ma la
+            # riga nei log dice che i gol di questa partita mancano per un errore di chiamata e non
+            # perche' non ce ne siano: senza, lo shadow-log strategie sembrerebbe dire che dopo il
+            # segnale non e' successo niente.
+            log(f"    Shadow-log: eventi non recuperati per la partita {fid}, "
+                f"risultato registrato senza i minuti dei gol")
         registra_shadow_log_strategie_risultato(
             fid, score_home, score_away, extract_goals(eventi) if eventi else [])
         chiuse += 1
@@ -7367,13 +7699,35 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["andata_controllata"] = True
                 stato_partite[fixture_id]["andata_info"] = None
 
+        # fetch_fixture_events restituisce None quando la CHIAMATA fallisce (rate-limit, timeout,
+        # rete) e una lista quando l'API ha risposto davvero. La distinzione e' l'unica cosa che
+        # separa "questa partita non ha eventi" da "non lo sappiamo", e qui sotto cambia tutto:
+        # sovrascrivere lo stato con liste vuote significa dimenticare i cartellini e i rigori gia'
+        # notificati, e ritrovarseli come "nuovi" al primo ciclo che riesce.
+        #
+        # Visto in produzione il 25/08: alle 19:09:34 un rate-limit su fetch_fixture_events ha congelato le
+        # chiamate per 65s; alle 19:14:09 il rosso al 100' di D. T. Diop (Hapoel Beer Sheva), gia'
+        # mandato in chat alle 18:58:51, e' tornato in chat identico. Stessa dinamica il 26/08 alle
+        # 21:17:09 su Celje-Slovan Bratislava (fixture 1622628): "Nessun gol registrato" su una
+        # partita da 3 gol, e al ciclo dopo il rigore del 34' segnalato come appena avvenuto.
         events = fetch_fixture_events(fixture_id)
-        goals = extract_goals(events)
-        goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
-        if goals:
-            log(f"    ⚽ Gol trovati: {len(goals)}")
+        eventi_non_recuperati = events is None
+        if eventi_non_recuperati:
+            events = []
+            goals = stato_precedente.get("goals", [])
+            cartellini_rossi = list(stato_precedente.get("cartellini_rossi", []))
+            rigori = list(stato_precedente.get("rigori", []))
+            log("    ⚠️ Eventi non recuperati: chiamata API fallita (rate-limit/timeout/rete), "
+                "si tiene quanto gia' noto e si riprova al prossimo ciclo")
         else:
-            log("    ⚽ Nessun gol registrato")
+            goals = extract_goals(events)
+            goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
+            cartellini_rossi = extract_cartellini_rossi(events)
+            rigori = extract_rigori(events)
+            if goals:
+                log(f"    ⚽ Gol trovati: {len(goals)}")
+            else:
+                log("    ⚽ Nessun gol registrato")
 
         # Cartellini rossi e rigori: stessa lista fresca ad ogni ciclo (nessuna chiamata in più,
         # è già dentro "events"), confrontata con quella salvata al ciclo precedente per capire
@@ -7381,22 +7735,14 @@ def processa_partita(fixture, notifiche_attive=True):
         # default fa combaciare le due liste, cosi' non si notifica un cartellino/rigore già
         # avvenuto prima che il bot iniziasse a monitorarla (stesso criterio usato per i gol).
         #
-        # Il confronto usa una CHIAVE STABILE (minuto, squadra, dettaglio/esito) invece
-        # dell'uguaglianza sull'intero dizionario: il campo "player" può essere "Sconosciuto" nei
-        # primi cicli e risolto dall'API in un nome vero più tardi (visto in produzione), e prima
-        # confrontare i dizionari interi faceva risultare lo STESSO cartellino "diverso" da quello
-        # già notificato, rimandandolo una seconda volta solo perché nel frattempo era comparso il
-        # nome del giocatore - un duplicato, non una notizia nuova.
-        cartellini_rossi = extract_cartellini_rossi(events)
-        rigori = extract_rigori(events)
+        # Il confronto passa da eventi_davvero_nuovi() e non da una chiave esatta: ne' il minuto
+        # ne' il nome del giocatore sono stabili fra due letture dell'API, e bastava che uno dei
+        # due cambiasse perche' lo stesso cartellino ripartisse come nuovo. Vedi la casistica
+        # completa sopra TOLLERANZA_MINUTI_STESSO_EVENTO.
         prev_cartellini_rossi = stato_precedente.get("cartellini_rossi", cartellini_rossi)
         prev_rigori = stato_precedente.get("rigori", rigori)
-        chiavi_prev_cartellini = {(c["minute"], c["team"], c.get("dettaglio")) for c in prev_cartellini_rossi}
-        chiavi_prev_rigori = {(r["minute"], r["team"], r.get("esito")) for r in prev_rigori}
-        nuovi_cartellini_rossi = [
-            c for c in cartellini_rossi if (c["minute"], c["team"], c.get("dettaglio")) not in chiavi_prev_cartellini]
-        nuovi_rigori = [
-            r for r in rigori if (r["minute"], r["team"], r.get("esito")) not in chiavi_prev_rigori]
+        nuovi_cartellini_rossi = eventi_davvero_nuovi(cartellini_rossi, prev_cartellini_rossi)
+        nuovi_rigori = eventi_davvero_nuovi(rigori, prev_rigori)
         if nuovi_cartellini_rossi:
             log(f"    🟥 Nuovo cartellino rosso: {nuovi_cartellini_rossi}")
         if nuovi_rigori:
@@ -8056,8 +8402,14 @@ def processa_partita(fixture, notifiche_attive=True):
         # Statistiche che contraddicono il risultato (piu' gol che tiri in porta): non sono poche,
         # sono indietro. Va detto accanto ai numeri, altrimenti un "Tiri 1-0" su un 1-1 si legge
         # come un dato vero. Vedi statistiche_indietro_sul_punteggio.
-        _indietro, riga_ritardo_stats = statistiche_indietro_sul_punteggio(
-            current_stats, score_home, score_away, events, home, away)
+        #
+        # Salta il controllo se gli eventi non sono arrivati: gli autogol si contano da li', e
+        # senza quel dato un autogol si trasformerebbe in un falso "statistiche in ritardo".
+        if eventi_non_recuperati:
+            _indietro, riga_ritardo_stats = False, ""
+        else:
+            _indietro, riga_ritardo_stats = statistiche_indietro_sul_punteggio(
+                current_stats, score_home, score_away, events, home, away)
         if _indietro:
             log(f"  ⏳ Statistiche indietro sul risultato ({score_home}-{score_away} con "
                 f"{current_stats.get('Tiri in porta', (0, 0))} in porta)")
@@ -8378,6 +8730,19 @@ if __name__ == "__main__":
 
             partite = get_partite_live()
             chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
+            # Se la chiamata live fallisce non c'e' niente da fare in tutto il giro: nessuna
+            # partita da processare, nessuna statistica, nessun gol rilevato - e poi comunque 180s
+            # di attesa. Un secondo tentativo costa una richiesta e recupera l'intero ciclo.
+            #
+            # Vale la pena perche' i fallimenti osservati rientrano subito: 26/08 17:40:50 rifiuto
+            # con zero chiamate nostre nell'ultimo minuto, 17:43:51 stessa chiamata riuscita al
+            # primo colpo. Stessa cosa per il timeout di rete del 25/08 22:34:45. Se invece il
+            # raffreddamento e' lungo (quota giornaliera finita) l'attesa viene rifiutata e si
+            # prosegue come prima, senza insistere.
+            if chiamata_partite_live_fallita and attendi_fine_raffreddamento_api("get_partite_live"):
+                log("Secondo tentativo sulla chiamata partite live prima di rinunciare al giro")
+                partite = get_partite_live()
+                chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
             # Deduplicazione per fixture_id: l'API a volte restituisce la stessa partita due volte
             # nello stesso payload live (osservato 3 volte in 48h di log produzione), e senza questa
             # guardia processa_partita() gira due volte a ~2s di distanza sullo stesso fixture. Il
@@ -8441,6 +8806,10 @@ if __name__ == "__main__":
             # viene comunque accorciato quando c'è almeno un preferito live, altrimenti il gate qui
             # sotto non verrebbe mai ricontrollato abbastanza spesso da avere effetto.
             preferito_live = False
+            # Un raffreddamento scattato a meta' giro veniva pagato da tutte le partite rimanenti,
+            # una per una: il 25/08 alle 19:09 sono state saltate ~40 chiamate di fila. Ci si ferma
+            # UNA volta per ciclo e si riprende, invece di collezionare skip.
+            attesa_raffreddamento_gia_fatta = False
             for fixture in partite_valide:
                 fid = fixture.get("fixture", {}).get("id")
                 e_preferita = fid is not None and str(fid) in FAVORITE_MATCHES
@@ -8460,6 +8829,9 @@ if __name__ == "__main__":
                 # sia passato dal riavvio.
                 if ciclo_numero > 1 and time.time() - ultimo_controllo < intervallo_minimo:
                     continue
+                if not attesa_raffreddamento_gia_fatta and time.time() < PROSSIMA_CHIAMATA_API_CONSENTITA:
+                    attesa_raffreddamento_gia_fatta = True
+                    attendi_fine_raffreddamento_api(f"ciclo #{ciclo_numero}")
                 processa_partita(fixture, notifiche_attive)
                 if fid is not None:
                     stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
@@ -8494,7 +8866,12 @@ if __name__ == "__main__":
             # come se si fosse sempre in finestra attiva, per non restare ciechi.
             piano_disponibile = PIANO_GIORNATA.get("data") is not None
             in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
-            ciclo_attivo = in_finestra_attiva or bool(partite_valide)
+            # chiamata_partite_live_fallita conta quanto partite_valide: una lista vuota che arriva
+            # da una chiamata fallita non dice che non c'e' niente in corso, e prenderla per buona
+            # qui significa passare all'intervallo da 30 minuti proprio mentre le partite ci sono.
+            # E' la stessa ragione per cui, poco sopra, la pulizia delle partite terminate viene
+            # saltata nello stesso caso.
+            ciclo_attivo = in_finestra_attiva or bool(partite_valide) or chiamata_partite_live_fallita
             prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
             if preferito_live:
                 prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
