@@ -453,6 +453,28 @@ MOMENTUM_PERSISTENTE_ATTIVO = True
 # estesa accanto a SOGLIA_SENZA_STATISTICHE, dove sta il resto della copertura statistiche).
 BACKOFF_STATISTICHE_ASSENTI_ATTIVO = True
 
+# Fino a questo minuto il backoff non si applica: si chiede ad ogni ciclo.
+#
+# Il backoff conta le risposte vuote, non il momento in cui arrivano, e nei primi minuti di QUALSIASI
+# partita le risposte sono vuote - anche per i campionati piu' coperti, perche' l'API pubblica i primi
+# dati dopo un po'. Con cicli da INTERVALLO_CICLO_ATTIVO le tre vuote che armano il backoff si
+# accumulano entro il 9' circa, e da li' in poi si chiede una volta ogni CICLI_BACKOFF_STATISTICHE
+# (~9 minuti): il freno nato per le partite scoperte finiva per frenare proprio la finestra in cui
+# l'API pubblica.
+#
+# Misurato in produzione il 23/08 (istanze sqh7h/n2gf5, partite delle 18:45):
+#   18:46 -> 1 vuota    18:50 -> 2 vuote    18:54 -> 3 vuote, backoff armato (~9' di gioco)
+#   19:00 -> primo "Statistiche non richieste"
+#   19:01:29 -> /live check su Atalanta-Sassuolo (14'): statistiche DISPONIBILI
+# Le statistiche c'erano al 14', il bot aveva gia' smesso di chiederle a ritmo pieno dal 9', e la
+# prima raccolta buona risulta solo verso il 45'. Serie A persa per mezz'ora, e non per un errore
+# dell'API: per il nostro freno. Stessa passata Torino-Milan e Rennes-PSG.
+#
+# 25' e' oltre il ritardo di pubblicazione osservato (Fenerbahce-Lyon vuota al 13' e con i dati al
+# 17'; Atalanta al 14'; le partite segnalate a torto dalla diagnostica stanno tutte fra l'11' e il
+# 21'). Dal 25' in poi il backoff torna a valere pieno: li' una partita ancora vuota lo e' davvero.
+MINUTO_RITMO_PIENO_STATISTICHE = 25
+
 # Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
 # della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
 # scattare), senza cambiare alcun comportamento. Serve a raccogliere dati reali per calibrare le
@@ -786,6 +808,7 @@ try:
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
+    MINUTO_RITMO_PIENO_STATISTICHE = config.get("minuto_ritmo_pieno_statistiche", MINUTO_RITMO_PIENO_STATISTICHE)
     FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
     SILENZIO_SENZA_STATISTICHE_ATTIVO = config.get("silenzio_senza_statistiche_attivo", SILENZIO_SENZA_STATISTICHE_ATTIVO)
     CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = config.get("chiusura_shadow_log_partite_sparite_attiva", CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA)
@@ -851,7 +874,9 @@ try:
           f"{'ATTIVA' if CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA else 'disattiva'} "
           f"(max {MAX_CHIUSURE_SHADOW_LOG_PER_CICLO} partite per ciclo)", flush=True)
     print(f"Backoff statistiche assenti: "
-          f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}", flush=True)
+          f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}"
+          f"{f' (ritmo pieno fino al {MINUTO_RITMO_PIENO_STATISTICHE}°)' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else ''}",
+          flush=True)
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
           f"{'ATTIVO' if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO else 'disattivo'} | "
           f"UptimeRobot: {'collegato' if UPTIMEROBOT_API_KEY else 'non collegato'}", flush=True)
@@ -985,6 +1010,8 @@ SOGLIA_SENZA_STATISTICHE = 3
 CICLI_BACKOFF_STATISTICHE = 3        # da SOGLIA_SENZA_STATISTICHE vuote in poi: 1 tentativo ogni 3 cicli
 CICLI_BACKOFF_STATISTICHE_LUNGO = 6  # da SOGLIA_BACKOFF_LUNGO in poi: 1 ogni 6
 SOGLIA_BACKOFF_LUNGO = 6
+# MINUTO_RITMO_PIENO_STATISTICHE (il minuto sotto il quale il backoff non si applica) sta accanto a
+# BACKOFF_STATISTICHE_ASSENTI_ATTIVO: deve essere definita prima del blocco che legge config.json.
 DURATA_ESCLUSIONE_SENZA_STATISTICHE = 24 * 3600  # 24 ore (era 6h)
 # Prima di questo minuto una risposta senza statistiche non dice niente sulla copertura della
 # lega: nei primissimi minuti l'API spesso non ha ancora pubblicato nulla anche per campionati
@@ -1091,7 +1118,7 @@ def registra_esito_statistiche(league_country, league_name, disponibili):
     salva_leghe_senza_statistiche(LEGHE_SENZA_STATISTICHE)
 
 
-def deve_chiedere_statistiche(fixture_id):
+def deve_chiedere_statistiche(fixture_id, minuto=None):
     """False quando conviene saltare la chiamata statistiche di questo ciclo per QUESTA partita.
 
     Vale solo dopo SOGLIA_SENZA_STATISTICHE risposte vuote di fila, cioe' quando l'API ha gia'
@@ -1099,9 +1126,17 @@ def deve_chiedere_statistiche(fixture_id):
     chiedere - una partita muta puo' svegliarsi - ma a intervalli, e l'intervallo si allarga se il
     silenzio continua.
 
+    minuto e' il minuto di gioco (elapsed dell'API): fino a MINUTO_RITMO_PIENO_STATISTICHE il
+    backoff non si applica, perche' li' le risposte vuote sono il normale ritardo di pubblicazione
+    e non una prova di niente. Va passato elapsed GREZZO, cioe' None quando l'API non lo riporta
+    (intervallo, status "HT"): all'intervallo non arriva nessun dato nuovo, quindi il freno deve
+    restare in vigore invece di rimettersi a chiedere per un minuto che vale 0.
+
     Chi chiama azzera cicli_saltati_statistiche quando la chiamata viene fatta davvero, e
     stats_vuote_consecutive quando arrivano dati: una risposta buona riporta tutto al ritmo pieno."""
     if not BACKOFF_STATISTICHE_ASSENTI_ATTIVO:
+        return True
+    if minuto is not None and minuto <= MINUTO_RITMO_PIENO_STATISTICHE:
         return True
     stato = stato_partite.get(fixture_id, {})
     vuote = stato.get("stats_vuote_consecutive", 0)
@@ -7389,7 +7424,7 @@ def processa_partita(fixture, notifiche_attive=True):
         # partita costa 2 chiamate ben distanziate invece di una raffica.
         # Backoff: se questa partita ha gia' dimostrato di non avere statistiche, si salta il giro -
         # e con esso anche la pausa qui sotto, che serve a distanziare le chiamate che non facciamo.
-        chiamata_saltata = not deve_chiedere_statistiche(fixture_id)
+        chiamata_saltata = not deve_chiedere_statistiche(fixture_id, elapsed_raw)
         if chiamata_saltata:
             stato_partite[fixture_id]["cicli_saltati_statistiche"] = (
                 stato_partite[fixture_id].get("cicli_saltati_statistiche", 0) + 1)
