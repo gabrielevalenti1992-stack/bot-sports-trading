@@ -16,6 +16,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =============================================================================
@@ -1867,32 +1868,6 @@ def poll_callbacks():
                     elif cmd == "/silenced":
                         esegui_comando_sicuro(chat_id, cmd_silenced)
 
-                    elif cmd == "/test":
-                        try:
-                            stats_test = {
-                                "Tiri totali": (5, 3),
-                                "Tiri in porta": (2, 1),
-                                "Corner": (3, 2),
-                            }
-                            foto_test = genera_grafico_barre("test", "Squadra Test A", "Squadra Test B", stats_test)
-                            messaggio_test = (
-                                "🧪 NOTIFICA DI TEST\n\n"
-                                "Squadra Test A vs Squadra Test B\n"
-                                "Se ricevi questo messaggio con il grafico, "
-                                "la consegna Telegram funziona correttamente.\n\n"
-                                "Il problema (se persiste) è nella logica dei trigger, non nella consegna."
-                            )
-                            invia_notifica_telegram(foto_test, messaggio_test)
-                            if foto_test and os.path.exists(foto_test):
-                                try:
-                                    os.remove(foto_test)
-                                except:
-                                    pass
-                        except Exception as e:
-                            requests.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": f"Errore test: {e}"}, timeout=5)
-
                     elif cmd == "/live":
                         esegui_comando_sicuro(chat_id, cmd_live)
 
@@ -2399,7 +2374,14 @@ def get_partite_live():
             notifica_errore_api_throttled(tipo_errore, dettaglio, "get_partite_live")
             ULTIMO_ERRORE_GET_PARTITE_LIVE = time.time()
         return []
-    return data.get("response", [])
+    partite = data.get("response", [])
+    # Popola la mappa fixture->lega usata dalla blacklist statistiche (miglioramento #1)
+    for f in partite:
+        try:
+            _registra_lega_fixture(f["fixture"]["id"], f["league"]["id"])
+        except (KeyError, TypeError):
+            continue
+    return partite
 
 
 # =============================================================================
@@ -2555,7 +2537,14 @@ def aggiorna_piano_giornata_se_serve():
 # =============================================================================
 RIFERIMENTI_ODDS_TTL = 86400  # 24 ore: bookmaker/mercati non cambiano ID durante la giornata
 RIFERIMENTI_ODDS_RETRY_FALLIMENTO = 900  # 15 minuti prima di ritentare dopo un fallimento (vedi sotto)
-_RIFERIMENTI_ODDS_CACHE = {"bookmaker_id": None, "bet_id": None, "timestamp": 0}
+RIFERIMENTI_ODDS_MAX_FALLIMENTI = 3  # dopo 3 fallimenti consecutivi (config errata?) allunga il cooldown a 24h
+_RIFERIMENTI_ODDS_CACHE = {
+    "bookmaker_id": None,
+    "bet_id": None,
+    "timestamp": 0,
+    "fallimenti_consecutivi": 0,
+    "warn_gia_loggato": False,
+}
 
 
 def _trova_id_per_nome(elementi, nome_cercato):
@@ -2578,8 +2567,13 @@ def risolvi_riferimenti_odds():
     if _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and _RIFERIMENTI_ODDS_CACHE["bet_id"] and \
             (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_TTL:
         return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
+    # Cooldown adattivo (miglioramento #3): dopo N fallimenti consecutivi (probabile typo in
+    # config.json, il nome non esisterà mai su /odds/bookmakers), estendiamo l'attesa a 24h
+    # invece di ritentare ogni 15 min all'infinito, e logghiamo il warning UNA volta sola.
+    fallimenti = _RIFERIMENTI_ODDS_CACHE.get("fallimenti_consecutivi", 0)
+    cooldown = RIFERIMENTI_ODDS_TTL if fallimenti >= RIFERIMENTI_ODDS_MAX_FALLIMENTI else RIFERIMENTI_ODDS_RETRY_FALLIMENTO
     if not _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] and \
-            (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < RIFERIMENTI_ODDS_RETRY_FALLIMENTO:
+            (now - _RIFERIMENTI_ODDS_CACHE["timestamp"]) < cooldown:
         return None, None
 
     data_bm, _, _ = get_api_football(
@@ -2594,11 +2588,22 @@ def risolvi_riferimenti_odds():
         _RIFERIMENTI_ODDS_CACHE["bookmaker_id"] = bookmaker_id
         _RIFERIMENTI_ODDS_CACHE["bet_id"] = bet_id
         _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
+        _RIFERIMENTI_ODDS_CACHE["fallimenti_consecutivi"] = 0
+        _RIFERIMENTI_ODDS_CACHE["warn_gia_loggato"] = False
         log(f"Riferimenti quote risolti: bookmaker '{ODDS_BOOKMAKER_NOME}'={bookmaker_id}, mercato '{ODDS_BET_NOME}'={bet_id}")
     else:
         _RIFERIMENTI_ODDS_CACHE["timestamp"] = now
-        log(f"Riferimenti quote non risolti (bookmaker={bookmaker_id}, bet={bet_id}) - "
-            f"ritento tra {RIFERIMENTI_ODDS_RETRY_FALLIMENTO // 60} min, verificare i nomi in config.json")
+        _RIFERIMENTI_ODDS_CACHE["fallimenti_consecutivi"] = fallimenti + 1
+        nuovi_fallimenti = _RIFERIMENTI_ODDS_CACHE["fallimenti_consecutivi"]
+        prossimo_cooldown = RIFERIMENTI_ODDS_TTL if nuovi_fallimenti >= RIFERIMENTI_ODDS_MAX_FALLIMENTI else RIFERIMENTI_ODDS_RETRY_FALLIMENTO
+        if nuovi_fallimenti >= RIFERIMENTI_ODDS_MAX_FALLIMENTI and not _RIFERIMENTI_ODDS_CACHE["warn_gia_loggato"]:
+            log(f"[WARN] Riferimenti quote non risolti dopo {nuovi_fallimenti} tentativi "
+                f"(bookmaker='{ODDS_BOOKMAKER_NOME}', bet='{ODDS_BET_NOME}'). "
+                f"Probabile typo in config.json: verificare i nomi. Cooldown esteso a 24h.")
+            _RIFERIMENTI_ODDS_CACHE["warn_gia_loggato"] = True
+        else:
+            log(f"Riferimenti quote non risolti (bookmaker={bookmaker_id}, bet={bet_id}) - "
+                f"ritento tra {prossimo_cooldown // 60} min ({nuovi_fallimenti} fallimenti consecutivi)")
 
     return _RIFERIMENTI_ODDS_CACHE["bookmaker_id"], _RIFERIMENTI_ODDS_CACHE["bet_id"]
 
@@ -2607,44 +2612,53 @@ def recupera_quote_1x2(fixture_id):
     """Quote 1X2 pre-match per una singola fixture dal bookmaker/mercato configurati. Ritorna un
     dict {'casa','pareggio','ospite','bookmaker'} se trovate, altrimenti None (nessuna quota
     pubblicata per ora, oppure errore/lega non coperta): non distingue i due casi qui, ci pensa
-    il chiamante (Passo A le lascia "da ritentare", Passo B le marca definitive)."""
+    il chiamante (Passo A le lascia "da ritentare", Passo B le marca definitive).
+
+    Cache TTL 10 min (miglioramento #2): le quote pre-match non si muovono ogni 60s a partita
+    iniziata, ma prima venivano richieste da capo per ogni valutazione preferito. Cachiamo anche
+    i None per non ripetere chiamate fallite/mancanti dentro la stessa finestra."""
+    now = time.time()
+    voce_cache = _CACHE_QUOTE_1X2.get(fixture_id)
+    if voce_cache and (now - voce_cache[0]) < CACHE_TTL_QUOTE_1X2:
+        return voce_cache[1]
+
     bookmaker_id, bet_id = risolvi_riferimenti_odds()
     if not bookmaker_id or not bet_id:
+        # Non cachiamo il "config non risolta": è transitorio (verrà risolta al prossimo
+        # ciclo o al recupero dopo cooldown), cachare qui rischierebbe di negare quote a
+        # partite valide per 10 min inutilmente.
         return None
 
+    risultato = None
     data, _, _ = get_api_football(
         "https://v3.football.api-sports.io/odds",
         {"fixture": fixture_id, "bookmaker": bookmaker_id, "bet": bet_id},
         timeout=15, contesto=f"recupera_quote_1x2({fixture_id})")
-    if not data:
-        return None
 
-    response = data.get("response") or []
-    if not response:
-        return None
-    bookmakers = response[0].get("bookmakers") or []
-    if not bookmakers:
-        return None
-    bets = bookmakers[0].get("bets") or []
-    if not bets:
-        return None
-    valori = bets[0].get("values") or []
+    if data:
+        response = data.get("response") or []
+        if response:
+            bookmakers = response[0].get("bookmakers") or []
+            if bookmakers:
+                bets = bookmakers[0].get("bets") or []
+                if bets:
+                    valori = bets[0].get("values") or []
+                    quote = {}
+                    etichette = {"home": "casa", "draw": "pareggio", "away": "ospite"}
+                    for v in valori:
+                        chiave = etichette.get((v.get("value") or "").strip().lower())
+                        if not chiave:
+                            continue
+                        try:
+                            quote[chiave] = float(v.get("odd"))
+                        except (TypeError, ValueError):
+                            continue
+                    if all(k in quote for k in ("casa", "pareggio", "ospite")):
+                        quote["bookmaker"] = bookmakers[0].get("name") or ODDS_BOOKMAKER_NOME
+                        risultato = quote
 
-    quote = {}
-    etichette = {"home": "casa", "draw": "pareggio", "away": "ospite"}
-    for v in valori:
-        chiave = etichette.get((v.get("value") or "").strip().lower())
-        if not chiave:
-            continue
-        try:
-            quote[chiave] = float(v.get("odd"))
-        except (TypeError, ValueError):
-            continue
-
-    if not all(k in quote for k in ("casa", "pareggio", "ospite")):
-        return None
-    quote["bookmaker"] = bookmakers[0].get("name") or ODDS_BOOKMAKER_NOME
-    return quote
+    _CACHE_QUOTE_1X2[fixture_id] = (now, risultato)
+    return risultato
 
 
 def _recupero_quote_iniziali_worker(piano):
@@ -2801,12 +2815,65 @@ CACHE_TTL_STATS_EVENTI = 50  # secondi, appena sotto il ciclo più stretto (60s 
 _CACHE_STATISTICHE_PARTITA = {}  # fixture_id -> (timestamp, risposta)
 _CACHE_EVENTI_PARTITA = {}  # fixture_id -> (timestamp, risposta)
 
+# Blacklist leghe che non pubblicano statistiche live: dopo N partite consecutive con risposta
+# vuota (ha_statistiche_disponibili False) su una stessa lega, mettiamo la lega in cooldown
+# saltando il fetch per un po'. Evita di consumare quota API su campionati minori che l'API
+# non copre mai — nel loop dei preferiti erano fino a 100 chiamate/min sprecate.
+FALLIMENTI_LEGA_PER_BLACKLIST = 5
+COOLDOWN_LEGA_SENZA_STATS = 1800  # 30 minuti, poi si ritenta (una lega può iniziare a pubblicare)
+_LEGA_PER_FIXTURE = {}  # fixture_id -> league_id (popolato da get_partite_live/costruisci_piano_giornata)
+_LEGHE_SENZA_STATS = {}  # league_id -> {"fallimenti": int, "prossimo_retry": ts}
+
+
+def _registra_lega_fixture(fixture_id, league_id):
+    if fixture_id and league_id:
+        _LEGA_PER_FIXTURE[fixture_id] = league_id
+
+
+def _lega_e_blacklistata(league_id):
+    if not league_id:
+        return False
+    info = _LEGHE_SENZA_STATS.get(league_id)
+    if not info or info["fallimenti"] < FALLIMENTI_LEGA_PER_BLACKLIST:
+        return False
+    return time.time() < info["prossimo_retry"]
+
+
+def _segna_fallimento_lega(league_id):
+    if not league_id:
+        return
+    info = _LEGHE_SENZA_STATS.setdefault(league_id, {"fallimenti": 0, "prossimo_retry": 0})
+    info["fallimenti"] += 1
+    if info["fallimenti"] == FALLIMENTI_LEGA_PER_BLACKLIST:
+        log(f"[BLACKLIST STATS] lega {league_id} messa in cooldown per {COOLDOWN_LEGA_SENZA_STATS // 60} min "
+            f"dopo {FALLIMENTI_LEGA_PER_BLACKLIST} risposte vuote consecutive")
+    if info["fallimenti"] >= FALLIMENTI_LEGA_PER_BLACKLIST:
+        info["prossimo_retry"] = time.time() + COOLDOWN_LEGA_SENZA_STATS
+
+
+def _segna_successo_lega(league_id):
+    if league_id in _LEGHE_SENZA_STATS:
+        _LEGHE_SENZA_STATS.pop(league_id, None)
+
+
+# Cache quote 1X2: le quote pre-match non cambiano ogni 60s a partita iniziata, ma erano
+# fetched ogni volta che si valutava un preferito. TTL 10 min è largo ma sufficiente
+# (le quote pubblicate valgono per ore).
+CACHE_TTL_QUOTE_1X2 = 600
+_CACHE_QUOTE_1X2 = {}  # fixture_id -> (timestamp, quote_dict o None)
+
 
 def get_statistiche_partita(fixture_id, debug=False):
     now = time.time()
     voce_cache = _CACHE_STATISTICHE_PARTITA.get(fixture_id)
     if voce_cache and (now - voce_cache[0]) < CACHE_TTL_STATS_EVENTI:
         return voce_cache[1]
+    # BLACKLIST: se questa lega ha dato risposte vuote per N partite di fila, salta il fetch
+    # per il cooldown corrente (miglioramento #1). Restituisce [] "come se l'API avesse risposto
+    # senza dati" — comportamento identico a quello che avrebbe generato la chiamata reale.
+    league_id = _LEGA_PER_FIXTURE.get(fixture_id)
+    if _lega_e_blacklistata(league_id):
+        return []
     if not API_FOOTBALL_KEY:
         return None
     url = "https://v3.football.api-sports.io/fixtures/statistics"
@@ -2826,6 +2893,11 @@ def get_statistiche_partita(fixture_id, debug=False):
         return None
     risultato = data.get("response", [])
     _CACHE_STATISTICHE_PARTITA[fixture_id] = (now, risultato)
+    # Aggiorna la blacklist lega: risposta valida -> reset, vuota -> incrementa contatore
+    if ha_statistiche_disponibili(risultato):
+        _segna_successo_lega(league_id)
+    else:
+        _segna_fallimento_lega(league_id)
     return risultato
 
 
@@ -3304,10 +3376,27 @@ def cmd_live(chat_id):
             json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento.", "parse_mode": "Markdown"}, timeout=5)
         return
     MAX_PARTITE_MOSTRATE = 20
+    partite_da_mostrare = partite_cmd[:MAX_PARTITE_MOSTRATE]
+
+    # Fetch stats in parallelo (miglioramento #4): prima era sequenziale con sleep 0.3s -> ~6s
+    # bloccanti per l'utente. Il rate-limit globale (70 chiamate/min proattivo) fa comunque da
+    # freno se 5 thread partono tutti insieme, quindi qui non serve throttling locale.
+    stats_per_fixture = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(get_statistiche_partita, f["fixture"]["id"]): f["fixture"]["id"]
+                   for f in partite_da_mostrare}
+        for fut in as_completed(futures):
+            fid = futures[fut]
+            try:
+                stats_per_fixture[fid] = fut.result()
+            except Exception as e:
+                log(f"  /live errore fetch stats fixture {fid}: {e}")
+                stats_per_fixture[fid] = None
+
     header = f"Partite live monitorate: {len(partite_cmd)}"
     match_lines = []
     n_con_dati = 0
-    for f in partite_cmd[:MAX_PARTITE_MOSTRATE]:
+    for f in partite_da_mostrare:
         fid = f["fixture"]["id"]
         home = f["teams"]["home"]["name"]
         away = f["teams"]["away"]["name"]
@@ -3316,14 +3405,13 @@ def cmd_live(chat_id):
         score_h = f["goals"]["home"] or 0
         score_a = f["goals"]["away"] or 0
 
-        stats_live = get_statistiche_partita(fid)
+        stats_live = stats_per_fixture.get(fid)
         dati_ok = ha_statistiche_disponibili(stats_live)
         if dati_ok:
             n_con_dati += 1
         log(f"  /live check: {home} vs {away} (id {fid}) - statistiche {'DISPONIBILI' if dati_ok else 'assenti'}")
 
         match_lines.append(f"- {home} {score_h}-{score_a} {away} ({league}, {minute}')")
-        time.sleep(0.3)
 
     n_mostrate = len(match_lines)
     lines = [header] + match_lines
