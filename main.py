@@ -2252,6 +2252,64 @@ def _attendi_slot_rate_limit_globale():
         time.sleep(max(attesa, 0.05))
 
 
+# =============================================================================
+# REGISTRO DEGLI ESITI DELLE CHIAMATE: come sta il livello piu' a monte della pipeline
+#
+# La diagnostica automatica guardava solo le PARTITE: se una partita non ha statistiche lo dice, se
+# il minuto non avanza lo dice. Ma tutto quello che sta prima - la chiamata riuscita o no - non lo
+# guardava nessuno. Nei log del 25 e 26/08 sono passate dieci chiamate fallite (rate-limit,
+# timeout, quota) e la diagnostica ha scritto "nessuna anomalia rilevata" per due giorni di fila.
+#
+# Il buco piu' grave era il caso peggiore: quando a fallire e' la chiamata live, partite_valide
+# resta vuota e la diagnostica usciva subito con "nessuna partita live valida, skip". Cioe' proprio
+# quando la pipeline e' rotta alla radice, l'unico controllo automatico taceva - il 25/08 alle
+# 23:42 e alle 23:45 e' andata esattamente cosi'.
+#
+# Qui si tiene traccia dell'esito di ogni chiamata su una finestra scorrevole. Solo in memoria e
+# senza dettagli: serve a rispondere "quante ne stanno fallendo, e di che tipo", non a fare da
+# storico.
+FINESTRA_ESITI_API = 1800  # 30 minuti: la stessa passata della diagnostica automatica
+ESITI_API_RECENTI = collections.deque()  # (timestamp, contesto, tipo_errore o None se riuscita)
+_LOCK_ESITI_API = threading.Lock()
+
+
+def registra_esito_api(contesto, tipo_errore):
+    """Annota com'e' andata una chiamata ad API-Football. tipo_errore None = riuscita."""
+    with _LOCK_ESITI_API:
+        ora = time.time()
+        ESITI_API_RECENTI.append((ora, contesto, tipo_errore))
+        while ESITI_API_RECENTI and ora - ESITI_API_RECENTI[0][0] > FINESTRA_ESITI_API:
+            ESITI_API_RECENTI.popleft()
+
+
+def riepilogo_esiti_api(finestra=FINESTRA_ESITI_API):
+    """(tentate, fallite, saltate, per_tipo, contesti_falliti) nella finestra richiesta.
+
+    "saltate" sta a parte dalle "fallite": una chiamata saltata dal raffreddamento non e' stata
+    rifiutata dall'API, e' una conseguenza di un rifiuto precedente - contarla come un altro
+    fallimento gonfierebbe il conto di decine di unita' per un singolo episodio."""
+    with _LOCK_ESITI_API:
+        limite = time.time() - finestra
+        recenti = [voce for voce in ESITI_API_RECENTI if voce[0] >= limite]
+    tentate = fallite = saltate = 0
+    per_tipo = {}
+    contesti_falliti = {}
+    for _, contesto, tipo in recenti:
+        if tipo == "rate_limit_raffreddamento":
+            saltate += 1
+            continue
+        tentate += 1
+        if tipo is None:
+            continue
+        fallite += 1
+        per_tipo[tipo] = per_tipo.get(tipo, 0) + 1
+        # Il contesto porta con se' il fixture_id (es. "fetch_fixture_events(1622628)"): per
+        # contare gli episodi serve la funzione, non la singola partita.
+        nome = contesto.split("(")[0]
+        contesti_falliti[nome] = contesti_falliti.get(nome, 0) + 1
+    return tentate, fallite, saltate, per_tipo, contesti_falliti
+
+
 def chiamate_api_ultimo_minuto():
     """Quante richieste ha fatto il bot negli ultimi 60 secondi, contando TUTTI i suoi thread.
 
@@ -2495,6 +2553,7 @@ def get_api_football(url, params, timeout, contesto):
         # Tipo dedicato: questa non e' una nuova diagnosi dell'API, e' una conseguenza di quella
         # di prima. Trattarla come un rate-limit a se' stante voleva dire far ripartire allarmi e
         # contatori per ogni chiamata saltata dello stesso raffreddamento.
+        registra_esito_api(contesto, "rate_limit_raffreddamento")
         return None, "rate_limit_raffreddamento", "raffreddamento dopo un rate-limit recente, chiamata saltata"
     _attendi_slot_rate_limit_globale()
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
@@ -2507,6 +2566,7 @@ def get_api_football(url, params, timeout, contesto):
         response = requests.get(url, headers=headers, params=params, timeout=timeout)
     except Exception as e:
         log(f"[{contesto}] Eccezione di rete: {e}")
+        registra_esito_api(contesto, "rete")
         return None, "rete", f"eccezione di rete ({e})"
 
     _log_quota_headers(response)
@@ -2516,6 +2576,7 @@ def get_api_football(url, params, timeout, contesto):
         log(f"[{contesto}] {motivo} - corpo: {response.text[:500]}")
         if tipo == "rate_limit":
             tipo, motivo = _arma_raffreddamento(contesto, response.text, motivo)
+        registra_esito_api(contesto, tipo)
         return None, tipo, motivo
 
     data = response.json()
@@ -2524,9 +2585,12 @@ def get_api_football(url, params, timeout, contesto):
         log(f"[{contesto}] Errore applicativo API: {errori}")
         if _e_errore_rate_limit(errori):
             tipo, motivo = _arma_raffreddamento(contesto, str(errori), str(errori))
+            registra_esito_api(contesto, tipo)
             return None, tipo, motivo
+        registra_esito_api(contesto, "api_errors")
         return None, "api_errors", str(errori)
 
+    registra_esito_api(contesto, None)
     return data, None, None
 
 
@@ -6204,6 +6268,11 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 # pipeline risale e cosa controllare - senza dover rifare il ragionamento da capo ogni volta.
 #
 # Versione tecnica (nomi di funzioni/variabili reali, per chi legge il codice):
+# CHIAMATE API / CHIAVE API / QUOTA API: riguardano il livello a monte delle partite, cioe' se le
+#   richieste ad API-Football stanno andando a buon fine (vedi anomalie_chiamate_api e il registro
+#   ESITI_API_RECENTI). Sono le uniche anomalie che possono comparire anche senza nessuna partita
+#   live: e' il caso in cui a fallire e' proprio la chiamata live, dove prima la diagnostica usciva
+#   con "nessuna partita live valida, skip" senza dire niente.
 # TRACCIAMENTO: la partita deve comparire tra quelle live e passare campionato_valido() prima che
 #   processa_partita() la veda. Se manca: controllare il filtro lega/whitelist, o se il ciclo
 #   principale è più lento delle partite che iniziano (troppe live insieme).
@@ -6236,6 +6305,15 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 # con un errore di parsing invece di consegnarlo.
 LEGENDA_DIAGNOSTICA = (
     "Legenda passaggi pipeline (dove può fermarsi, come intervenire):\n"
+    "CHIAMATE API: una parte delle richieste ad API-Football sta fallendo. Il messaggio riporta "
+    "quante e di che tipo, e quante chiamate ha fatto il bot nell'ultimo minuto: se quel numero è "
+    "basso il limite non dipende dal nostro ritmo e di solito rientra da solo, se è alto conviene "
+    "guardare quante partite si stanno seguendo insieme. È l'unica anomalia che può arrivare anche "
+    "senza partite live: lì vuol dire che a fallire è proprio la chiamata che le cerca.\n"
+    "CHIAVE API: le richieste vengono rifiutate per autenticazione. Finché dura il bot non vede "
+    "niente: controllare la chiave e che il piano copra le risorse usate.\n"
+    "QUOTA API: le richieste rimaste per oggi stanno finendo. A quota esaurita il bot resta cieco "
+    "fino al reset giornaliero.\n"
     "TRACCIAMENTO: la partita deve comparire tra quelle live e in un campionato supportato prima "
     "che il bot inizi a seguirla. Se manca: controllare il filtro lega/whitelist, o se il ciclo è "
     "più lento delle partite che iniziano (troppe partite live insieme).\n"
@@ -6290,6 +6368,101 @@ def _anomalie_nuove(fixture_id, trovate, registra=True):
     return nuove
 
 
+# Quante chiamate devono fallire in mezz'ora perche' sia un'anomalia e non sfortuna. Nei due giorni
+# analizzati i fallimenti sono stati dieci in tutto, mai piu' di due nella stessa mezz'ora tranne il
+# 25/08 fra le 23:42 e le 23:45: sotto i tre si resta nel rumore di fondo dell'API.
+SOGLIA_CHIAMATE_FALLITE_DIAGNOSTICA = 3
+# ...ma il conteggio complessivo da solo non basta, e il motivo lo mostra proprio quella sera: tre
+# rifiuti su get_partite_live dentro un giro da una quarantina di chiamate fanno il 7%, cioe' non
+# scatterebbe niente - eppure quei tre rifiuti sono tre CICLI INTERI persi, con il bot cieco su
+# tutte le partite in corso. La chiamata live e' una sola per ciclo: contarla insieme alle decine
+# di chiamate per partita la annega. Ha una soglia sua, sul numero e non sulla percentuale.
+SOGLIA_LIVE_FALLITE_DIAGNOSTICA = 2
+# Percentuale di fallimenti che vale un'anomalia sul totale: di notte una mezz'ora puo' contenere
+# una decina di chiamate in tutto, e tre su dieci sono gia' un problema serio.
+SOGLIA_PERCENTUALE_FALLIMENTI_DIAGNOSTICA = 20
+# Sotto questa quota giornaliera residua conviene saperlo prima di restare a secco.
+SOGLIA_QUOTA_RESIDUA_DIAGNOSTICA = 500
+# Anomalie del livello chiamate gia' mandate in chat: {categoria: timestamp}. Non e' persistita
+# come quella per partita - un riavvio nel mezzo di un guasto dell'API e' un buon momento per
+# risentirselo dire - e usa la stessa regola di quella: una volta sola finche' dura, di nuovo se
+# rientra e si ripresenta.
+ANOMALIE_API_NOTIFICATE = {}
+INTERVALLO_RIPETIZIONE_ANOMALIE_API = 10800  # 3 ore: un guasto lungo va ricordato, non ripetuto
+
+
+def anomalie_chiamate_api(ora):
+    """Anomalie del livello CHIAMATE, quello a monte delle partite. Ritorna {categoria: testo}.
+
+    E' la parte che mancava del tutto: la diagnostica sapeva dire "questa partita non ha
+    statistiche" ma non "le chiamate stanno fallendo", che e' spesso la stessa cosa vista dal lato
+    giusto - e soprattutto e' l'unica cosa dicibile quando di partite non ce n'e' nessuna perche'
+    la chiamata live e' andata male."""
+    trovate = {}
+    tentate, fallite, saltate, per_tipo, contesti = riepilogo_esiti_api()
+
+    if per_tipo.get("auth"):
+        # Chiave non valida o piano non abilitato: il bot non puo' fare niente finche' non si
+        # sistema, e non c'e' soglia che tenga - basta una volta.
+        quante = per_tipo["auth"]
+        trovate["CHIAVE API"] = (
+            f"CHIAVE API: {quante} chiamat{'a rifiutata' if quante == 1 else 'e rifiutate'} per "
+            f"autenticazione negli ultimi {FINESTRA_ESITI_API // 60} min. La chiave non e' valida o "
+            f"il piano non copre la risorsa richiesta: finche' dura, il bot e' cieco.")
+
+    percentuale = (fallite * 100 / tentate) if tentate else 0
+    live_fallite = contesti.get("get_partite_live", 0)
+    troppe_in_generale = (fallite >= SOGLIA_CHIAMATE_FALLITE_DIAGNOSTICA
+                          and percentuale >= SOGLIA_PERCENTUALE_FALLIMENTI_DIAGNOSTICA)
+    live_in_difficolta = live_fallite >= SOGLIA_LIVE_FALLITE_DIAGNOSTICA
+    if troppe_in_generale or live_in_difficolta:
+        dettaglio_tipi = ", ".join(f"{tipo} x{n}" for tipo, n in sorted(per_tipo.items(), key=lambda x: -x[1]))
+        dettaglio_dove = ", ".join(f"{nome} x{n}" for nome, n in sorted(contesti.items(), key=lambda x: -x[1]))
+        apertura = (f"CHIAMATE API: la chiamata alle partite live e' fallita {live_fallite} volte negli "
+                    f"ultimi {FINESTRA_ESITI_API // 60} min - sono altrettanti cicli in cui il bot non ha "
+                    f"visto nessuna partita. In tutto {fallite} chiamate fallite su {tentate} ({percentuale:.0f}%)"
+                    ) if live_in_difficolta else (
+                   f"CHIAMATE API: {fallite} chiamate fallite su {tentate} negli ultimi "
+                   f"{FINESTRA_ESITI_API // 60} min ({percentuale:.0f}%)")
+        trovate["CHIAMATE API"] = (
+            apertura
+            + (f", piu' {saltate} saltate dal raffreddamento" if saltate else "")
+            + f". Tipi: {dettaglio_tipi}. Dove: {dettaglio_dove}. "
+            f"Chiamate del bot nell'ultimo minuto: {chiamate_api_ultimo_minuto()}"
+            + (f" (limite del piano: {ULTIMA_QUOTA_API['limite_minuto']}/min)"
+               if ULTIMA_QUOTA_API.get("limite_minuto") else "") + ".")
+
+    residuo = ULTIMA_QUOTA_API.get("residuo")
+    try:
+        residuo_num = int(residuo) if residuo is not None else None
+    except (TypeError, ValueError):
+        residuo_num = None
+    if residuo_num is not None and residuo_num < SOGLIA_QUOTA_RESIDUA_DIAGNOSTICA:
+        trovate["QUOTA API"] = (
+            f"QUOTA API: restano {residuo_num} richieste su {ULTIMA_QUOTA_API.get('limite')} per oggi. "
+            f"Esaurita la quota il bot smette di vedere le partite fino al reset.")
+
+    return trovate
+
+
+def _anomalie_nuove_api(trovate, ora, registra=True):
+    """Come _anomalie_nuove ma per il livello chiamate, che non ha un fixture_id a cui agganciarsi.
+    Una categoria gia' mandata torna in chat solo se rientra, o se il guasto dura piu' di
+    INTERVALLO_RIPETIZIONE_ANOMALIE_API."""
+    nuove = []
+    for categoria, testo in trovate.items():
+        mandata = ANOMALIE_API_NOTIFICATE.get(categoria)
+        if mandata is None or (ora - mandata) > INTERVALLO_RIPETIZIONE_ANOMALIE_API:
+            nuove.append(testo)
+            if registra:
+                ANOMALIE_API_NOTIFICATE[categoria] = ora
+    if registra:
+        for categoria in list(ANOMALIE_API_NOTIFICATE):
+            if categoria not in trovate:
+                del ANOMALIE_API_NOTIFICATE[categoria]
+    return nuove
+
+
 def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
     """Diagnostica automatica della pipeline dati: gira da sola dentro il ciclo principale ogni
     INTERVALLO_DIAGNOSTICA_AUTOMATICA secondi, riusando partite_valide/stato_partite già
@@ -6308,13 +6481,20 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
         return
     ULTIMA_DIAGNOSTICA_AUTOMATICA = ora
 
+    # Il livello CHIAMATE si controlla sempre, anche - anzi soprattutto - quando di partite non ce
+    # n'e' nessuna: una lista vuota puo' voler dire "non c'e' calcio in questo momento" oppure "la
+    # chiamata live e' fallita", e finora la diagnostica usciva in silenzio in tutti e due i casi.
+    trovate_api = anomalie_chiamate_api(ora)
+    anomalie = list(trovate_api.values())  # tutto ciò che risulta anomalo adesso (log di Render)
+    anomalie_nuove = _anomalie_nuove_api(trovate_api, ora, registra=notifiche_attive)  # in chat
+
     if not partite_valide:
-        log("Diagnostica automatica: nessuna partita live valida in questo momento, skip.")
-        return
+        if not anomalie:
+            log("Diagnostica automatica: nessuna partita live valida in questo momento, skip.")
+            return
+        log("Diagnostica automatica: nessuna partita live valida, ma il livello chiamate ha qualcosa da dire.")
 
     righe_log = []
-    anomalie = []       # tutto ciò che risulta anomalo adesso (finisce nei log di Render)
-    anomalie_nuove = [] # solo ciò che non era già stato notificato (finisce in chat)
     for f in partite_valide:
         fid = f.get("fixture", {}).get("id")
         if not fid:
@@ -6446,7 +6626,10 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             f"snap_valore={'si' if ultimo_val else 'no'}, snap_strategie={'si' if ultimo_strat else 'no'}"
         )
 
-    log("Diagnostica automatica - dettaglio: " + (" | ".join(righe_log) if righe_log else "nessuna partita tracciabile"))
+    tentate_tot, fallite_tot, saltate_tot, _, _ = riepilogo_esiti_api()
+    log("Diagnostica automatica - dettaglio: " + (" | ".join(righe_log) if righe_log else "nessuna partita tracciabile")
+        + f" || chiamate API ultimi {FINESTRA_ESITI_API // 60} min: {tentate_tot} tentate, "
+          f"{fallite_tot} fallite, {saltate_tot} saltate dal raffreddamento")
 
     if not anomalie:
         log("Diagnostica automatica: nessuna anomalia rilevata.")
