@@ -21,6 +21,7 @@
   "soglia_quota_dominio_notifica": 65,
   "un_aggiornamento_per_blocco_attivo": true,
   "backoff_statistiche_assenti_attivo": true,
+  "minuto_ritmo_pieno_statistiche": 25,
   "favorita_in_difficolta_attivo": true,
   "silenzio_senza_statistiche_attivo": true,
   "chiusura_shadow_log_partite_sparite_attiva": true,
