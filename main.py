@@ -8941,6 +8941,7 @@ def imposta_comandi_telegram():
         {"command": "apiusage", "description": "Chiamate API-Football fatte al giorno"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
         {"command": "dominio", "description": "Classifica partite live per dominio (chi fa la partita)"},
+        {"command": "classificadominanza", "description": "Classifica di sempre: chi segna dopo aver dominato"},
         {"command": "analisi", "description": "Distribuzione storica gol per fascia di minuto"},
         {"command": "aggiornastorico", "description": "Aggiorna lo storico minutaggi"},
         {"command": "help", "description": "Mostra i comandi disponibili"},
