@@ -1480,22 +1480,48 @@ def squadra_dominava_prima_del_gol(stats_precedenti, lato_che_segna):
     return tiri[1] > tiri[0] and corner[1] > corner[0] and area[1] > area[0]
 
 
-def registra_gol_dominanza(squadra, ha_dominato):
-    if ha_dominato is None:
+def registra_gol_dominanza(squadra, ha_dominato, quanti=1):
+    """quanti = di quanto e' salito il punteggio di questa squadra fra due letture consecutive.
+
+    Non e' sempre 1: fra un ciclo e l'altro passano INTERVALLO_CICLO_ATTIVO secondi (di piu' se
+    c'e' stato un raffreddamento da rate-limit), e in quella finestra la stessa squadra puo'
+    segnare due volte. Prima il chiamante faceva "if punteggio salito: registra un gol", quindi
+    una doppietta dentro lo stesso intervallo contava per uno solo - visto in produzione il
+    25/08 alle 18:51:23, "Punteggio cambiato: 0-0 -> 0-2".
+
+    Tutti i gol dell'intervallo ereditano lo stesso verdetto di dominanza, perche' e' l'unica
+    lettura statistiche che abbiamo: quella precedente al primo dei due. Dello stato intermedio
+    non sappiamo niente, e inventarlo sarebbe peggio che attribuirlo.
+
+    gol_visti conta OGNI gol visto dal bot; gol_con_stats solo quelli valutabili, cioe' con una
+    lettura statistiche precedente da cui ricavare un verdetto (ha_dominato non None). I due
+    numeri sono diversi apposta - vedi testo_classifica_dominanza."""
+    if quanti <= 0:
         return
-    voce = CLASSIFICA_DOMINANZA.setdefault(squadra, {"gol_con_stats": 0, "gol_da_dominanza": 0})
-    voce["gol_con_stats"] += 1
-    if ha_dominato:
-        voce["gol_da_dominanza"] += 1
+    voce = CLASSIFICA_DOMINANZA.setdefault(
+        squadra, {"gol_visti": 0, "gol_con_stats": 0, "gol_da_dominanza": 0})
+    # .get sul primo: le voci scritte prima che gol_visti esistesse non ce l'hanno.
+    voce["gol_visti"] = voce.get("gol_visti", 0) + quanti
+    if ha_dominato is not None:
+        voce["gol_con_stats"] += quanti
+        if ha_dominato:
+            voce["gol_da_dominanza"] += quanti
     salva_classifica_dominanza(CLASSIFICA_DOMINANZA)
 
 
 def testo_classifica_dominanza(minimo_gol=2, top_n=20):
     """Classifica delle squadre per gol segnati subito dopo aver dominato tiri, corner e tiri in
     area (tutti e tre insieme) nell'ultima lettura statistiche precedente. minimo_gol filtra le
-    squadre con troppo pochi gol valutabili per non far salire in classifica un 1/1 (100%) casuale."""
+    squadre con troppo pochi gol valutabili per non far salire in classifica un 1/1 (100%) casuale.
+
+    Il denominatore NON e' "i gol fatti dalla squadra": e' quanti di quei gol il bot ha potuto
+    valutare. Restano fuori i gol segnati prima che l'API pubblicasse le prime statistiche (cioe'
+    buona parte di quelli nei primi minuti), quelli delle leghe senza copertura tiri/corner/area, e
+    quelli di partite che il bot non stava seguendo. Il messaggio lo dice, perche' letto come
+    "gol fatti" quel numero sembra sbagliato - ed e' la prima cosa che si nota confrontandolo con
+    il tabellino."""
     righe = [
-        (squadra, dati["gol_da_dominanza"], dati["gol_con_stats"])
+        (squadra, dati["gol_da_dominanza"], dati["gol_con_stats"], dati.get("gol_visti", 0))
         for squadra, dati in CLASSIFICA_DOMINANZA.items()
         if dati["gol_con_stats"] >= minimo_gol
     ]
@@ -1505,9 +1531,16 @@ def testo_classifica_dominanza(minimo_gol=2, top_n=20):
     righe.sort(key=lambda r: (-r[1], -(r[1] / r[2]), r[0]))
     testo = ("📊 Classifica dominanza-gol\n"
              "Squadre che segnano più spesso dopo aver dominato tiri + corner + tiri in area:\n\n")
-    for i, (squadra, dominanza, totali) in enumerate(righe[:top_n], 1):
-        pct = round(dominanza / totali * 100)
-        testo += f"{i}. {squadra}: {dominanza}/{totali} gol da dominanza ({pct}%)\n"
+    for i, (squadra, dominanza, valutabili, visti) in enumerate(righe[:top_n], 1):
+        pct = round(dominanza / valutabili * 100)
+        # I gol non valutabili si dicono solo quando ce ne sono: aggiungere "(0 non valutabili)"
+        # ad ogni riga sarebbe rumore su tutte le squadre che non ne hanno.
+        esclusi = max(0, visti - valutabili)
+        coda = f" · {esclusi} gol senza statistiche" if esclusi else ""
+        testo += f"{i}. {squadra}: {dominanza}/{valutabili} gol da dominanza ({pct}%){coda}\n"
+    testo += ("\nIl totale è dei gol VALUTABILI, non dei gol fatti: restano fuori quelli segnati "
+              "prima che l'API pubblicasse le statistiche, quelli delle leghe senza tiri/corner/area "
+              "e quelli di partite non seguite.")
     return testo
 
 
@@ -7892,10 +7925,11 @@ def processa_partita(fixture, notifiche_attive=True):
             log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
             history_precedente = stato_precedente.get("history", [])
             stats_precedenti = history_precedente[-1]["stats"] if history_precedente else None
-            if score_home > prev_score_home:
-                registra_gol_dominanza(home, squadra_dominava_prima_del_gol(stats_precedenti, "home"))
-            if score_away > prev_score_away:
-                registra_gol_dominanza(away, squadra_dominava_prima_del_gol(stats_precedenti, "away"))
+            # Il numero di gol, non "almeno uno": registra_gol_dominanza esce da sola se e' 0 o meno.
+            registra_gol_dominanza(home, squadra_dominava_prima_del_gol(stats_precedenti, "home"),
+                                   score_home - prev_score_home)
+            registra_gol_dominanza(away, squadra_dominava_prima_del_gol(stats_precedenti, "away"),
+                                   score_away - prev_score_away)
         elif punteggio_corretto_al_ribasso:
             # Nessuna notifica: il risultato mostrato resta comunque aggiornato (lo stato viene
             # riscritto poco più sotto), ma dire "gol" per un gol tolto è il contrario di quello
