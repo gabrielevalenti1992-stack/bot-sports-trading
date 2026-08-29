@@ -455,6 +455,18 @@ ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = True
 # combinata (barre + momentum), esattamente come succede da sempre per i preferiti.
 MOMENTUM_PERSISTENTE_ATTIVO = True
 
+# Il grafico momentum nel canale preferiti: automatico su ogni notifica, oppure solo quando lo si
+# chiede col bottone come in chat principale.
+#
+# Automatico voleva dire un'immagine combinata (barre + momentum) ad OGNI aggiornamento di una
+# partita preferita, cioe' ogni INTERVALLO_CICLO_MOMENTUM: nel canale il grafico diventava il
+# messaggio, e la lettura veloce delle barre ci finiva sotto. Il bottone "📈 Momentum" era gia'
+# presente anche sulle notifiche dei preferiti (get_notification_keyboard non guarda is_favorite
+# per decidere se mostrarlo), quindi spegnere l'automatismo non toglie niente: il grafico resta a
+# un tocco di distanza, e con MOMENTUM_PERSISTENTE_ATTIVO la richiesta vale per il resto della
+# partita, non solo per il messaggio su cui si e' cliccato.
+MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO = False
+
 # Backoff sulle statistiche che non arrivano mai per una singola partita (soglie e motivazione
 # estesa accanto a SOGLIA_SENZA_STATISTICHE, dove sta il resto della copertura statistiche).
 BACKOFF_STATISTICHE_ASSENTI_ATTIVO = True
@@ -843,6 +855,8 @@ try:
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = config.get("elimina_scheda_precedente_attivo", ELIMINA_SCHEDA_PRECEDENTE_ATTIVO)
     MOMENTUM_PERSISTENTE_ATTIVO = config.get("momentum_persistente_attivo", MOMENTUM_PERSISTENTE_ATTIVO)
+    MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO = config.get(
+        "momentum_automatico_preferiti_attivo", MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -907,7 +921,8 @@ try:
           f"UptimeRobot: {'collegato' if UPTIMEROBOT_API_KEY else 'non collegato'}", flush=True)
     print(f"Scheda precedente eliminata: {'SI' if ELIMINA_SCHEDA_PRECEDENTE_ATTIVO else 'no'} | "
           f"momentum persistente per partita: "
-          f"{'SI' if MOMENTUM_PERSISTENTE_ATTIVO else 'no'}", flush=True)
+          f"{'SI' if MOMENTUM_PERSISTENTE_ATTIVO else 'no'} | momentum nei preferiti: "
+          f"{'automatico' if MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO else 'su richiesta (bottone)'}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -8707,14 +8722,16 @@ def processa_partita(fixture, notifiche_attive=True):
         # Il grafico (barre o combinato) serve solo per l'invio Telegram più sotto: se le
         # notifiche sono spente (fuori orario) generarlo comunque sarebbe lavoro sprecato
         # (rendering matplotlib + scrittura file) per un'immagine mai inviata e subito cancellata.
-        # Il combinato (barre + momentum) spetta ai preferiti e a chi ha chiesto il momentum su
-        # questa partita: la richiesta vale per il resto della gara, non solo per il messaggio su
-        # cui si e' cliccato (vedi MOMENTUM_PERSISTENTE_ATTIVO).
+        # Il combinato (barre + momentum) spetta a chi ha chiesto il momentum su questa partita:
+        # la richiesta vale per il resto della gara, non solo per il messaggio su cui si e'
+        # cliccato (vedi MOMENTUM_PERSISTENTE_ATTIVO). Per i preferiti era automatico su ogni
+        # notifica; ora anche loro lo ricevono su richiesta, col bottone che hanno gia'
+        # (vedi MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO).
         momentum_richiesto = bool(
             MOMENTUM_PERSISTENTE_ATTIVO
             and stato_partite.get(fixture_id, {}).get("momentum_richiesto"))
         if notifiche_attive:
-            if is_fav or momentum_richiesto:
+            if (is_fav and MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO) or momentum_richiesto:
                 history_completo = stato_partite.get(fixture_id, {}).get("history", [])
                 foto_path = genera_grafico_combinato(
                     fixture_id, home, away, current_stats if current_stats else stats_dict, history_completo,

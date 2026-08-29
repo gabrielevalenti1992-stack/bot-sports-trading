@@ -34,6 +34,7 @@
   "messaggio_live_preferiti_attivo": true,
   "elimina_scheda_precedente_attivo": true,
   "momentum_persistente_attivo": true,
+  "momentum_automatico_preferiti_attivo": false,
   "peso_intensita_tiri": 1,
   "peso_intensita_porta": 2,
   "peso_intensita_corner": 1,
