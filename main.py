@@ -618,6 +618,22 @@ ORA_GENERAZIONE_PIANO_GIORNATA = 12  # ora locale Italia in cui (ri)generare il 
 DURATA_STIMATA_PARTITA_MINUTI = 130  # 90' + recupero + intervallo + margine di sicurezza
 MARGINE_PRE_KICKOFF_MINUTI = 10  # anticipo con cui il ciclo torna "attivo" prima del kickoff previsto
 INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una finestra attiva (come oggi)
+# Riserva di quota giornaliera: sotto questa soglia di richieste rimaste il ciclo rallenta, invece
+# di spendere a ritmo pieno fino a zero.
+#
+# La quota si e' esaurita davvero, piu' volte, sempre di sabato o domenica quando le partite sono
+# tante: il 22/08 alle 21:18, il 23/08 alle 20:37, il 29/08 alle 19:30 - e da li' il bot resta
+# CIECO fino alla mezzanotte UTC, con "nessuna partita tracciabile" e il 100% delle chiamate
+# fallite. Il 29/08 sono state quattro ore e mezza, in piena serata di campionato.
+#
+# Il dato per accorgersene c'era gia': ULTIMA_QUOTA_API["residuo"] arriva dagli header di ogni
+# risposta. Ma finora serviva solo a scrivere un'anomalia nella diagnostica
+# (SOGLIA_QUOTA_RESIDUA_DIAGNOSTICA): il bot lo sapeva e continuava lo stesso al ritmo di prima.
+#
+# Meglio vedere tutte le partite piu' di rado che non vederle affatto per ore: il rallentamento e'
+# progressivo, non uno stop, e si riassorbe da solo appena la quota si azzera a mezzanotte.
+RISERVA_QUOTA_API = 900
+FATTORE_RALLENTAMENTO_QUOTA_MAX = 4  # a quota finita il ciclo dura 4 volte tanto (180s -> 720s)
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
 
@@ -2614,6 +2630,26 @@ def _log_quota_headers(response):
         ULTIMA_QUOTA_API["limite"] = limite
         ULTIMA_QUOTA_API["residuo"] = residuo
         ULTIMA_QUOTA_API["aggiornata"] = time.time()
+
+
+def fattore_riserva_quota():
+    """Quanto allargare l'intervallo del ciclo per far durare la quota residua fino a mezzanotte.
+
+    1.0 = ritmo pieno (quota abbondante, o header non ancora visto). Cresce in modo lineare fino a
+    FATTORE_RALLENTAMENTO_QUOTA_MAX man mano che le richieste rimaste scendono verso zero.
+
+    Deliberatamente graduale: una soglia secca che spegne tutto avrebbe lo stesso difetto della
+    quota esaurita - il bot smetterebbe di vedere le partite. Cosi' invece continua a vederle
+    tutte, solo piu' di rado, e piu' rallenta piu' quota risparmia per le ore che restano."""
+    residuo = ULTIMA_QUOTA_API.get("residuo")
+    try:
+        residuo_num = int(residuo) if residuo is not None else None
+    except (TypeError, ValueError):
+        residuo_num = None
+    if residuo_num is None or residuo_num >= RISERVA_QUOTA_API:
+        return 1.0
+    quota_bruciata = 1 - max(0, residuo_num) / RISERVA_QUOTA_API
+    return 1.0 + quota_bruciata * (FATTORE_RALLENTAMENTO_QUOTA_MAX - 1)
 
 
 def _classifica_errore_http(status_code):
@@ -9218,7 +9254,16 @@ if __name__ == "__main__":
             prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
             if preferito_live:
                 prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
-            log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''})...")
+            # Il freno sulla riserva vale anche per i preferiti, ed e' l'unico caso in cui il ciclo
+            # dei preferiti rallenta: costano 3 chiamate a giro, quindi sono proprio loro a bruciare
+            # la quota piu' in fretta.
+            fattore = fattore_riserva_quota()
+            nota_quota = ""
+            if fattore > 1.0:
+                prossimo_intervallo = int(prossimo_intervallo * fattore)
+                nota_quota = (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
+                              f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
+            log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''}{nota_quota})...")
             # Ultima riga prima dell'attesa: il giro è arrivato in fondo senza eccezioni.
             segna_giro_completato()
             time.sleep(prossimo_intervallo)
