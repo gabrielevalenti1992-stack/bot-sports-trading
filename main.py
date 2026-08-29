@@ -1448,21 +1448,36 @@ BACKUP_HISTORY_MOMENTUM = carica_backup_history_momentum()
 CLASSIFICA_DOMINANZA_FILE = data_path("classifica_dominanza_gol.json")
 
 
+# Da quando la classifica sta raccogliendo. Senza questa data i numeri sembrano sbagliati appena
+# li si confronta con la realta': la classifica e' andata in produzione il 27/08, quindi di una
+# squadra che aveva gia' giocato due giornate di campionato conosce solo le partite successive.
+# Visto subito: "Ajax 5/5, ma in campionato ha fatto 4 gol" - i 5 erano tutti di Ajax-Sion di
+# Conference League, l'unica partita dell'Ajax dopo l'attivazione, finita 5-3.
+CLASSIFICA_DOMINANZA_INIZIO = None
+
+
 def carica_classifica_dominanza():
+    """Ritorna (squadre, data_inizio). Il file ha due formati: quello nuovo con la data, e quello
+    piatto {squadra: {...}} scritto prima che la data esistesse - li' data_inizio resta None e il
+    messaggio semplicemente non la mostra, invece di inventare una data che non sappiamo."""
     if os.path.exists(CLASSIFICA_DOMINANZA_FILE):
         try:
             with open(CLASSIFICA_DOMINANZA_FILE, 'r') as f:
-                return json.load(f)
+                contenuto = json.load(f)
+            if isinstance(contenuto, dict) and "squadre" in contenuto:
+                return contenuto.get("squadre", {}), contenuto.get("dal")
+            return contenuto, None
         except Exception as e:
             print(f"Errore lettura {CLASSIFICA_DOMINANZA_FILE}: {e}", flush=True)
-    return {}
+    return {}, None
 
 
 def salva_classifica_dominanza(dati):
-    salva_json_atomico(CLASSIFICA_DOMINANZA_FILE, dati)
+    salva_json_atomico(CLASSIFICA_DOMINANZA_FILE,
+                       {"dal": CLASSIFICA_DOMINANZA_INIZIO, "squadre": dati})
 
 
-CLASSIFICA_DOMINANZA = carica_classifica_dominanza()
+CLASSIFICA_DOMINANZA, CLASSIFICA_DOMINANZA_INIZIO = carica_classifica_dominanza()
 
 
 def squadra_dominava_prima_del_gol(stats_precedenti, lato_che_segna):
@@ -1496,8 +1511,11 @@ def registra_gol_dominanza(squadra, ha_dominato, quanti=1):
     gol_visti conta OGNI gol visto dal bot; gol_con_stats solo quelli valutabili, cioe' con una
     lettura statistiche precedente da cui ricavare un verdetto (ha_dominato non None). I due
     numeri sono diversi apposta - vedi testo_classifica_dominanza."""
+    global CLASSIFICA_DOMINANZA_INIZIO
     if quanti <= 0:
         return
+    if not CLASSIFICA_DOMINANZA_INIZIO:
+        CLASSIFICA_DOMINANZA_INIZIO = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%d/%m/%Y")
     voce = CLASSIFICA_DOMINANZA.setdefault(
         squadra, {"gol_visti": 0, "gol_con_stats": 0, "gol_da_dominanza": 0})
     # .get sul primo: le voci scritte prima che gol_visti esistesse non ce l'hanno.
@@ -1538,7 +1556,11 @@ def testo_classifica_dominanza(minimo_gol=2, top_n=20):
         esclusi = max(0, visti - valutabili)
         coda = f" · {esclusi} gol senza statistiche" if esclusi else ""
         testo += f"{i}. {squadra}: {dominanza}/{valutabili} gol da dominanza ({pct}%){coda}\n"
-    testo += ("\nIl totale è dei gol VALUTABILI, non dei gol fatti: restano fuori quelli segnati "
+    da_quando = f" da quando è attiva (dal {CLASSIFICA_DOMINANZA_INIZIO})" if CLASSIFICA_DOMINANZA_INIZIO else ""
+    testo += (f"\nConta TUTTE le competizioni{da_quando}, non il solo campionato: una squadra che "
+              "gioca anche le coppe ha qui più gol di quanti ne abbia in classifica di campionato, e "
+              "le partite giocate prima dell'attivazione non ci sono.\n"
+              "Il totale è dei gol VALUTABILI, non dei gol fatti: restano fuori quelli segnati "
               "prima che l'API pubblicasse le statistiche, quelli delle leghe senza tiri/corner/area "
               "e quelli di partite non seguite.")
     return testo
@@ -7922,7 +7944,13 @@ def processa_partita(fixture, notifiche_attive=True):
         gol_appena_segnato, punteggio_corretto_al_ribasso = classifica_cambio_punteggio(
             fixture_id, score_home, score_away)
         if gol_appena_segnato:
-            log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
+            # Con home-away nella riga: senza, un "5-2 -> 5-3" nei log non si sa di chi sia, e in
+            # una serata di coppa con venti partite live la correlazione per timestamp e' un
+            # indovinello - due partite possono trovarsi sullo stesso punteggio nello stesso
+            # minuto. Serve a verificare a ritroso la classifica dominanza, che si costruisce
+            # proprio da queste righe.
+            log(f"    ⚽🚨 GOL RILEVATO! {home}-{away}: punteggio cambiato "
+                f"{prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
             history_precedente = stato_precedente.get("history", [])
             stats_precedenti = history_precedente[-1]["stats"] if history_precedente else None
             # Il numero di gol, non "almeno uno": registra_gol_dominanza esce da sola se e' 0 o meno.
