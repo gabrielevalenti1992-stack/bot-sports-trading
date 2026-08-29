@@ -280,6 +280,12 @@ SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 # già calcolato per le notifiche e per /intensita, quindi nessuna chiamata API in più), con un
 # filtro di contesto e un tetto ai preferiti simultanei.
 AUTO_PREFERITI_ATTIVO = True
+# Interruttore della SOLA rotta gol, separato da AUTO_PREFERITI_ATTIVO che resta l'interruttore
+# generale di tutte le rotte. Prima non esisteva: spegnere gli auto-preferiti per togliere la rotta
+# gol spegneva anche la rotta dominio, perche' entrambe controllano AUTO_PREFERITI_ATTIVO. Con le
+# due rotte separate si puo' tenere solo il dominio, che e' quello che seleziona per come si gioca
+# invece che per come e' il punteggio.
+AUTO_PREFERITI_GOL_ATTIVO = True
 # --- Rotta 1: i GOL. Non tocca le statistiche, quindi funziona anche quando l'API non le
 # pubblica - ed è il motivo per cui è la rotta principale. Il 16/08 l'endpoint statistiche è
 # rimasto muto per ore su mezzo mondo (Belgio, Germania, Corea, Giappone, Svezia) mentre i gol
@@ -812,6 +818,7 @@ try:
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
+    AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
     SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
     MINUTO_GOL_AUTO_PREFERITI = config.get("minuto_gol_auto_preferiti", MINUTO_GOL_AUTO_PREFERITI)
     SCARTO_MAX_AUTO_PREFERITI = config.get("scarto_max_auto_preferiti", SCARTO_MAX_AUTO_PREFERITI)
@@ -866,9 +873,11 @@ try:
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, delta_diff={DELTA_DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
+    rotta_gol = (f"ATTIVA ({SOGLIA_GOL_AUTO_PREFERITI} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' "
+                 f"con max {SCARTO_MAX_AUTO_PREFERITI} di scarto)") if AUTO_PREFERITI_GOL_ATTIVO else "SPENTA"
     print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} "
-          f"({SOGLIA_GOL_AUTO_PREFERITI} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' con max "
-          f"{SCARTO_MAX_AUTO_PREFERITI} gol di scarto; max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)",
+          f"| rotta gol: {rotta_gol} "
+          f"(max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)",
           flush=True)
     print(f"Rotta dominio auto-preferiti: {'ATTIVA' if AUTO_PREFERITI_DOMINIO_ATTIVO else 'solo shadow-log (non promuove)'} "
           f"(quota >= {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%, volume >= {VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI}, "
@@ -7218,6 +7227,8 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
     delta 15 minuti diventi misurabile."""
     if not AUTO_PREFERITI_ATTIVO:
         return False, "auto-preferiti disattivati"
+    if not AUTO_PREFERITI_GOL_ATTIVO:
+        return False, "rotta gol spenta (entrano solo le partite dominate)"
     if minuto is None:
         return False, "minuto non disponibile"
     if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
