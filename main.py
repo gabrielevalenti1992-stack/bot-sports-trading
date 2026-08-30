@@ -280,6 +280,12 @@ SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 # già calcolato per le notifiche e per /intensita, quindi nessuna chiamata API in più), con un
 # filtro di contesto e un tetto ai preferiti simultanei.
 AUTO_PREFERITI_ATTIVO = True
+# Interruttore della SOLA rotta gol, separato da AUTO_PREFERITI_ATTIVO che resta l'interruttore
+# generale di tutte le rotte. Prima non esisteva: spegnere gli auto-preferiti per togliere la rotta
+# gol spegneva anche la rotta dominio, perche' entrambe controllano AUTO_PREFERITI_ATTIVO. Con le
+# due rotte separate si puo' tenere solo il dominio, che e' quello che seleziona per come si gioca
+# invece che per come e' il punteggio.
+AUTO_PREFERITI_GOL_ATTIVO = True
 # --- Rotta 1: i GOL. Non tocca le statistiche, quindi funziona anche quando l'API non le
 # pubblica - ed è il motivo per cui è la rotta principale. Il 16/08 l'endpoint statistiche è
 # rimasto muto per ore su mezzo mondo (Belgio, Germania, Corea, Giappone, Svezia) mentre i gol
@@ -448,6 +454,18 @@ ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = True
 # richiesta resta memorizzata per il resto della partita e ogni notifica successiva nasce gia'
 # combinata (barre + momentum), esattamente come succede da sempre per i preferiti.
 MOMENTUM_PERSISTENTE_ATTIVO = True
+
+# Il grafico momentum nel canale preferiti: automatico su ogni notifica, oppure solo quando lo si
+# chiede col bottone come in chat principale.
+#
+# Automatico voleva dire un'immagine combinata (barre + momentum) ad OGNI aggiornamento di una
+# partita preferita, cioe' ogni INTERVALLO_CICLO_MOMENTUM: nel canale il grafico diventava il
+# messaggio, e la lettura veloce delle barre ci finiva sotto. Il bottone "📈 Momentum" era gia'
+# presente anche sulle notifiche dei preferiti (get_notification_keyboard non guarda is_favorite
+# per decidere se mostrarlo), quindi spegnere l'automatismo non toglie niente: il grafico resta a
+# un tocco di distanza, e con MOMENTUM_PERSISTENTE_ATTIVO la richiesta vale per il resto della
+# partita, non solo per il messaggio su cui si e' cliccato.
+MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO = False
 
 # Backoff sulle statistiche che non arrivano mai per una singola partita (soglie e motivazione
 # estesa accanto a SOGLIA_SENZA_STATISTICHE, dove sta il resto della copertura statistiche).
@@ -618,6 +636,22 @@ ORA_GENERAZIONE_PIANO_GIORNATA = 12  # ora locale Italia in cui (ri)generare il 
 DURATA_STIMATA_PARTITA_MINUTI = 130  # 90' + recupero + intervallo + margine di sicurezza
 MARGINE_PRE_KICKOFF_MINUTI = 10  # anticipo con cui il ciclo torna "attivo" prima del kickoff previsto
 INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una finestra attiva (come oggi)
+# Riserva di quota giornaliera: sotto questa soglia di richieste rimaste il ciclo rallenta, invece
+# di spendere a ritmo pieno fino a zero.
+#
+# La quota si e' esaurita davvero, piu' volte, sempre di sabato o domenica quando le partite sono
+# tante: il 22/08 alle 21:18, il 23/08 alle 20:37, il 29/08 alle 19:30 - e da li' il bot resta
+# CIECO fino alla mezzanotte UTC, con "nessuna partita tracciabile" e il 100% delle chiamate
+# fallite. Il 29/08 sono state quattro ore e mezza, in piena serata di campionato.
+#
+# Il dato per accorgersene c'era gia': ULTIMA_QUOTA_API["residuo"] arriva dagli header di ogni
+# risposta. Ma finora serviva solo a scrivere un'anomalia nella diagnostica
+# (SOGLIA_QUOTA_RESIDUA_DIAGNOSTICA): il bot lo sapeva e continuava lo stesso al ritmo di prima.
+#
+# Meglio vedere tutte le partite piu' di rado che non vederle affatto per ore: il rallentamento e'
+# progressivo, non uno stop, e si riassorbe da solo appena la quota si azzera a mezzanotte.
+RISERVA_QUOTA_API = 900
+FATTORE_RALLENTAMENTO_QUOTA_MAX = 4  # a quota finita il ciclo dura 4 volte tanto (180s -> 720s)
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
 
@@ -796,6 +830,7 @@ try:
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
+    AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
     SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
     MINUTO_GOL_AUTO_PREFERITI = config.get("minuto_gol_auto_preferiti", MINUTO_GOL_AUTO_PREFERITI)
     SCARTO_MAX_AUTO_PREFERITI = config.get("scarto_max_auto_preferiti", SCARTO_MAX_AUTO_PREFERITI)
@@ -820,6 +855,8 @@ try:
     MESSAGGIO_LIVE_PREFERITI_ATTIVO = config.get("messaggio_live_preferiti_attivo", MESSAGGIO_LIVE_PREFERITI_ATTIVO)
     ELIMINA_SCHEDA_PRECEDENTE_ATTIVO = config.get("elimina_scheda_precedente_attivo", ELIMINA_SCHEDA_PRECEDENTE_ATTIVO)
     MOMENTUM_PERSISTENTE_ATTIVO = config.get("momentum_persistente_attivo", MOMENTUM_PERSISTENTE_ATTIVO)
+    MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO = config.get(
+        "momentum_automatico_preferiti_attivo", MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO)
     SOLO_LEGHE_CON_STATISTICHE = config.get("solo_leghe_con_statistiche", SOLO_LEGHE_CON_STATISTICHE)
     LEGHE_CON_STATISTICHE = config.get("leghe_con_statistiche", LEGHE_CON_STATISTICHE)
     PESO_INTENSITA_TIRI = config.get("peso_intensita_tiri", PESO_INTENSITA_TIRI)
@@ -850,9 +887,11 @@ try:
     print(f"Soglie caricate da config.json: diff={DIFF_TIRI_SOGLIA}, delta_diff={DELTA_DIFF_TIRI_SOGLIA}, tot={TIRI_TOTALI_ATTIVA}, min={MINUTI_ATTIVA}, int={INTERVALLO_FORZATO}", flush=True)
     print(f"Piano giornata: generazione alle {ORA_GENERAZIONE_PIANO_GIORNATA}:00 (Italia), ciclo attivo {INTERVALLO_CICLO_ATTIVO}s / morto {INTERVALLO_CICLO_MORTO}s / preferiti {INTERVALLO_CICLO_MOMENTUM}s", flush=True)
     print(f"Filtro leghe con statistiche: {'ATTIVO' if SOLO_LEGHE_CON_STATISTICHE else 'disattivo'} ({len(LEGHE_CON_STATISTICHE)} leghe in whitelist)", flush=True)
+    rotta_gol = (f"ATTIVA ({SOGLIA_GOL_AUTO_PREFERITI} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' "
+                 f"con max {SCARTO_MAX_AUTO_PREFERITI} di scarto)") if AUTO_PREFERITI_GOL_ATTIVO else "SPENTA"
     print(f"Auto-preferiti: {'ATTIVO' if AUTO_PREFERITI_ATTIVO else 'disattivo'} "
-          f"({SOGLIA_GOL_AUTO_PREFERITI} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' con max "
-          f"{SCARTO_MAX_AUTO_PREFERITI} gol di scarto; max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)",
+          f"| rotta gol: {rotta_gol} "
+          f"(max {MAX_PREFERITI_SIMULTANEI} preferiti insieme)",
           flush=True)
     print(f"Rotta dominio auto-preferiti: {'ATTIVA' if AUTO_PREFERITI_DOMINIO_ATTIVO else 'solo shadow-log (non promuove)'} "
           f"(quota >= {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}%, volume >= {VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI}, "
@@ -882,7 +921,8 @@ try:
           f"UptimeRobot: {'collegato' if UPTIMEROBOT_API_KEY else 'non collegato'}", flush=True)
     print(f"Scheda precedente eliminata: {'SI' if ELIMINA_SCHEDA_PRECEDENTE_ATTIVO else 'no'} | "
           f"momentum persistente per partita: "
-          f"{'SI' if MOMENTUM_PERSISTENTE_ATTIVO else 'no'}", flush=True)
+          f"{'SI' if MOMENTUM_PERSISTENTE_ATTIVO else 'no'} | momentum nei preferiti: "
+          f"{'automatico' if MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO else 'su richiesta (bottone)'}", flush=True)
 except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
@@ -1448,21 +1488,36 @@ BACKUP_HISTORY_MOMENTUM = carica_backup_history_momentum()
 CLASSIFICA_DOMINANZA_FILE = data_path("classifica_dominanza_gol.json")
 
 
+# Da quando la classifica sta raccogliendo. Senza questa data i numeri sembrano sbagliati appena
+# li si confronta con la realta': la classifica e' andata in produzione il 27/08, quindi di una
+# squadra che aveva gia' giocato due giornate di campionato conosce solo le partite successive.
+# Visto subito: "Ajax 5/5, ma in campionato ha fatto 4 gol" - i 5 erano tutti di Ajax-Sion di
+# Conference League, l'unica partita dell'Ajax dopo l'attivazione, finita 5-3.
+CLASSIFICA_DOMINANZA_INIZIO = None
+
+
 def carica_classifica_dominanza():
+    """Ritorna (squadre, data_inizio). Il file ha due formati: quello nuovo con la data, e quello
+    piatto {squadra: {...}} scritto prima che la data esistesse - li' data_inizio resta None e il
+    messaggio semplicemente non la mostra, invece di inventare una data che non sappiamo."""
     if os.path.exists(CLASSIFICA_DOMINANZA_FILE):
         try:
             with open(CLASSIFICA_DOMINANZA_FILE, 'r') as f:
-                return json.load(f)
+                contenuto = json.load(f)
+            if isinstance(contenuto, dict) and "squadre" in contenuto:
+                return contenuto.get("squadre", {}), contenuto.get("dal")
+            return contenuto, None
         except Exception as e:
             print(f"Errore lettura {CLASSIFICA_DOMINANZA_FILE}: {e}", flush=True)
-    return {}
+    return {}, None
 
 
 def salva_classifica_dominanza(dati):
-    salva_json_atomico(CLASSIFICA_DOMINANZA_FILE, dati)
+    salva_json_atomico(CLASSIFICA_DOMINANZA_FILE,
+                       {"dal": CLASSIFICA_DOMINANZA_INIZIO, "squadre": dati})
 
 
-CLASSIFICA_DOMINANZA = carica_classifica_dominanza()
+CLASSIFICA_DOMINANZA, CLASSIFICA_DOMINANZA_INIZIO = carica_classifica_dominanza()
 
 
 def squadra_dominava_prima_del_gol(stats_precedenti, lato_che_segna):
@@ -1480,22 +1535,51 @@ def squadra_dominava_prima_del_gol(stats_precedenti, lato_che_segna):
     return tiri[1] > tiri[0] and corner[1] > corner[0] and area[1] > area[0]
 
 
-def registra_gol_dominanza(squadra, ha_dominato):
-    if ha_dominato is None:
+def registra_gol_dominanza(squadra, ha_dominato, quanti=1):
+    """quanti = di quanto e' salito il punteggio di questa squadra fra due letture consecutive.
+
+    Non e' sempre 1: fra un ciclo e l'altro passano INTERVALLO_CICLO_ATTIVO secondi (di piu' se
+    c'e' stato un raffreddamento da rate-limit), e in quella finestra la stessa squadra puo'
+    segnare due volte. Prima il chiamante faceva "if punteggio salito: registra un gol", quindi
+    una doppietta dentro lo stesso intervallo contava per uno solo - visto in produzione il
+    25/08 alle 18:51:23, "Punteggio cambiato: 0-0 -> 0-2".
+
+    Tutti i gol dell'intervallo ereditano lo stesso verdetto di dominanza, perche' e' l'unica
+    lettura statistiche che abbiamo: quella precedente al primo dei due. Dello stato intermedio
+    non sappiamo niente, e inventarlo sarebbe peggio che attribuirlo.
+
+    gol_visti conta OGNI gol visto dal bot; gol_con_stats solo quelli valutabili, cioe' con una
+    lettura statistiche precedente da cui ricavare un verdetto (ha_dominato non None). I due
+    numeri sono diversi apposta - vedi testo_classifica_dominanza."""
+    global CLASSIFICA_DOMINANZA_INIZIO
+    if quanti <= 0:
         return
-    voce = CLASSIFICA_DOMINANZA.setdefault(squadra, {"gol_con_stats": 0, "gol_da_dominanza": 0})
-    voce["gol_con_stats"] += 1
-    if ha_dominato:
-        voce["gol_da_dominanza"] += 1
+    if not CLASSIFICA_DOMINANZA_INIZIO:
+        CLASSIFICA_DOMINANZA_INIZIO = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%d/%m/%Y")
+    voce = CLASSIFICA_DOMINANZA.setdefault(
+        squadra, {"gol_visti": 0, "gol_con_stats": 0, "gol_da_dominanza": 0})
+    # .get sul primo: le voci scritte prima che gol_visti esistesse non ce l'hanno.
+    voce["gol_visti"] = voce.get("gol_visti", 0) + quanti
+    if ha_dominato is not None:
+        voce["gol_con_stats"] += quanti
+        if ha_dominato:
+            voce["gol_da_dominanza"] += quanti
     salva_classifica_dominanza(CLASSIFICA_DOMINANZA)
 
 
 def testo_classifica_dominanza(minimo_gol=2, top_n=20):
     """Classifica delle squadre per gol segnati subito dopo aver dominato tiri, corner e tiri in
     area (tutti e tre insieme) nell'ultima lettura statistiche precedente. minimo_gol filtra le
-    squadre con troppo pochi gol valutabili per non far salire in classifica un 1/1 (100%) casuale."""
+    squadre con troppo pochi gol valutabili per non far salire in classifica un 1/1 (100%) casuale.
+
+    Il denominatore NON e' "i gol fatti dalla squadra": e' quanti di quei gol il bot ha potuto
+    valutare. Restano fuori i gol segnati prima che l'API pubblicasse le prime statistiche (cioe'
+    buona parte di quelli nei primi minuti), quelli delle leghe senza copertura tiri/corner/area, e
+    quelli di partite che il bot non stava seguendo. Il messaggio lo dice, perche' letto come
+    "gol fatti" quel numero sembra sbagliato - ed e' la prima cosa che si nota confrontandolo con
+    il tabellino."""
     righe = [
-        (squadra, dati["gol_da_dominanza"], dati["gol_con_stats"])
+        (squadra, dati["gol_da_dominanza"], dati["gol_con_stats"], dati.get("gol_visti", 0))
         for squadra, dati in CLASSIFICA_DOMINANZA.items()
         if dati["gol_con_stats"] >= minimo_gol
     ]
@@ -1505,9 +1589,20 @@ def testo_classifica_dominanza(minimo_gol=2, top_n=20):
     righe.sort(key=lambda r: (-r[1], -(r[1] / r[2]), r[0]))
     testo = ("📊 Classifica dominanza-gol\n"
              "Squadre che segnano più spesso dopo aver dominato tiri + corner + tiri in area:\n\n")
-    for i, (squadra, dominanza, totali) in enumerate(righe[:top_n], 1):
-        pct = round(dominanza / totali * 100)
-        testo += f"{i}. {squadra}: {dominanza}/{totali} gol da dominanza ({pct}%)\n"
+    for i, (squadra, dominanza, valutabili, visti) in enumerate(righe[:top_n], 1):
+        pct = round(dominanza / valutabili * 100)
+        # I gol non valutabili si dicono solo quando ce ne sono: aggiungere "(0 non valutabili)"
+        # ad ogni riga sarebbe rumore su tutte le squadre che non ne hanno.
+        esclusi = max(0, visti - valutabili)
+        coda = f" · {esclusi} gol senza statistiche" if esclusi else ""
+        testo += f"{i}. {squadra}: {dominanza}/{valutabili} gol da dominanza ({pct}%){coda}\n"
+    da_quando = f" da quando è attiva (dal {CLASSIFICA_DOMINANZA_INIZIO})" if CLASSIFICA_DOMINANZA_INIZIO else ""
+    testo += (f"\nConta TUTTE le competizioni{da_quando}, non il solo campionato: una squadra che "
+              "gioca anche le coppe ha qui più gol di quanti ne abbia in classifica di campionato, e "
+              "le partite giocate prima dell'attivazione non ci sono.\n"
+              "Il totale è dei gol VALUTABILI, non dei gol fatti: restano fuori quelli segnati "
+              "prima che l'API pubblicasse le statistiche, quelli delle leghe senza tiri/corner/area "
+              "e quelli di partite non seguite.")
     return testo
 
 
@@ -2559,6 +2654,26 @@ def _log_quota_headers(response):
         ULTIMA_QUOTA_API["limite"] = limite
         ULTIMA_QUOTA_API["residuo"] = residuo
         ULTIMA_QUOTA_API["aggiornata"] = time.time()
+
+
+def fattore_riserva_quota():
+    """Quanto allargare l'intervallo del ciclo per far durare la quota residua fino a mezzanotte.
+
+    1.0 = ritmo pieno (quota abbondante, o header non ancora visto). Cresce in modo lineare fino a
+    FATTORE_RALLENTAMENTO_QUOTA_MAX man mano che le richieste rimaste scendono verso zero.
+
+    Deliberatamente graduale: una soglia secca che spegne tutto avrebbe lo stesso difetto della
+    quota esaurita - il bot smetterebbe di vedere le partite. Cosi' invece continua a vederle
+    tutte, solo piu' di rado, e piu' rallenta piu' quota risparmia per le ore che restano."""
+    residuo = ULTIMA_QUOTA_API.get("residuo")
+    try:
+        residuo_num = int(residuo) if residuo is not None else None
+    except (TypeError, ValueError):
+        residuo_num = None
+    if residuo_num is None or residuo_num >= RISERVA_QUOTA_API:
+        return 1.0
+    quota_bruciata = 1 - max(0, residuo_num) / RISERVA_QUOTA_API
+    return 1.0 + quota_bruciata * (FATTORE_RALLENTAMENTO_QUOTA_MAX - 1)
 
 
 def _classifica_errore_http(status_code):
@@ -7127,6 +7242,8 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
     delta 15 minuti diventi misurabile."""
     if not AUTO_PREFERITI_ATTIVO:
         return False, "auto-preferiti disattivati"
+    if not AUTO_PREFERITI_GOL_ATTIVO:
+        return False, "rotta gol spenta (entrano solo le partite dominate)"
     if minuto is None:
         return False, "minuto non disponibile"
     if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
@@ -7889,13 +8006,20 @@ def processa_partita(fixture, notifiche_attive=True):
         gol_appena_segnato, punteggio_corretto_al_ribasso = classifica_cambio_punteggio(
             fixture_id, score_home, score_away)
         if gol_appena_segnato:
-            log(f"    ⚽🚨 GOL RILEVATO! Punteggio cambiato: {prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
+            # Con home-away nella riga: senza, un "5-2 -> 5-3" nei log non si sa di chi sia, e in
+            # una serata di coppa con venti partite live la correlazione per timestamp e' un
+            # indovinello - due partite possono trovarsi sullo stesso punteggio nello stesso
+            # minuto. Serve a verificare a ritroso la classifica dominanza, che si costruisce
+            # proprio da queste righe.
+            log(f"    ⚽🚨 GOL RILEVATO! {home}-{away}: punteggio cambiato "
+                f"{prev_score_home}-{prev_score_away} -> {score_home}-{score_away}")
             history_precedente = stato_precedente.get("history", [])
             stats_precedenti = history_precedente[-1]["stats"] if history_precedente else None
-            if score_home > prev_score_home:
-                registra_gol_dominanza(home, squadra_dominava_prima_del_gol(stats_precedenti, "home"))
-            if score_away > prev_score_away:
-                registra_gol_dominanza(away, squadra_dominava_prima_del_gol(stats_precedenti, "away"))
+            # Il numero di gol, non "almeno uno": registra_gol_dominanza esce da sola se e' 0 o meno.
+            registra_gol_dominanza(home, squadra_dominava_prima_del_gol(stats_precedenti, "home"),
+                                   score_home - prev_score_home)
+            registra_gol_dominanza(away, squadra_dominava_prima_del_gol(stats_precedenti, "away"),
+                                   score_away - prev_score_away)
         elif punteggio_corretto_al_ribasso:
             # Nessuna notifica: il risultato mostrato resta comunque aggiornato (lo stato viene
             # riscritto poco più sotto), ma dire "gol" per un gol tolto è il contrario di quello
@@ -8598,14 +8722,16 @@ def processa_partita(fixture, notifiche_attive=True):
         # Il grafico (barre o combinato) serve solo per l'invio Telegram più sotto: se le
         # notifiche sono spente (fuori orario) generarlo comunque sarebbe lavoro sprecato
         # (rendering matplotlib + scrittura file) per un'immagine mai inviata e subito cancellata.
-        # Il combinato (barre + momentum) spetta ai preferiti e a chi ha chiesto il momentum su
-        # questa partita: la richiesta vale per il resto della gara, non solo per il messaggio su
-        # cui si e' cliccato (vedi MOMENTUM_PERSISTENTE_ATTIVO).
+        # Il combinato (barre + momentum) spetta a chi ha chiesto il momentum su questa partita:
+        # la richiesta vale per il resto della gara, non solo per il messaggio su cui si e'
+        # cliccato (vedi MOMENTUM_PERSISTENTE_ATTIVO). Per i preferiti era automatico su ogni
+        # notifica; ora anche loro lo ricevono su richiesta, col bottone che hanno gia'
+        # (vedi MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO).
         momentum_richiesto = bool(
             MOMENTUM_PERSISTENTE_ATTIVO
             and stato_partite.get(fixture_id, {}).get("momentum_richiesto"))
         if notifiche_attive:
-            if is_fav or momentum_richiesto:
+            if (is_fav and MOMENTUM_AUTOMATICO_PREFERITI_ATTIVO) or momentum_richiesto:
                 history_completo = stato_partite.get(fixture_id, {}).get("history", [])
                 foto_path = genera_grafico_combinato(
                     fixture_id, home, away, current_stats if current_stats else stats_dict, history_completo,
@@ -9156,7 +9282,16 @@ if __name__ == "__main__":
             prossimo_intervallo = INTERVALLO_CICLO_ATTIVO if ciclo_attivo else INTERVALLO_CICLO_MORTO
             if preferito_live:
                 prossimo_intervallo = min(prossimo_intervallo, INTERVALLO_CICLO_MOMENTUM)
-            log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''})...")
+            # Il freno sulla riserva vale anche per i preferiti, ed e' l'unico caso in cui il ciclo
+            # dei preferiti rallenta: costano 3 chiamate a giro, quindi sono proprio loro a bruciare
+            # la quota piu' in fretta.
+            fattore = fattore_riserva_quota()
+            nota_quota = ""
+            if fattore > 1.0:
+                prossimo_intervallo = int(prossimo_intervallo * fattore)
+                nota_quota = (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
+                              f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
+            log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''}{nota_quota})...")
             # Ultima riga prima dell'attesa: il giro è arrivato in fondo senza eccezioni.
             segna_giro_completato()
             time.sleep(prossimo_intervallo)
