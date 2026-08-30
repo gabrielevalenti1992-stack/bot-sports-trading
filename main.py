@@ -2205,6 +2205,21 @@ def _avvisa_e_fallback_canale_preferiti(dettaglio):
     return True
 
 
+def _e_errore_parsing_markdown(corpo_risposta):
+    """True se Telegram ha rifiutato il messaggio perche' il Markdown non torna.
+
+    Succede con un numero DISPARI di caratteri speciali (_ * ` [): Telegram apre l'entita' e non
+    trova dove chiuderla, risponde 400 e il messaggio non arriva mai. Non e' un caso di scuola: i
+    nomi delle funzioni finiscono nel testo della diagnostica (api_errors, rate_limit_transitorio,
+    get_partite_live...) e sono pieni di underscore.
+
+    Il 29/08 alle 19:42:14 e' andato perso esattamente cosi' l'avviso che segnalava il guasto
+    delle chiamate API - nove underscore, dispari - proprio mentre il bot era cieco e quello era
+    l'unico modo per accorgersene. Cinque messaggi persi in sette giorni, tutti nella chat
+    principale."""
+    return "can't parse entities" in (corpo_risposta or "")
+
+
 def invia_messaggio_telegram(testo, chat_id=None):
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {testo[:50]}")
@@ -2215,6 +2230,13 @@ def invia_messaggio_telegram(testo, chat_id=None):
         data = {'chat_id': destinatario, 'text': testo, 'parse_mode': 'Markdown'}
         response = requests.post(url, data=data, timeout=10)
         log(f"Telegram testo -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
+        # Markdown malformato: si rimanda lo stesso testo senza formattazione invece di perderlo.
+        # Meglio un messaggio senza grassetti che nessun messaggio - e finora era nessun messaggio.
+        if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
+            data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
+            response = requests.post(url, data=data_semplice, timeout=10)
+            log(f"Telegram testo (senza Markdown, il testo originale non era formattabile) -> "
+                f"{destinatario} - Status: {response.status_code} - {response.text[:200]}")
         if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
             if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
                 data['chat_id'] = TELEGRAM_CHAT_ID
@@ -2246,6 +2268,15 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
                     data['reply_markup'] = json.dumps(reply_markup)
                 response = requests.post(url, data=data, files=files, timeout=10)
                 log(f"Telegram foto -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
+            # Come per il testo: la didascalia con Markdown rotto farebbe perdere l'intera
+            # notifica, foto compresa. Il file va riaperto, il primo invio l'ha gia' consumato.
+            if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
+                data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
+                with open(foto_path, 'rb') as photo_retry:
+                    response = requests.post(url, data=data_semplice,
+                                             files={'photo': photo_retry}, timeout=10)
+                log(f"Telegram foto (senza Markdown, didascalia non formattabile) -> "
+                    f"{destinatario} - Status: {response.status_code} - {response.text[:200]}")
             if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
                 if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
                     return invia_notifica_telegram(foto_path, messaggio, reply_markup=reply_markup, chat_id=TELEGRAM_CHAT_ID)
@@ -2555,13 +2586,36 @@ SOGLIA_QUOTA_GIORNALIERA_FINITA = 5
 ETA_MASSIMA_QUOTA_ATTENDIBILE = 1800
 
 
+def _e_quota_giornaliera_esaurita_dal_testo(testo_errore):
+    """True se l'API dichiara ESPLICITAMENTE che la quota del giorno e' finita.
+
+    Il messaggio osservato in produzione e' "You have reached the request limit for the day": non
+    contiene ne' "rateLimit" ne' "too many requests" ne' la parola "daily", quindi non lo
+    riconosceva nessuno dei controlli esistenti e finiva classificato come "api_errors" - un errore
+    applicativo qualunque, che non arma nessun raffreddamento."""
+    t = (testo_errore or "").lower()
+    return "limit for the day" in t or "daily" in t or "giornalier" in t
+
+
+def segna_quota_giornaliera_esaurita():
+    """Registra che l'API ha dichiarato la quota del giorno finita, adesso."""
+    ULTIMA_QUOTA_API["esaurita_dichiarata"] = time.time()
+
+
 def quota_giornaliera_finita():
     """True/False se l'ultima quota letta dagli header dice che la giornata e' finita, None se non
     lo sappiamo (nessuna lettura, o troppo vecchia per valerne la pena).
 
-    Gli header valgono piu' del testo dell'errore: il 25/08 alle 23:42 l'API ha risposto "hai
-    raggiunto il limite giornaliero" quando lei stessa, tre minuti prima, dichiarava 5067 richieste
-    ancora disponibili su 7500."""
+    Per un rate-limit GENERICO gli header valgono piu' del testo: il 25/08 alle 23:42 l'API ha
+    risposto "hai raggiunto il limite giornaliero" quando lei stessa, tre minuti prima, dichiarava
+    5067 richieste ancora disponibili su 7500.
+
+    Ma quando l'API lo dice in modo esplicito e ripetuto, ha ragione lei anche contro l'header: il
+    29/08 gli header hanno insistito su 7499/7500 per quattro ore e mezza mentre ogni singola
+    chiamata veniva rifiutata. Per questo la dichiarazione esplicita viene guardata per prima."""
+    dichiarata = ULTIMA_QUOTA_API.get("esaurita_dichiarata", 0)
+    if dichiarata and (time.time() - dichiarata) <= ETA_MASSIMA_QUOTA_ATTENDIBILE:
+        return True
     residuo = ULTIMA_QUOTA_API.get("residuo")
     if residuo is None or (time.time() - ULTIMA_QUOTA_API.get("aggiornata", 0)) > ETA_MASSIMA_QUOTA_ATTENDIBILE:
         return None
@@ -2599,8 +2653,13 @@ CHIAMATE_API_FILE = data_path("chiamate_api_giornaliere.json")
 CHIAMATE_API_GIORNI_STORICO = 30
 # Quota residua vista nell'header dell'ultima risposta API (x-ratelimit-requests-*): un dato più
 # autorevole del nostro conteggio per "quanto mi resta OGGI", perché viene da API-Football stessa.
+# "esaurita_dichiarata" e' il momento in cui l'API ha detto A PAROLE che la quota del giorno e'
+# finita. Sta a parte da "residuo" perche' i due possono contraddirsi, e quando succede ha ragione
+# lei: il 29/08 dalle 19:45 alle 00:15 gli header hanno continuato a dichiarare 7499/7500 richieste
+# rimaste mentre ogni chiamata veniva rifiutata con "You have reached the request limit for the
+# day". Fidandosi del solo header il bot ha insistito per quattro ore e mezza, cieco.
 ULTIMA_QUOTA_API = {"limite": None, "residuo": None, "aggiornata": 0,
-                    "limite_minuto": None, "residuo_minuto": None}
+                    "limite_minuto": None, "residuo_minuto": None, "esaurita_dichiarata": 0}
 
 
 def carica_chiamate_api():
@@ -2641,7 +2700,12 @@ def _e_errore_rate_limit(errori):
     """True se 'errori' (il campo "errors" della risposta API-Football, dict o lista a seconda
     dell'endpoint) segnala un rate-limit - non un errore applicativo qualunque."""
     testo = str(errori).lower()
-    return "ratelimit" in testo.replace(" ", "") or "too many requests" in testo
+    # La quota giornaliera esaurita e' a tutti gli effetti un limite di richieste, ma l'API la
+    # annuncia con parole diverse ("You have reached the request limit for the day", sotto la
+    # chiave "requests" invece di "rateLimit"). Senza questo ramo restava un "api_errors"
+    # qualunque: nessun raffreddamento, e il bot che ritenta ogni ciclo per ore.
+    return ("ratelimit" in testo.replace(" ", "") or "too many requests" in testo
+            or _e_quota_giornaliera_esaurita_dal_testo(testo))
 
 
 # Sotto questa soglia di richieste ancora disponibili NEL MINUTO in corso vale la pena scriverlo
@@ -2689,6 +2753,12 @@ def fattore_riserva_quota():
     Deliberatamente graduale: una soglia secca che spegne tutto avrebbe lo stesso difetto della
     quota esaurita - il bot smetterebbe di vedere le partite. Cosi' invece continua a vederle
     tutte, solo piu' di rado, e piu' rallenta piu' quota risparmia per le ore che restano."""
+    # Se l'API ha dichiarato la giornata finita si rallenta al massimo senza guardare l'header:
+    # e' esattamente il caso in cui l'header non e' affidabile (29/08, 7499/7500 dichiarate rimaste
+    # mentre ogni chiamata veniva rifiutata). Il raffreddamento gia' blocca le chiamate, questo
+    # evita che il ciclo riparta a ritmo pieno appena scade.
+    if quota_giornaliera_finita() is True:
+        return float(FATTORE_RALLENTAMENTO_QUOTA_MAX)
     residuo = ULTIMA_QUOTA_API.get("residuo")
     try:
         residuo_num = int(residuo) if residuo is not None else None
@@ -2715,6 +2785,11 @@ def _arma_raffreddamento(contesto, testo_errore, motivo):
     Il log dice sempre PERCHE' quella durata: la domanda "e' colpa nostra?" e' quella a cui i log
     di produzione non sapevano rispondere, ed e' quella che decide tutto il resto."""
     global PROSSIMA_CHIAMATA_API_CONSENTITA
+    # Prima di valutare: se l'API ha detto a parole che la giornata e' finita, va registrato, cosi'
+    # valuta_rate_limit() sceglie il raffreddamento lungo invece dei 10 secondi da intoppo
+    # passeggero - e il freno sulla riserva quota nel ciclo principale smette di credere all'header.
+    if _e_quota_giornaliera_esaurita_dal_testo(testo_errore):
+        segna_quota_giornaliera_esaurita()
     secondi, tipo, spiegazione = valuta_rate_limit(testo_errore)
     PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + secondi
     log(f"[{contesto}] Raffreddamento API-Football attivato per {secondi}s ({spiegazione})")
@@ -2808,6 +2883,9 @@ def get_api_football(url, params, timeout, contesto):
         registra_esito_api(contesto, "api_errors")
         return None, "api_errors", str(errori)
 
+    # Una risposta buona e' la prova che la giornata e' ripartita: la dichiarazione di quota
+    # esaurita va tolta subito, altrimenti resterebbe a frenare il bot fino alla sua scadenza.
+    ULTIMA_QUOTA_API["esaurita_dichiarata"] = 0
     registra_esito_api(contesto, None)
     return data, None, None
 
@@ -9299,8 +9377,17 @@ if __name__ == "__main__":
             # filtro dovesse escludere una partita vera, il numero lo mostra subito invece di
             # lasciar credere che quella partita non fosse live.
             escluse_giovanili = len(in_whitelist) - len(partite_valide)
-            log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
-                + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
+            # "0 totali, 0 valide" da solo e' ambiguo, ed e' costato tempo a interpretarlo: la
+            # stessa riga usciva sia quando non c'era davvero nessuna partita, sia quando la
+            # chiamata era fallita e get_partite_live() aveva restituito una lista vuota. Il 29/08,
+            # con la chiamata live rifiutata per ore, i log dicevano "0 totali, 0 valide" ogni tre
+            # minuti e sembravano una notte tranquilla: il bot era cieco.
+            if chiamata_partite_live_fallita:
+                log("Partite live: NON PERVENUTE - la chiamata e' fallita, l'elenco vuoto qui sotto "
+                    "non vuol dire che non ci siano partite in corso")
+            else:
+                log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
+                    + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
 
             if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
                 if chiamata_partite_live_fallita:
