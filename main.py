@@ -247,11 +247,29 @@ SOGLIA_MIN_CAMBIO_PREFERITI = 2
 SOGLIA_RITMO_NOTIFICA_PREFERITI = 4       # tiri combinati nel blocco
 SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = 2  # oppure tiri in porta combinati nel blocco
 
-# Preferiti "raffreddati": se passano questi secondi senza che parta nessuna notifica (nessun
-# evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove automaticamente
-# dai preferiti e torna alle regole normali, invece di restare agganciata per sempre a soglie più
-# permissive senza motivo.
-DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 900  # 15 minuti
+# Preferiti "raffreddati": se passano questi MINUTI GIOCATI senza che parta nessuna notifica
+# (nessun evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove
+# automaticamente dai preferiti e torna alle regole normali, invece di restare agganciata per
+# sempre a soglie più permissive senza motivo.
+#
+# Era 15 minuti, ed erano pochi: la rotta dominio promuove apposta le partite che comandano SENZA
+# segnare, cioè quelle che per definizione non generano notifiche, e poi questa regola le cacciava
+# proprio per quello. Il 30/08 St. Pauli-Kaiserslautern è entrata al 30' comandando al 95%, è stata
+# rimossa al 45' per silenzio, e da lì ha fatto due gol: 0-2 al 48' e 1-2 al 60'. Con 25 minuti
+# sarebbe rimasta fino al 55', quindi avrebbe visto il primo gol - che a sua volta riazzera
+# l'orologio - e sarebbe arrivata in fondo alla partita.
+#
+# 25 minuti giocati coprono anche l'intervallo per intero: l'API tiene elapsed fermo sul 45'
+# durante la pausa invece di non esporlo, quindi con la vecchia soglia una partita entrata al 30'
+# maturava esattamente i suoi 15 minuti di silenzio e usciva a metà pausa, che è il momento
+# peggiore per smettere di seguirla.
+DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 1500  # 25 minuti giocati
+# Permanenza minima nei preferiti, in cicli. Una partita appena promossa non puo' essere cacciata
+# dalle rimozioni automatiche prima di tanti cicli: serve a garantire che, una volta entrata, resti
+# abbastanza da poterla guardare davvero. Senza, capitava che entrasse e uscisse nel giro di tre
+# minuti (30/08: dentro alle 10:46:48, fuori alle 10:49:57).
+CICLI_MINIMI_PERMANENZA_PREFERITI = 2
+
 
 # Goleada: oltre questo scarto gol la partita perde valore per il trading e si smette di
 # notificarla del tutto (preferiti compresi). Il pareggio invece (scarto 0) è sempre rilevante e
@@ -828,6 +846,7 @@ try:
     SOGLIA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_ritmo_notifica_preferiti", SOGLIA_RITMO_NOTIFICA_PREFERITI)
     SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_porta_ritmo_notifica_preferiti", SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI)
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
+    CICLI_MINIMI_PERMANENZA_PREFERITI = config.get("cicli_minimi_permanenza_preferiti", CICLI_MINIMI_PERMANENZA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
     AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
@@ -1964,6 +1983,11 @@ def poll_callbacks():
                         else:
                             FAVORITE_MATCHES.add(fid)
                             save_favorites(FAVORITE_MATCHES)
+                            # Stesso azzeramento della promozione automatica: una partita aggiunta
+                            # a mano dopo un lungo silenzio verrebbe altrimenti rimossa subito, e
+                            # il bottone sembrerebbe non aver fatto niente. Il minuto non e' noto
+                            # qui: resta None e viene riancorato al primo ciclo utile.
+                            stato_partite.setdefault(int(fid), {}).update(stato_ingresso_preferiti())
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                                 json={"callback_query_id": cq["id"], "text": "Aggiunta ai preferiti"}, timeout=5)
@@ -2181,6 +2205,21 @@ def _avvisa_e_fallback_canale_preferiti(dettaglio):
     return True
 
 
+def _e_errore_parsing_markdown(corpo_risposta):
+    """True se Telegram ha rifiutato il messaggio perche' il Markdown non torna.
+
+    Succede con un numero DISPARI di caratteri speciali (_ * ` [): Telegram apre l'entita' e non
+    trova dove chiuderla, risponde 400 e il messaggio non arriva mai. Non e' un caso di scuola: i
+    nomi delle funzioni finiscono nel testo della diagnostica (api_errors, rate_limit_transitorio,
+    get_partite_live...) e sono pieni di underscore.
+
+    Il 29/08 alle 19:42:14 e' andato perso esattamente cosi' l'avviso che segnalava il guasto
+    delle chiamate API - nove underscore, dispari - proprio mentre il bot era cieco e quello era
+    l'unico modo per accorgersene. Cinque messaggi persi in sette giorni, tutti nella chat
+    principale."""
+    return "can't parse entities" in (corpo_risposta or "")
+
+
 def invia_messaggio_telegram(testo, chat_id=None):
     if not CONFIG_VALIDA:
         log(f"[SKIP Telegram] Config mancante: {testo[:50]}")
@@ -2191,6 +2230,13 @@ def invia_messaggio_telegram(testo, chat_id=None):
         data = {'chat_id': destinatario, 'text': testo, 'parse_mode': 'Markdown'}
         response = requests.post(url, data=data, timeout=10)
         log(f"Telegram testo -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
+        # Markdown malformato: si rimanda lo stesso testo senza formattazione invece di perderlo.
+        # Meglio un messaggio senza grassetti che nessun messaggio - e finora era nessun messaggio.
+        if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
+            data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
+            response = requests.post(url, data=data_semplice, timeout=10)
+            log(f"Telegram testo (senza Markdown, il testo originale non era formattabile) -> "
+                f"{destinatario} - Status: {response.status_code} - {response.text[:200]}")
         if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
             if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
                 data['chat_id'] = TELEGRAM_CHAT_ID
@@ -2222,6 +2268,15 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
                     data['reply_markup'] = json.dumps(reply_markup)
                 response = requests.post(url, data=data, files=files, timeout=10)
                 log(f"Telegram foto -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
+            # Come per il testo: la didascalia con Markdown rotto farebbe perdere l'intera
+            # notifica, foto compresa. Il file va riaperto, il primo invio l'ha gia' consumato.
+            if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
+                data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
+                with open(foto_path, 'rb') as photo_retry:
+                    response = requests.post(url, data=data_semplice,
+                                             files={'photo': photo_retry}, timeout=10)
+                log(f"Telegram foto (senza Markdown, didascalia non formattabile) -> "
+                    f"{destinatario} - Status: {response.status_code} - {response.text[:200]}")
             if response.status_code != 200 and _e_canale_preferiti_dedicato(destinatario):
                 if _avvisa_e_fallback_canale_preferiti(f"HTTP {response.status_code} - {response.text[:200]}"):
                     return invia_notifica_telegram(foto_path, messaggio, reply_markup=reply_markup, chat_id=TELEGRAM_CHAT_ID)
@@ -2531,13 +2586,36 @@ SOGLIA_QUOTA_GIORNALIERA_FINITA = 5
 ETA_MASSIMA_QUOTA_ATTENDIBILE = 1800
 
 
+def _e_quota_giornaliera_esaurita_dal_testo(testo_errore):
+    """True se l'API dichiara ESPLICITAMENTE che la quota del giorno e' finita.
+
+    Il messaggio osservato in produzione e' "You have reached the request limit for the day": non
+    contiene ne' "rateLimit" ne' "too many requests" ne' la parola "daily", quindi non lo
+    riconosceva nessuno dei controlli esistenti e finiva classificato come "api_errors" - un errore
+    applicativo qualunque, che non arma nessun raffreddamento."""
+    t = (testo_errore or "").lower()
+    return "limit for the day" in t or "daily" in t or "giornalier" in t
+
+
+def segna_quota_giornaliera_esaurita():
+    """Registra che l'API ha dichiarato la quota del giorno finita, adesso."""
+    ULTIMA_QUOTA_API["esaurita_dichiarata"] = time.time()
+
+
 def quota_giornaliera_finita():
     """True/False se l'ultima quota letta dagli header dice che la giornata e' finita, None se non
     lo sappiamo (nessuna lettura, o troppo vecchia per valerne la pena).
 
-    Gli header valgono piu' del testo dell'errore: il 25/08 alle 23:42 l'API ha risposto "hai
-    raggiunto il limite giornaliero" quando lei stessa, tre minuti prima, dichiarava 5067 richieste
-    ancora disponibili su 7500."""
+    Per un rate-limit GENERICO gli header valgono piu' del testo: il 25/08 alle 23:42 l'API ha
+    risposto "hai raggiunto il limite giornaliero" quando lei stessa, tre minuti prima, dichiarava
+    5067 richieste ancora disponibili su 7500.
+
+    Ma quando l'API lo dice in modo esplicito e ripetuto, ha ragione lei anche contro l'header: il
+    29/08 gli header hanno insistito su 7499/7500 per quattro ore e mezza mentre ogni singola
+    chiamata veniva rifiutata. Per questo la dichiarazione esplicita viene guardata per prima."""
+    dichiarata = ULTIMA_QUOTA_API.get("esaurita_dichiarata", 0)
+    if dichiarata and (time.time() - dichiarata) <= ETA_MASSIMA_QUOTA_ATTENDIBILE:
+        return True
     residuo = ULTIMA_QUOTA_API.get("residuo")
     if residuo is None or (time.time() - ULTIMA_QUOTA_API.get("aggiornata", 0)) > ETA_MASSIMA_QUOTA_ATTENDIBILE:
         return None
@@ -2575,8 +2653,13 @@ CHIAMATE_API_FILE = data_path("chiamate_api_giornaliere.json")
 CHIAMATE_API_GIORNI_STORICO = 30
 # Quota residua vista nell'header dell'ultima risposta API (x-ratelimit-requests-*): un dato più
 # autorevole del nostro conteggio per "quanto mi resta OGGI", perché viene da API-Football stessa.
+# "esaurita_dichiarata" e' il momento in cui l'API ha detto A PAROLE che la quota del giorno e'
+# finita. Sta a parte da "residuo" perche' i due possono contraddirsi, e quando succede ha ragione
+# lei: il 29/08 dalle 19:45 alle 00:15 gli header hanno continuato a dichiarare 7499/7500 richieste
+# rimaste mentre ogni chiamata veniva rifiutata con "You have reached the request limit for the
+# day". Fidandosi del solo header il bot ha insistito per quattro ore e mezza, cieco.
 ULTIMA_QUOTA_API = {"limite": None, "residuo": None, "aggiornata": 0,
-                    "limite_minuto": None, "residuo_minuto": None}
+                    "limite_minuto": None, "residuo_minuto": None, "esaurita_dichiarata": 0}
 
 
 def carica_chiamate_api():
@@ -2617,7 +2700,12 @@ def _e_errore_rate_limit(errori):
     """True se 'errori' (il campo "errors" della risposta API-Football, dict o lista a seconda
     dell'endpoint) segnala un rate-limit - non un errore applicativo qualunque."""
     testo = str(errori).lower()
-    return "ratelimit" in testo.replace(" ", "") or "too many requests" in testo
+    # La quota giornaliera esaurita e' a tutti gli effetti un limite di richieste, ma l'API la
+    # annuncia con parole diverse ("You have reached the request limit for the day", sotto la
+    # chiave "requests" invece di "rateLimit"). Senza questo ramo restava un "api_errors"
+    # qualunque: nessun raffreddamento, e il bot che ritenta ogni ciclo per ore.
+    return ("ratelimit" in testo.replace(" ", "") or "too many requests" in testo
+            or _e_quota_giornaliera_esaurita_dal_testo(testo))
 
 
 # Sotto questa soglia di richieste ancora disponibili NEL MINUTO in corso vale la pena scriverlo
@@ -2665,6 +2753,12 @@ def fattore_riserva_quota():
     Deliberatamente graduale: una soglia secca che spegne tutto avrebbe lo stesso difetto della
     quota esaurita - il bot smetterebbe di vedere le partite. Cosi' invece continua a vederle
     tutte, solo piu' di rado, e piu' rallenta piu' quota risparmia per le ore che restano."""
+    # Se l'API ha dichiarato la giornata finita si rallenta al massimo senza guardare l'header:
+    # e' esattamente il caso in cui l'header non e' affidabile (29/08, 7499/7500 dichiarate rimaste
+    # mentre ogni chiamata veniva rifiutata). Il raffreddamento gia' blocca le chiamate, questo
+    # evita che il ciclo riparta a ritmo pieno appena scade.
+    if quota_giornaliera_finita() is True:
+        return float(FATTORE_RALLENTAMENTO_QUOTA_MAX)
     residuo = ULTIMA_QUOTA_API.get("residuo")
     try:
         residuo_num = int(residuo) if residuo is not None else None
@@ -2691,6 +2785,11 @@ def _arma_raffreddamento(contesto, testo_errore, motivo):
     Il log dice sempre PERCHE' quella durata: la domanda "e' colpa nostra?" e' quella a cui i log
     di produzione non sapevano rispondere, ed e' quella che decide tutto il resto."""
     global PROSSIMA_CHIAMATA_API_CONSENTITA
+    # Prima di valutare: se l'API ha detto a parole che la giornata e' finita, va registrato, cosi'
+    # valuta_rate_limit() sceglie il raffreddamento lungo invece dei 10 secondi da intoppo
+    # passeggero - e il freno sulla riserva quota nel ciclo principale smette di credere all'header.
+    if _e_quota_giornaliera_esaurita_dal_testo(testo_errore):
+        segna_quota_giornaliera_esaurita()
     secondi, tipo, spiegazione = valuta_rate_limit(testo_errore)
     PROSSIMA_CHIAMATA_API_CONSENTITA = time.time() + secondi
     log(f"[{contesto}] Raffreddamento API-Football attivato per {secondi}s ({spiegazione})")
@@ -2784,6 +2883,9 @@ def get_api_football(url, params, timeout, contesto):
         registra_esito_api(contesto, "api_errors")
         return None, "api_errors", str(errori)
 
+    # Una risposta buona e' la prova che la giornata e' ripartita: la dichiarazione di quota
+    # esaurita va tolta subito, altrimenti resterebbe a frenare il bot fino alla sua scadenza.
+    ULTIMA_QUOTA_API["esaurita_dichiarata"] = 0
     registra_esito_api(contesto, None)
     return data, None, None
 
@@ -2942,6 +3044,26 @@ def costruisci_piano_giornata(data_str):
         "partite": partite,
         "finestre_attive": finestre,
     }
+
+
+def piano_e_di_oggi(piano=None):
+    """True solo se il piano in memoria e' quello della giornata corrente (ora italiana).
+
+    Serve perche' "il piano esiste" e "il piano vale ancora" sono due cose diverse, e confonderle
+    costava caro: il piano viene rigenerato solo dalle ORA_GENERAZIONE_PIANO_GIORNATA in poi, ma
+    quello del giorno prima resta in memoria e su disco fino ad allora. Un piano scaduto ha tutte
+    le finestre attive nel passato, quindi dentro_finestra_attiva() dice sempre False - e chi
+    controllava solo l'esistenza del campo "data" concludeva "siamo fuori da ogni finestra"
+    invece di "non lo so ancora".
+
+    Visto in produzione il 30/08: dal riavvio delle 10:18 fino alle 12:00 il ciclo e' rimasto a
+    INTERVALLO_CICLO_MORTO (30 minuti) sulla base del piano del giorno prima - cicli #3 alle 09:18
+    e #4 alle 09:48 UTC, mezz'ora esatta di distanza - quando avrebbe dovuto girare a
+    INTERVALLO_CICLO_ATTIVO. Succedeva ogni mattina."""
+    piano = PIANO_GIORNATA if piano is None else piano
+    if not piano.get("data"):
+        return False
+    return piano["data"] == datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
 
 
 def dentro_finestra_attiva(piano, now_ts=None):
@@ -4015,10 +4137,26 @@ def cmd_live(chat_id):
 def cmd_piano(chat_id):
     """Mostra il piano giornata corrente: partite whitelist previste oggi, orari di kickoff e
     finestre orarie attive usate dallo scheduler adattivo per decidere il ritmo dei cicli."""
-    if not PIANO_GIORNATA.get("data"):
+    # Due casi diversi da tenere distinti: il piano non c'e' proprio, oppure c'e' ma e' di ieri.
+    # Nel secondo caso mostrarlo com'era faceva scrivere "Nessuna partita in corso ne' in programma
+    # per il resto della giornata" - le partite di ieri sono tutte concluse - e il comando sembrava
+    # non funzionare, mentre stava rispondendo in modo corretto sulla giornata sbagliata.
+    if not piano_e_di_oggi():
+        oggi_str = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+        if PIANO_GIORNATA.get("data"):
+            testo = (f"Il piano in memoria e' ancora quello del {PIANO_GIORNATA['data']}, non di oggi "
+                     f"({oggi_str}).\n\nViene rigenerato una volta al giorno dalle "
+                     f"{ORA_GENERAZIONE_PIANO_GIORNATA}:00 (ora italiana) in poi, al primo ciclo utile: "
+                     f"riprova dopo quell'ora.\n\nNel frattempo il bot segue comunque tutte le partite "
+                     f"- senza un piano valido tratta ogni momento come finestra attiva, quindi non ne "
+                     f"perde nessuna.")
+        else:
+            testo = (f"Nessun piano giornata ancora generato.\n\nViene creato una volta al giorno dalle "
+                     f"{ORA_GENERAZIONE_PIANO_GIORNATA}:00 (ora italiana) in poi, al primo ciclo utile.\n\n"
+                     f"Nel frattempo il bot segue comunque tutte le partite.")
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessun piano giornata generato ancora. Verrà creato al prossimo ciclo."}, timeout=5)
+            json={"chat_id": chat_id, "text": testo}, timeout=5)
         return
 
     tz_italia = ZoneInfo("Europe/Rome")
@@ -7228,6 +7366,38 @@ def invia_messaggio_uscita_preferiti(home, away, minuto, score_home, score_away,
     invia_messaggio_telegram("\n".join(righe), chat_id=TELEGRAM_CHAT_ID_PREFERITI)
 
 
+def stato_ingresso_preferiti(elapsed_raw=None, adesso=None):
+    """Stato da applicare a una partita nel momento in cui entra nei preferiti.
+
+    Fa ripartire da zero l'orologio dell'inattivita'. Senza, la partita entrava portandosi dietro
+    il timestamp dell'ultima notifica della vita PRECEDENTE - quella mandata nella chat principale
+    quando ancora non era un preferito - e la rimozione per silenzio la trovava gia' scaduta.
+
+    Il 30/08 in produzione: promossa alle 10:46:48 ("la squadra ospite comanda 82% e non segna"),
+    rimossa alle 10:49:57 per "nessuna notifica da oltre 15 min". Tre minuti dentro. Il difetto
+    colpiva sistematicamente la rotta dominio, che per costruzione promuove le partite che
+    dominano senza segnare, cioe' proprio quelle che non generano notifiche.
+
+    minuto_ultima_notifica puo' restare None (partita all'intervallo, minuto non esposto dall'API):
+    la rimozione lo riancora da sola al primo ciclo con un minuto valido, invece di misurare il
+    silenzio da un riferimento sbagliato."""
+    return {
+        "timestamp_notifica": time.time() if adesso is None else adesso,
+        "minuto_ultima_notifica": elapsed_raw,
+        "cicli_da_ingresso_preferiti": 0,
+    }
+
+
+def avanza_ciclo_preferito(stato_fav):
+    """Conta un ciclo di permanenza nei preferiti e ritorna il totale.
+
+    E' il contatore su cui si regge CICLI_MINIMI_PERMANENZA_PREFERITI: si misurano i cicli e non i
+    minuti perche' e' il ciclo l'unita' con cui il bot guarda la partita, ed e' quello che l'utente
+    vede scorrere nel canale."""
+    stato_fav["cicli_da_ingresso_preferiti"] = stato_fav.get("cicli_da_ingresso_preferiti", 0) + 1
+    return stato_fav["cicli_da_ingresso_preferiti"]
+
+
 def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away):
     """Partita che si sblocca presto restando aperta: due gol entro il 25' con al massimo un gol
     di scarto.
@@ -8511,6 +8681,18 @@ def processa_partita(fixture, notifiche_attive=True):
         # soglie più permissive per sempre.
         if str(fixture_id) in FAVORITE_MATCHES:
             stato_fav = stato_partite.setdefault(fixture_id, {})
+            # Quanti cicli la partita e' gia' stata seguita da preferita. Sotto la permanenza
+            # minima la rimozione per silenzio non giudica: una partita appena entrata deve poter
+            # essere guardata almeno per qualche ciclo, altrimenti entra e sparisce nel giro di
+            # pochi minuti (30/08: dentro alle 10:46:48, fuori alle 10:49:57).
+            #
+            # Non vale per l'uscita "statistiche assenti" qui sotto, che non ne ha bisogno:
+            # stats_vuote_consecutive si azzera ad ogni lettura buona e la promozione pretende
+            # statistiche presenti, quindi all'ingresso vale sempre 0 e servono comunque
+            # SOGLIA_SENZA_STATISTICHE risposte vuote nuove prima che scatti. Ne' vale per la
+            # rimozione manuale, che resta immediata perche' la decide l'utente.
+            cicli_da_ingresso = avanza_ciclo_preferito(stato_fav)
+            permanenza_garantita = cicli_da_ingresso <= CICLI_MINIMI_PERMANENZA_PREFERITI
             # Preferito senza statistiche: esce. La regola d'ingresso guarda solo il punteggio,
             # apposta per funzionare quando l'API tace, ma il canale serve a leggere tiri, tiri in
             # porta e corner mentre si gioca - e senza quelli non può far scattare nessuna
@@ -8536,13 +8718,19 @@ def processa_partita(fixture, notifiche_attive=True):
                 return
             ultimo_invio_fav = stato_fav.get("timestamp_notifica", 0)
             # Il tempo di silenzio va misurato in minuti GIOCATI, non di orologio: durante
-            # l'intervallo (status "HT", elapsed assente) non arrivano notifiche semplicemente
-            # perché non si sta giocando, e DURATA_MAX_SENZA_NOTIFICA_PREFERITI vale esattamente
-            # 15 minuti - quanto dura l'intervallo. Col solo orologio, un preferito la cui ultima
-            # notifica cadeva poco prima del 45' veniva rimosso durante l'intervallo o al primo
-            # ciclo del secondo tempo, cioè proprio quando serve continuare a seguirlo. Stessa
-            # logica già applicata al caso "fuori orario" qui sotto, dove lo stato viene aggiornato
-            # come se avessimo notificato per non far scadere il preferito di notte.
+            # l'intervallo non arrivano notifiche semplicemente perché non si sta giocando. Col
+            # solo orologio, un preferito la cui ultima notifica cadeva poco prima del 45' veniva
+            # rimosso durante l'intervallo o al primo ciclo del secondo tempo, cioè proprio quando
+            # serve continuare a seguirlo. Stessa logica già applicata al caso "fuori orario" qui
+            # sotto, dove lo stato viene aggiornato come se avessimo notificato per non far scadere
+            # il preferito di notte.
+            #
+            # Attenzione: contrariamente a quanto si era assunto scrivendo questa regola, durante
+            # l'intervallo l'API NON smette di esporre il minuto - lo tiene fermo sul 45'. I minuti
+            # giocati quindi non avanzano (giusto), ma non c'è nessuno scudo automatico che impedisca
+            # a una rimozione già matura di scattare a pausa in corso: è successo il 30/08 alle
+            # 12:16 con St. Pauli-Kaiserslautern. A tenerla lontana è la soglia, che ora vale 25
+            # minuti giocati e non 15 (vedi DURATA_MAX_SENZA_NOTIFICA_PREFERITI).
             minuto_ultima_notifica = stato_fav.get("minuto_ultima_notifica")
             if ultimo_invio_fav and minuto_ultima_notifica is None and elapsed_raw is not None:
                 # Stato salvato da una versione precedente (senza questo campo): si riparte da ora
@@ -8553,7 +8741,8 @@ def processa_partita(fixture, notifiche_attive=True):
                 elapsed_raw - minuto_ultima_notifica
                 if elapsed_raw is not None and minuto_ultima_notifica is not None else None
             )
-            if (ultimo_invio_fav
+            if (not permanenza_garantita
+                    and ultimo_invio_fav
                     and elapsed_raw is not None
                     and minuti_giocati_da_notifica is not None
                     and minuti_giocati_da_notifica >= DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
@@ -8617,6 +8806,11 @@ def processa_partita(fixture, notifiche_attive=True):
                 # promossa resta invece valutabile per tutto il resto della gara - è il punto del
                 # cambio: prima la finestra si chiudeva al 12' e non si riapriva più.
                 stato_partite[fixture_id]["auto_preferito_processato"] = True
+                # L'orologio dell'inattivita' riparte da adesso: il messaggio d'ingresso qui sotto
+                # non passa dal percorso delle notifiche, quindi senza questo la partita entrerebbe
+                # con il timestamp dell'ultima notifica di quando NON era ancora un preferito - gia'
+                # scaduto - e uscirebbe al ciclo successivo.
+                stato_partite[fixture_id].update(stato_ingresso_preferiti(elapsed_raw))
                 log(f"    ⭐ Aggiunta automaticamente ai preferiti al {minuto}': {motivo}")
                 if notifiche_attive:
                     # Nel CANALE preferiti, non nella chat principale: è il messaggio che apre la
@@ -9183,8 +9377,17 @@ if __name__ == "__main__":
             # filtro dovesse escludere una partita vera, il numero lo mostra subito invece di
             # lasciar credere che quella partita non fosse live.
             escluse_giovanili = len(in_whitelist) - len(partite_valide)
-            log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
-                + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
+            # "0 totali, 0 valide" da solo e' ambiguo, ed e' costato tempo a interpretarlo: la
+            # stessa riga usciva sia quando non c'era davvero nessuna partita, sia quando la
+            # chiamata era fallita e get_partite_live() aveva restituito una lista vuota. Il 29/08,
+            # con la chiamata live rifiutata per ore, i log dicevano "0 totali, 0 valide" ogni tre
+            # minuti e sembravano una notte tranquilla: il bot era cieco.
+            if chiamata_partite_live_fallita:
+                log("Partite live: NON PERVENUTE - la chiamata e' fallita, l'elenco vuoto qui sotto "
+                    "non vuol dire che non ci siano partite in corso")
+            else:
+                log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
+                    + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
 
             if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
                 if chiamata_partite_live_fallita:
@@ -9271,7 +9474,10 @@ if __name__ == "__main__":
             # continuare a interrogare l'API ogni pochi minuti per niente. Se il piano non è ancora
             # disponibile (es. primo avvio prima che la generazione vada a buon fine) ci si comporta
             # come se si fosse sempre in finestra attiva, per non restare ciechi.
-            piano_disponibile = PIANO_GIORNATA.get("data") is not None
+            # piano_e_di_oggi e non "la data esiste": un piano scaduto ha tutte le finestre nel
+            # passato, quindi farebbe concludere "fuori da ogni finestra" e rallentare il ciclo a
+            # 30 minuti per tutta la mattina, invece di far scattare il fail-safe qui sotto.
+            piano_disponibile = piano_e_di_oggi()
             in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
             # chiamata_partite_live_fallita conta quanto partite_valide: una lista vuota che arriva
             # da una chiamata fallita non dice che non c'e' niente in corso, e prenderla per buona
