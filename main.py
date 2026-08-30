@@ -2944,6 +2944,26 @@ def costruisci_piano_giornata(data_str):
     }
 
 
+def piano_e_di_oggi(piano=None):
+    """True solo se il piano in memoria e' quello della giornata corrente (ora italiana).
+
+    Serve perche' "il piano esiste" e "il piano vale ancora" sono due cose diverse, e confonderle
+    costava caro: il piano viene rigenerato solo dalle ORA_GENERAZIONE_PIANO_GIORNATA in poi, ma
+    quello del giorno prima resta in memoria e su disco fino ad allora. Un piano scaduto ha tutte
+    le finestre attive nel passato, quindi dentro_finestra_attiva() dice sempre False - e chi
+    controllava solo l'esistenza del campo "data" concludeva "siamo fuori da ogni finestra"
+    invece di "non lo so ancora".
+
+    Visto in produzione il 30/08: dal riavvio delle 10:18 fino alle 12:00 il ciclo e' rimasto a
+    INTERVALLO_CICLO_MORTO (30 minuti) sulla base del piano del giorno prima - cicli #3 alle 09:18
+    e #4 alle 09:48 UTC, mezz'ora esatta di distanza - quando avrebbe dovuto girare a
+    INTERVALLO_CICLO_ATTIVO. Succedeva ogni mattina."""
+    piano = PIANO_GIORNATA if piano is None else piano
+    if not piano.get("data"):
+        return False
+    return piano["data"] == datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+
+
 def dentro_finestra_attiva(piano, now_ts=None):
     """True se now_ts (default: adesso) cade dentro una finestra attiva del piano, con un margine
     di anticipo (MARGINE_PRE_KICKOFF_MINUTI) per non perdere l'inizio di una partita in leggero
@@ -4015,10 +4035,26 @@ def cmd_live(chat_id):
 def cmd_piano(chat_id):
     """Mostra il piano giornata corrente: partite whitelist previste oggi, orari di kickoff e
     finestre orarie attive usate dallo scheduler adattivo per decidere il ritmo dei cicli."""
-    if not PIANO_GIORNATA.get("data"):
+    # Due casi diversi da tenere distinti: il piano non c'e' proprio, oppure c'e' ma e' di ieri.
+    # Nel secondo caso mostrarlo com'era faceva scrivere "Nessuna partita in corso ne' in programma
+    # per il resto della giornata" - le partite di ieri sono tutte concluse - e il comando sembrava
+    # non funzionare, mentre stava rispondendo in modo corretto sulla giornata sbagliata.
+    if not piano_e_di_oggi():
+        oggi_str = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
+        if PIANO_GIORNATA.get("data"):
+            testo = (f"Il piano in memoria e' ancora quello del {PIANO_GIORNATA['data']}, non di oggi "
+                     f"({oggi_str}).\n\nViene rigenerato una volta al giorno dalle "
+                     f"{ORA_GENERAZIONE_PIANO_GIORNATA}:00 (ora italiana) in poi, al primo ciclo utile: "
+                     f"riprova dopo quell'ora.\n\nNel frattempo il bot segue comunque tutte le partite "
+                     f"- senza un piano valido tratta ogni momento come finestra attiva, quindi non ne "
+                     f"perde nessuna.")
+        else:
+            testo = (f"Nessun piano giornata ancora generato.\n\nViene creato una volta al giorno dalle "
+                     f"{ORA_GENERAZIONE_PIANO_GIORNATA}:00 (ora italiana) in poi, al primo ciclo utile.\n\n"
+                     f"Nel frattempo il bot segue comunque tutte le partite.")
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessun piano giornata generato ancora. Verrà creato al prossimo ciclo."}, timeout=5)
+            json={"chat_id": chat_id, "text": testo}, timeout=5)
         return
 
     tz_italia = ZoneInfo("Europe/Rome")
@@ -9271,7 +9307,10 @@ if __name__ == "__main__":
             # continuare a interrogare l'API ogni pochi minuti per niente. Se il piano non è ancora
             # disponibile (es. primo avvio prima che la generazione vada a buon fine) ci si comporta
             # come se si fosse sempre in finestra attiva, per non restare ciechi.
-            piano_disponibile = PIANO_GIORNATA.get("data") is not None
+            # piano_e_di_oggi e non "la data esiste": un piano scaduto ha tutte le finestre nel
+            # passato, quindi farebbe concludere "fuori da ogni finestra" e rallentare il ciclo a
+            # 30 minuti per tutta la mattina, invece di far scattare il fail-safe qui sotto.
+            piano_disponibile = piano_e_di_oggi()
             in_finestra_attiva = dentro_finestra_attiva(PIANO_GIORNATA) if piano_disponibile else True
             # chiamata_partite_live_fallita conta quanto partite_valide: una lista vuota che arriva
             # da una chiamata fallita non dice che non c'e' niente in corso, e prenderla per buona
