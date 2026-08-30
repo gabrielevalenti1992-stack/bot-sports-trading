@@ -252,6 +252,12 @@ SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = 2  # oppure tiri in porta combinati nel 
 # dai preferiti e torna alle regole normali, invece di restare agganciata per sempre a soglie più
 # permissive senza motivo.
 DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 900  # 15 minuti
+# Permanenza minima nei preferiti, in cicli. Una partita appena promossa non puo' essere cacciata
+# dalle rimozioni automatiche prima di tanti cicli: serve a garantire che, una volta entrata, resti
+# abbastanza da poterla guardare davvero. Senza, capitava che entrasse e uscisse nel giro di tre
+# minuti (30/08: dentro alle 10:46:48, fuori alle 10:49:57).
+CICLI_MINIMI_PERMANENZA_PREFERITI = 2
+
 
 # Goleada: oltre questo scarto gol la partita perde valore per il trading e si smette di
 # notificarla del tutto (preferiti compresi). Il pareggio invece (scarto 0) è sempre rilevante e
@@ -828,6 +834,7 @@ try:
     SOGLIA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_ritmo_notifica_preferiti", SOGLIA_RITMO_NOTIFICA_PREFERITI)
     SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = config.get("soglia_porta_ritmo_notifica_preferiti", SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI)
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
+    CICLI_MINIMI_PERMANENZA_PREFERITI = config.get("cicli_minimi_permanenza_preferiti", CICLI_MINIMI_PERMANENZA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
     AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
@@ -1964,6 +1971,11 @@ def poll_callbacks():
                         else:
                             FAVORITE_MATCHES.add(fid)
                             save_favorites(FAVORITE_MATCHES)
+                            # Stesso azzeramento della promozione automatica: una partita aggiunta
+                            # a mano dopo un lungo silenzio verrebbe altrimenti rimossa subito, e
+                            # il bottone sembrerebbe non aver fatto niente. Il minuto non e' noto
+                            # qui: resta None e viene riancorato al primo ciclo utile.
+                            stato_partite.setdefault(int(fid), {}).update(stato_ingresso_preferiti())
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                                 json={"callback_query_id": cq["id"], "text": "Aggiunta ai preferiti"}, timeout=5)
@@ -7264,6 +7276,38 @@ def invia_messaggio_uscita_preferiti(home, away, minuto, score_home, score_away,
     invia_messaggio_telegram("\n".join(righe), chat_id=TELEGRAM_CHAT_ID_PREFERITI)
 
 
+def stato_ingresso_preferiti(elapsed_raw=None, adesso=None):
+    """Stato da applicare a una partita nel momento in cui entra nei preferiti.
+
+    Fa ripartire da zero l'orologio dell'inattivita'. Senza, la partita entrava portandosi dietro
+    il timestamp dell'ultima notifica della vita PRECEDENTE - quella mandata nella chat principale
+    quando ancora non era un preferito - e la rimozione per silenzio la trovava gia' scaduta.
+
+    Il 30/08 in produzione: promossa alle 10:46:48 ("la squadra ospite comanda 82% e non segna"),
+    rimossa alle 10:49:57 per "nessuna notifica da oltre 15 min". Tre minuti dentro. Il difetto
+    colpiva sistematicamente la rotta dominio, che per costruzione promuove le partite che
+    dominano senza segnare, cioe' proprio quelle che non generano notifiche.
+
+    minuto_ultima_notifica puo' restare None (partita all'intervallo, minuto non esposto dall'API):
+    la rimozione lo riancora da sola al primo ciclo con un minuto valido, invece di misurare il
+    silenzio da un riferimento sbagliato."""
+    return {
+        "timestamp_notifica": time.time() if adesso is None else adesso,
+        "minuto_ultima_notifica": elapsed_raw,
+        "cicli_da_ingresso_preferiti": 0,
+    }
+
+
+def avanza_ciclo_preferito(stato_fav):
+    """Conta un ciclo di permanenza nei preferiti e ritorna il totale.
+
+    E' il contatore su cui si regge CICLI_MINIMI_PERMANENZA_PREFERITI: si misurano i cicli e non i
+    minuti perche' e' il ciclo l'unita' con cui il bot guarda la partita, ed e' quello che l'utente
+    vede scorrere nel canale."""
+    stato_fav["cicli_da_ingresso_preferiti"] = stato_fav.get("cicli_da_ingresso_preferiti", 0) + 1
+    return stato_fav["cicli_da_ingresso_preferiti"]
+
+
 def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away):
     """Partita che si sblocca presto restando aperta: due gol entro il 25' con al massimo un gol
     di scarto.
@@ -8547,6 +8591,18 @@ def processa_partita(fixture, notifiche_attive=True):
         # soglie più permissive per sempre.
         if str(fixture_id) in FAVORITE_MATCHES:
             stato_fav = stato_partite.setdefault(fixture_id, {})
+            # Quanti cicli la partita e' gia' stata seguita da preferita. Sotto la permanenza
+            # minima la rimozione per silenzio non giudica: una partita appena entrata deve poter
+            # essere guardata almeno per qualche ciclo, altrimenti entra e sparisce nel giro di
+            # pochi minuti (30/08: dentro alle 10:46:48, fuori alle 10:49:57).
+            #
+            # Non vale per l'uscita "statistiche assenti" qui sotto, che non ne ha bisogno:
+            # stats_vuote_consecutive si azzera ad ogni lettura buona e la promozione pretende
+            # statistiche presenti, quindi all'ingresso vale sempre 0 e servono comunque
+            # SOGLIA_SENZA_STATISTICHE risposte vuote nuove prima che scatti. Ne' vale per la
+            # rimozione manuale, che resta immediata perche' la decide l'utente.
+            cicli_da_ingresso = avanza_ciclo_preferito(stato_fav)
+            permanenza_garantita = cicli_da_ingresso <= CICLI_MINIMI_PERMANENZA_PREFERITI
             # Preferito senza statistiche: esce. La regola d'ingresso guarda solo il punteggio,
             # apposta per funzionare quando l'API tace, ma il canale serve a leggere tiri, tiri in
             # porta e corner mentre si gioca - e senza quelli non può far scattare nessuna
@@ -8589,7 +8645,8 @@ def processa_partita(fixture, notifiche_attive=True):
                 elapsed_raw - minuto_ultima_notifica
                 if elapsed_raw is not None and minuto_ultima_notifica is not None else None
             )
-            if (ultimo_invio_fav
+            if (not permanenza_garantita
+                    and ultimo_invio_fav
                     and elapsed_raw is not None
                     and minuti_giocati_da_notifica is not None
                     and minuti_giocati_da_notifica >= DURATA_MAX_SENZA_NOTIFICA_PREFERITI // 60
@@ -8653,6 +8710,11 @@ def processa_partita(fixture, notifiche_attive=True):
                 # promossa resta invece valutabile per tutto il resto della gara - è il punto del
                 # cambio: prima la finestra si chiudeva al 12' e non si riapriva più.
                 stato_partite[fixture_id]["auto_preferito_processato"] = True
+                # L'orologio dell'inattivita' riparte da adesso: il messaggio d'ingresso qui sotto
+                # non passa dal percorso delle notifiche, quindi senza questo la partita entrerebbe
+                # con il timestamp dell'ultima notifica di quando NON era ancora un preferito - gia'
+                # scaduto - e uscirebbe al ciclo successivo.
+                stato_partite[fixture_id].update(stato_ingresso_preferiti(elapsed_raw))
                 log(f"    ⭐ Aggiunta automaticamente ai preferiti al {minuto}': {motivo}")
                 if notifiche_attive:
                     # Nel CANALE preferiti, non nella chat principale: è il messaggio che apre la
