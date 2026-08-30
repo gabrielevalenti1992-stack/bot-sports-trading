@@ -7,7 +7,7 @@
   "momentum_tiri_totali": 5,
   "momentum_corner": 4,
   "soglia_min_cambio_preferiti": 2,
-  "durata_max_senza_notifica_preferiti": 900,
+  "durata_max_senza_notifica_preferiti": 1500,
   "cicli_minimi_permanenza_preferiti": 2,
   "soglia_goleada_stop_notifiche": 3,
   "auto_preferiti_attivo": true,

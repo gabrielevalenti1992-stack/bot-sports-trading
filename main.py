@@ -247,11 +247,23 @@ SOGLIA_MIN_CAMBIO_PREFERITI = 2
 SOGLIA_RITMO_NOTIFICA_PREFERITI = 4       # tiri combinati nel blocco
 SOGLIA_PORTA_RITMO_NOTIFICA_PREFERITI = 2  # oppure tiri in porta combinati nel blocco
 
-# Preferiti "raffreddati": se passano questi secondi senza che parta nessuna notifica (nessun
-# evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove automaticamente
-# dai preferiti e torna alle regole normali, invece di restare agganciata per sempre a soglie più
-# permissive senza motivo.
-DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 900  # 15 minuti
+# Preferiti "raffreddati": se passano questi MINUTI GIOCATI senza che parta nessuna notifica
+# (nessun evento abbastanza rilevante), vuol dire che la partita si è spenta - si rimuove
+# automaticamente dai preferiti e torna alle regole normali, invece di restare agganciata per
+# sempre a soglie più permissive senza motivo.
+#
+# Era 15 minuti, ed erano pochi: la rotta dominio promuove apposta le partite che comandano SENZA
+# segnare, cioè quelle che per definizione non generano notifiche, e poi questa regola le cacciava
+# proprio per quello. Il 30/08 St. Pauli-Kaiserslautern è entrata al 30' comandando al 95%, è stata
+# rimossa al 45' per silenzio, e da lì ha fatto due gol: 0-2 al 48' e 1-2 al 60'. Con 25 minuti
+# sarebbe rimasta fino al 55', quindi avrebbe visto il primo gol - che a sua volta riazzera
+# l'orologio - e sarebbe arrivata in fondo alla partita.
+#
+# 25 minuti giocati coprono anche l'intervallo per intero: l'API tiene elapsed fermo sul 45'
+# durante la pausa invece di non esporlo, quindi con la vecchia soglia una partita entrata al 30'
+# maturava esattamente i suoi 15 minuti di silenzio e usciva a metà pausa, che è il momento
+# peggiore per smettere di seguirla.
+DURATA_MAX_SENZA_NOTIFICA_PREFERITI = 1500  # 25 minuti giocati
 # Permanenza minima nei preferiti, in cicli. Una partita appena promossa non puo' essere cacciata
 # dalle rimozioni automatiche prima di tanti cicli: serve a garantire che, una volta entrata, resti
 # abbastanza da poterla guardare davvero. Senza, capitava che entrasse e uscisse nel giro di tre
@@ -8628,13 +8640,19 @@ def processa_partita(fixture, notifiche_attive=True):
                 return
             ultimo_invio_fav = stato_fav.get("timestamp_notifica", 0)
             # Il tempo di silenzio va misurato in minuti GIOCATI, non di orologio: durante
-            # l'intervallo (status "HT", elapsed assente) non arrivano notifiche semplicemente
-            # perché non si sta giocando, e DURATA_MAX_SENZA_NOTIFICA_PREFERITI vale esattamente
-            # 15 minuti - quanto dura l'intervallo. Col solo orologio, un preferito la cui ultima
-            # notifica cadeva poco prima del 45' veniva rimosso durante l'intervallo o al primo
-            # ciclo del secondo tempo, cioè proprio quando serve continuare a seguirlo. Stessa
-            # logica già applicata al caso "fuori orario" qui sotto, dove lo stato viene aggiornato
-            # come se avessimo notificato per non far scadere il preferito di notte.
+            # l'intervallo non arrivano notifiche semplicemente perché non si sta giocando. Col
+            # solo orologio, un preferito la cui ultima notifica cadeva poco prima del 45' veniva
+            # rimosso durante l'intervallo o al primo ciclo del secondo tempo, cioè proprio quando
+            # serve continuare a seguirlo. Stessa logica già applicata al caso "fuori orario" qui
+            # sotto, dove lo stato viene aggiornato come se avessimo notificato per non far scadere
+            # il preferito di notte.
+            #
+            # Attenzione: contrariamente a quanto si era assunto scrivendo questa regola, durante
+            # l'intervallo l'API NON smette di esporre il minuto - lo tiene fermo sul 45'. I minuti
+            # giocati quindi non avanzano (giusto), ma non c'è nessuno scudo automatico che impedisca
+            # a una rimozione già matura di scattare a pausa in corso: è successo il 30/08 alle
+            # 12:16 con St. Pauli-Kaiserslautern. A tenerla lontana è la soglia, che ora vale 25
+            # minuti giocati e non 15 (vedi DURATA_MAX_SENZA_NOTIFICA_PREFERITI).
             minuto_ultima_notifica = stato_fav.get("minuto_ultima_notifica")
             if ultimo_invio_fav and minuto_ultima_notifica is None and elapsed_raw is not None:
                 # Stato salvato da una versione precedente (senza questo campo): si riparte da ora
