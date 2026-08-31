@@ -2884,6 +2884,26 @@ def fattore_riserva_quota():
     return 1.0 + quota_bruciata * (FATTORE_RALLENTAMENTO_QUOTA_MAX - 1)
 
 
+def nota_riserva_quota(fattore):
+    """Il pezzo di log che spiega perche' il ciclo e' rallentato per la quota. "" se non lo e'.
+
+    Separata dal ciclo per non ripetere l'incoerenza vista il 30/08 alle 21:14, e poi per tutta la
+    notte: il fattore veniva calcolato da una lettura dello stato quota e il testo da un'altra, con
+    un thread di sfondo libero di aggiornare l'header in mezzo. Ne usciva una riga che si
+    contraddiceva da sola - "quota quasi finita (7499 richieste rimaste): ciclo rallentato x4.0".
+
+    Quando l'esaurimento e' dichiarato dall'API il numero dell'header non va proprio citato: e'
+    esattamente il dato che in quel momento non e' affidabile (29/08 e 30/08, header fermi su
+    7499/7500 mentre ogni chiamata veniva rifiutata)."""
+    if fattore <= 1.0:
+        return ""
+    if quota_giornaliera_finita() is True:
+        return (f", quota giornaliera esaurita secondo l'API: ciclo al minimo (x{fattore:.1f}) "
+                f"in attesa del reset")
+    return (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
+            f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
+
+
 def _classifica_errore_http(status_code):
     if status_code == 429:
         return "rate_limit", "limite di richieste superato"
@@ -9815,11 +9835,9 @@ if __name__ == "__main__":
             # dei preferiti rallenta: costano 3 chiamate a giro, quindi sono proprio loro a bruciare
             # la quota piu' in fretta.
             fattore = fattore_riserva_quota()
-            nota_quota = ""
+            nota_quota = nota_riserva_quota(fattore)
             if fattore > 1.0:
                 prossimo_intervallo = int(prossimo_intervallo * fattore)
-                nota_quota = (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
-                              f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
             log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''}{nota_quota})...")
             # Ultima riga prima dell'attesa: il giro è arrivato in fondo senza eccezioni.
             segna_giro_completato()
