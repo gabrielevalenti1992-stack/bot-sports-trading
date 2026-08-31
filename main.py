@@ -1940,7 +1940,7 @@ def _esegui_comando(chat_id, funzione, args):
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}", "parse_mode": "Markdown"}, timeout=5)
+                json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}"}, timeout=5)
         except Exception:
             pass
 
@@ -2045,8 +2045,7 @@ def poll_callbacks():
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={
                                 "chat_id": chat_id,
-                                "text": "\U0001F515 Partita silenziata. Non riceverai piu alert live. Il risultato finale arrivera comunque.",
-                                "parse_mode": "Markdown"
+                                "text": "\U0001F515 Partita silenziata. Non riceverai piu alert live. Il risultato finale arrivera comunque."
                             }, timeout=5)
 
                     elif data.startswith("unmute:"):
@@ -2168,7 +2167,7 @@ def poll_callbacks():
                         if not args:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_status, " ".join(args).lower().strip("<>").strip())
 
@@ -2176,7 +2175,7 @@ def poll_callbacks():
                         if not args:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /momentum <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "Usa: /momentum <nome squadra>"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_momentum, " ".join(args).lower().strip("<>").strip())
 
@@ -2332,11 +2331,12 @@ def invia_messaggio_telegram(testo, chat_id=None):
     destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': destinatario, 'text': testo, 'parse_mode': 'Markdown'}
+        data = {'chat_id': destinatario, 'text': testo}
         response = requests.post(url, data=data, timeout=10)
         log(f"Telegram testo -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
-        # Markdown malformato: si rimanda lo stesso testo senza formattazione invece di perderlo.
-        # Meglio un messaggio senza grassetti che nessun messaggio - e finora era nessun messaggio.
+        # Rete di sicurezza: con i messaggi in testo semplice questo non dovrebbe piu' scattare,
+        # ma resta perche' il guasto che copre e' silenzioso (il messaggio sparisce e nessuno lo
+        # sa) e perche' basterebbe un parse_mode rimesso per sbaglio a farlo tornare.
         if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
             data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
             response = requests.post(url, data=data_semplice, timeout=10)
@@ -2366,15 +2366,14 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
                 files = {'photo': photo}
                 data = {
                     'chat_id': destinatario,
-                    'caption': messaggio,
-                    'parse_mode': 'Markdown'
+                    'caption': messaggio
                 }
                 if reply_markup:
                     data['reply_markup'] = json.dumps(reply_markup)
                 response = requests.post(url, data=data, files=files, timeout=10)
                 log(f"Telegram foto -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
-            # Come per il testo: la didascalia con Markdown rotto farebbe perdere l'intera
-            # notifica, foto compresa. Il file va riaperto, il primo invio l'ha gia' consumato.
+            # Stessa rete di sicurezza del testo: una didascalia rifiutata farebbe perdere
+            # l'intera notifica, foto compresa. Il file va riaperto, il primo invio l'ha consumato.
             if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
                 data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
                 with open(foto_path, 'rb') as photo_retry:
@@ -2411,7 +2410,7 @@ def aggiorna_notifica_telegram(message_id, foto_path, messaggio, reply_markup=No
     destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         media = {"type": "photo", "media": "attach://photo",
-                 "caption": messaggio, "parse_mode": "Markdown"}
+                 "caption": messaggio}
         dati = {"chat_id": destinatario, "message_id": message_id, "media": json.dumps(media)}
         if reply_markup:
             dati["reply_markup"] = json.dumps(reply_markup)
@@ -4197,14 +4196,14 @@ def cmd_help(chat_id):
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": help_text}, timeout=5)
 
 
 def cmd_favorites(chat_id):
     if not FAVORITE_MATCHES:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita preferita.", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita preferita."}, timeout=5)
         return
     lines = ["Partite preferite:"]
     partite_cmd = get_partite_live()
@@ -4220,7 +4219,7 @@ def cmd_favorites(chat_id):
             lines.append(f"- ID {fid} (non live)")
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=5)
 
 
 def cmd_clearfavorites(chat_id):
@@ -4228,14 +4227,14 @@ def cmd_clearfavorites(chat_id):
     save_favorites(FAVORITE_MATCHES)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "Lista preferiti svuotata.", "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "Lista preferiti svuotata."}, timeout=5)
 
 
 def cmd_silenced(chat_id):
     if not SILENCED_MATCHES:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita silenziata.", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita silenziata."}, timeout=5)
         return
     lines = ["Partite silenziate:"]
     keyboard = {"inline_keyboard": []}
@@ -4260,7 +4259,7 @@ def cmd_live(chat_id):
     if not partite_cmd:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento.", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento."}, timeout=5)
         return
     MAX_PARTITE_MOSTRATE = 20
     partite_da_mostrare = partite_cmd[:MAX_PARTITE_MOSTRATE]
@@ -4307,7 +4306,7 @@ def cmd_live(chat_id):
     lines.append(f"\nStatistiche disponibili: {n_con_dati}/{n_mostrate} mostrate")
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=5)
 
 
 def cmd_piano(chat_id):
@@ -4905,13 +4904,13 @@ def cmd_coperturaleghe(chat_id):
     if escluse:
         righe.append("\n".join(escluse) + "\n")
     if sorvegliate:
-        righe.append("*Con giornate senza dati:*\n" + "\n".join(sorvegliate) + "\n")
+        righe.append("Con giornate senza dati:\n" + "\n".join(sorvegliate) + "\n")
     if pulite:
         # Le leghe a posto sono la maggioranza e non aggiungono informazione: se ne mostra un
         # campione, il totale basta a sapere che sono seguite.
         mostrate = pulite[:15]
         coda = f"\n…e altre {len(pulite) - len(mostrate)}" if len(pulite) > len(mostrate) else ""
-        righe.append(f"*Regolari ({len(pulite)}):*\n" + "\n".join(mostrate) + coda)
+        righe.append(f"Regolari ({len(pulite)}):\n" + "\n".join(mostrate) + coda)
 
     invia_messaggio_telegram("\n".join(righe), chat_id=chat_id)
 
@@ -5155,7 +5154,7 @@ def cmd_uptime(chat_id):
         invia_messaggio_telegram(
             "UptimeRobot non è collegato.\n\n"
             "Serve la variabile d'ambiente UPTIMEROBOT_API_KEY su Render "
-            "(Environment → Add Environment Variable), con una chiave *read-only* presa da "
+            "(Environment → Add Environment Variable), con una chiave read-only presa da "
             "UptimeRobot → Integrations & API → API.\n\n"
             "Senza, il resto del bot funziona normalmente: cambia solo che questo comando non ha "
             "niente da leggere.", chat_id=chat_id)
@@ -5436,7 +5435,7 @@ def cmd_status(chat_id, query):
     if not trovate:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'"}, timeout=5)
         return
     for f in trovate:
         # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
@@ -5540,7 +5539,7 @@ def cmd_status(chat_id, query):
                     log(f"Errore invio grafico /status: {e}")
                     requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                        json={"chat_id": chat_id, "text": msg_text}, timeout=5)
                 finally:
                     try:
                         os.remove(foto_path)
@@ -5549,7 +5548,7 @@ def cmd_status(chat_id, query):
             else:
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                    json={"chat_id": chat_id, "text": msg_text}, timeout=5)
         except Exception as e:
             squadre_id = (
                 f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
@@ -5607,7 +5606,7 @@ def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, sc
             log(f"Errore invio grafico momentum: {e}")
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                json={"chat_id": chat_id, "text": msg_text}, timeout=5)
         finally:
             try:
                 os.remove(foto_path)
@@ -5637,7 +5636,7 @@ def cmd_momentum(chat_id, query):
     if not trovate:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'"}, timeout=5)
         return
 
     for f in trovate:
@@ -6819,9 +6818,10 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 #   quelle leghe). Non sono più comandi Telegram: le soglie si controllano nel codice (SOGLIA_*
 #   vicino a STRATEGIE).
 #
-# Versione mandata su Telegram sotto (parse_mode Markdown): niente underscore o parentesi quadre,
-# altrimenti Telegram prova a interpretarli come corsivo/link e può rifiutare il messaggio intero
-# con un errore di parsing invece di consegnarlo.
+# Questo testo era stato scritto evitando underscore e parentesi quadre perche' i messaggi
+# partivano con parse_mode Markdown e Telegram poteva rifiutarli. Il vincolo non c'e' piu': i
+# messaggi vanno in testo semplice, quindi si puo' scrivere quello che serve. Il testo resta com'e'
+# perche' si legge bene, ma non e' piu' obbligato a esserlo.
 LEGENDA_DIAGNOSTICA = (
     "Legenda passaggi pipeline (dove può fermarsi, come intervenire):\n"
     "CHIAMATE API: una parte delle richieste ad API-Football sta fallendo. Il messaggio riporta "
