@@ -1003,6 +1003,13 @@ except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
 PAROLE_ESCLUSE = [
+    # Calcio femminile. "women"/"femminile"/"female" c'erano gia', ma coprivano solo inglese e
+    # italiano: la Frauen Bundesliga e la Primera Division Femenina passavano indisturbate, perche'
+    # contengono "Bundesliga" e "Primera Division" e superavano cosi' il match sulla whitelist.
+    # Viste in produzione il 30 e il 31/08 (Bayern Munich W-Mainz 05 W, Barcelona W-Granad.
+    # Tenerife W). Le voci sono troncate alla radice per prendere maschile e femminile insieme:
+    # "femenin" copre femenina/femenino, "feminin" copre feminine/feminino/feminina.
+    "frauen", "femenin", "feminin", "femminil", "vrouwen", "dames", "kvinne", "kobiet",
     "women", "femminile", "female", "u21", "u20", "u19", "u18", "u17", "u16", "u15",
     "under-21", "under-20", "under-19", "under-18", "under-17", "under 21", "under 20",
     "under 19", "under 18", "under 17", "youth", "amateur", "dilettanti", "regional",
@@ -1054,6 +1061,39 @@ def squadra_giovanile(nome_squadra):
     lettere dentro un nome piu' lungo."""
     nome = _senza_accenti(nome_squadra or "")
     return any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE)
+
+
+# Squadre femminili riconosciute dal NOME, non dalla lega. Stessa ragione per cui esiste il
+# filtro giovanile qui sopra: il nome della lega non basta. La Frauen Bundesliga si riconosce, ma
+# una coppa o un torneo possono chiamarsi in modo neutro e mettere in campo squadre femminili lo
+# stesso, e l'elenco delle lingue non sara' mai completo. Il nome della squadra invece porta un
+# marcatore stabile: API-Football aggiunge " W" in coda (Bayern Munich W, Barcelona W, Nurnberg W).
+PAROLE_ESCLUSE_SQUADRE_FEMMINILI = [
+    "women", "femminile", "femenino", "femenina", "feminino", "feminine",
+    "frauen", "vrouwen", "dames", "kvinner",
+]
+
+
+def squadra_femminile(nome_squadra):
+    """True se il nome e' quello di una squadra femminile.
+
+    Il marcatore " W" si cerca solo in CODA e come parola a se': dentro il nome intercetterebbe
+    mezzo mondo, e in coda non esistono club maschili che finiscano con una W isolata."""
+    nome = _senza_accenti(nome_squadra or "").strip()
+    if re.search(r"\bw$", nome) or nome.endswith("(w)"):
+        return True
+    return any(re.search(rf"\b{re.escape(parola)}\b", nome)
+               for parola in PAROLE_ESCLUSE_SQUADRE_FEMMINILI)
+
+
+def partita_femminile(fixture):
+    """True se almeno una delle due squadre e' femminile.
+
+    Come partita_tra_giovanili(): vale per il tracciamento automatico, non per i comandi - se si
+    cerca una partita con /status la si deve poter vedere lo stesso."""
+    squadre = fixture.get("teams", {}) or {}
+    return any(squadra_femminile((squadre.get(lato) or {}).get("name", ""))
+               for lato in ("home", "away"))
 
 
 def fixture_in_whitelist(fixture):
@@ -3156,7 +3196,7 @@ def costruisci_piano_giornata(data_str):
             continue
         # Stesso filtro del ciclo principale: una partita giovanile non deve nemmeno entrare nel
         # piano della giornata, altrimenti rientrerebbe dalla finestra oraria che il piano genera.
-        if partita_tra_giovanili(item):
+        if partita_tra_giovanili(item) or partita_femminile(item):
             continue
         kickoff_ts = fixture_info.get("timestamp")
         if not kickoff_ts:
@@ -9697,11 +9737,14 @@ if __name__ == "__main__":
                 f for f in partite
                 if fixture_in_whitelist(f)
             ]
-            partite_valide = [f for f in in_whitelist if not partita_tra_giovanili(f)]
+            partite_valide = [f for f in in_whitelist
+                              if not partita_tra_giovanili(f) and not partita_femminile(f)]
             # Le giovanili si contano a parte invece di sparire dentro il totale: se un giorno il
             # filtro dovesse escludere una partita vera, il numero lo mostra subito invece di
             # lasciar credere che quella partita non fosse live.
-            escluse_giovanili = len(in_whitelist) - len(partite_valide)
+            escluse_giovanili = sum(1 for f in in_whitelist if partita_tra_giovanili(f))
+            escluse_femminili = sum(1 for f in in_whitelist
+                                    if partita_femminile(f) and not partita_tra_giovanili(f))
             # "0 totali, 0 valide" da solo e' ambiguo, ed e' costato tempo a interpretarlo: la
             # stessa riga usciva sia quando non c'era davvero nessuna partita, sia quando la
             # chiamata era fallita e get_partite_live() aveva restituito una lista vuota. Il 29/08,
@@ -9712,7 +9755,8 @@ if __name__ == "__main__":
                     "non vuol dire che non ci siano partite in corso")
             else:
                 log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
-                    + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
+                    + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else "")
+                    + (f" ({escluse_femminili} escluse: squadre femminili)" if escluse_femminili else ""))
 
             if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
                 if chiamata_partite_live_fallita:
