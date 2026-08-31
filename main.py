@@ -740,6 +740,19 @@ ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca m
 # È un meccanismo indipendente dalla pausa manuale /stop (nessuno stato salvato su disco, si
 # ricalcola ogni ciclo dall'orologio): un /stop per un weekend intero non viene "riattivato" da
 # questo alle 12, e viceversa questo non manda notifiche mentre l'utente ha messo /stop.
+# Fuori dalla fascia oraria: fermare davvero il bot oppure solo tacere.
+#
+# Storicamente fuori fascia il monitoraggio restava acceso 24/7 e si spegnevano solo le notifiche,
+# per non perdere dati utili alla validazione. Costa pero' una notte intera di chiamate API su
+# partite che non producono nessun avviso, e con la quota giornaliera che si esauriva entro sera
+# (29, 30 e 31/08) quelle chiamate mancavano poi di pomeriggio, quando servono davvero.
+#
+# Con questo attivo il ciclo salta del tutto fuori fascia: nessuna chiamata, solo il battito che
+# tiene onesto l'endpoint di salute. Le partite rimaste aperte alla chiusura non restano orfane -
+# al risveglio non sono piu' nel feed live e chiudi_shadow_log_partite_sparite() ne recupera il
+# risultato finale, che e' esattamente il caso per cui quella funzione esiste.
+PAUSA_FUORI_ORARIO_ATTIVO = False
+
 ORARIO_ATTIVO_INIZIO_ORA = 12
 ORARIO_ATTIVO_INIZIO_MINUTO = 0
 ORARIO_ATTIVO_FINE_ORA = 23
@@ -951,6 +964,7 @@ try:
     ODDS_BOOKMAKER_NOME = config.get("odds_bookmaker_nome", ODDS_BOOKMAKER_NOME)
     ODDS_BET_NOME = config.get("odds_bet_nome", ODDS_BET_NOME)
     ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = config.get("odds_refresh_minuti_prima_kickoff", ODDS_REFRESH_MINUTI_PRIMA_KICKOFF)
+    PAUSA_FUORI_ORARIO_ATTIVO = config.get("pausa_fuori_orario_attivo", PAUSA_FUORI_ORARIO_ATTIVO)
     ORARIO_ATTIVO_INIZIO_ORA = config.get("orario_attivo_inizio_ora", ORARIO_ATTIVO_INIZIO_ORA)
     ORARIO_ATTIVO_INIZIO_MINUTO = config.get("orario_attivo_inizio_minuto", ORARIO_ATTIVO_INIZIO_MINUTO)
     ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
@@ -3255,8 +3269,9 @@ def dentro_orario_attivo(now_it=None):
     """True se l'ora locale italiana corrente cade nella fascia ORARIO_ATTIVO_* (default
     12:00-23:30). Nessuna eccezione per partite già in corso a cavallo del limite. NOTA: fuori
     fascia il bot NON si ferma più - il monitoraggio (statistiche, quote, shadow-log) resta
-    attivo 24/7, solo l'invio delle notifiche Telegram viene saltato (vedi notifiche_attive nel
-    loop principale e in processa_partita)."""
+    attivo 24/7 e solo l'invio delle notifiche Telegram viene saltato (vedi notifiche_attive nel
+    loop principale e in processa_partita). Con PAUSA_FUORI_ORARIO_ATTIVO invece il ciclo si ferma
+    del tutto fuori fascia e non parte nessuna chiamata."""
     now_it = now_it if now_it is not None else datetime.datetime.now(ZoneInfo("Europe/Rome"))
     inizio = now_it.replace(hour=ORARIO_ATTIVO_INIZIO_ORA, minute=ORARIO_ATTIVO_INIZIO_MINUTO, second=0, microsecond=0)
     fine = now_it.replace(hour=ORARIO_ATTIVO_FINE_ORA, minute=ORARIO_ATTIVO_FINE_MINUTO, second=0, microsecond=0)
@@ -4461,7 +4476,11 @@ def cmd_piano(chat_id):
         if dentro_orario_attivo():
             righe.append(f"Notifiche: ATTIVE (fascia oraria {fascia})")
         else:
-            righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - monitoraggio e raccolta dati comunque attivi")
+            if PAUSA_FUORI_ORARIO_ATTIVO:
+                righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - e con esse "
+                             f"tutto il resto: fuori fascia il bot non chiama l'API")
+            else:
+                righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - monitoraggio e raccolta dati comunque attivi")
 
     testo = "\n".join(righe)
     for i in range(0, len(testo), 3800):
@@ -9683,9 +9702,19 @@ if __name__ == "__main__":
             # alla validazione futura, sia il bug delle partite che finiscono a cavallo dell'orario di
             # stop restando orfane nello shadow-log (nessun risultato finale mai registrato).
             notifiche_attive = dentro_orario_attivo()
+            fascia_oraria = (f"{ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
+                             f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}")
+            if not notifiche_attive and PAUSA_FUORI_ORARIO_ATTIVO:
+                # Pausa vera: si esce dal giro prima di qualunque chiamata. Il battito continua,
+                # altrimenti l'endpoint di salute direbbe "BOT FERMO" per tutta la notte, e usa
+                # lavora=False perche' qui non completare un giro e' la cosa giusta, non un guasto.
+                segna_battito(f"in pausa fuori fascia oraria ({fascia_oraria})", lavora=False)
+                log(f"Fuori dall'orario attivo ({fascia_oraria}): bot in pausa, nessuna chiamata API. "
+                    f"Attesa {INTERVALLO_CICLO_MORTO}s...")
+                time.sleep(INTERVALLO_CICLO_MORTO)
+                continue
             if not notifiche_attive:
-                log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
-                    f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}): monitoraggio silenzioso, nessuna notifica.")
+                log(f"Fuori dall'orario attivo ({fascia_oraria}): monitoraggio silenzioso, nessuna notifica.")
 
             aggiorna_piano_giornata_se_serve()
             aggiorna_quote_prepartita_imminenti()
