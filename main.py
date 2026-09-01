@@ -511,6 +511,44 @@ BACKOFF_STATISTICHE_ASSENTI_ATTIVO = True
 # 21'). Dal 25' in poi il backoff torna a valere pieno: li' una partita ancora vuota lo e' davvero.
 MINUTO_RITMO_PIENO_STATISTICHE = 25
 
+# Freno sulla chiamata eventi (fetch_fixture_events), che finora partiva ad OGNI ciclo per OGNI
+# partita live senza nessun limite - l'unica chiamata del bot rimasta completamente senza freno.
+#
+# E' anche la piu' pesante in volume assoluto: nel conteggio giornaliero (vedi CHIAMATE_API_FILE)
+# gli eventi valgono da soli il 46-67% delle chiamate della giornata, perche' sono l'unica che si
+# ripete due volte per partita per ciclo insieme alle statistiche - ma le statistiche hanno il
+# backoff sopra e gli eventi no. Nelle sere di coppa si arrivava a ~7500 chiamate, con la quota
+# giornaliera esaurita davvero il 22/08 (bot cieco dalle 23:30 alle 02:00).
+#
+# Il punto e' che quasi tutte quelle chiamate non portano niente di nuovo: fra un ciclo e l'altro
+# (INTERVALLO_CICLO_ATTIVO, ~3 min) la lista eventi di una partita cambia solo se e' successo
+# qualcosa, e la cosa che succede piu' spesso - il gol - la sappiamo GIA' dal payload live, senza
+# chiedere niente a nessuno (vedi classifica_cambio_punteggio). Quindi si chiede quando serve:
+#   - al cambio di punteggio (gol o gol annullato): li' la lista e' cambiata di sicuro, e serve
+#     subito per avere il nome del marcatore nella notifica;
+#   - alla prima lettura della partita: senza quella base di confronto i cartellini e i rigori
+#     gia' avvenuti verrebbero notificati come nuovi al primo ciclo che chiede davvero;
+#   - a partita finita, prima del recap: cartellini rossi, rigori e minuti dei gol del messaggio
+#     finale vengono da qui, e devono essere completi;
+#   - e comunque una volta ogni CICLI_BACKOFF_EVENTI cicli, come rete di sicurezza.
+#
+# Costo accettato: un cartellino rosso o un rigore SBAGLIATO (quello segnato muove il punteggio, e
+# quindi arriva subito) puo' finire in chat con un ritardo fino a ~15 minuti, se nel frattempo non
+# segna nessuno. I gol restano immediati e col nome del marcatore. Risparmio atteso ~37% delle
+# chiamate totali (le sere critiche da ~7500 a ~4700).
+BACKOFF_EVENTI_ATTIVO = True
+CICLI_BACKOFF_EVENTI = 5  # "ogni 5 cicli" = quattro saltati e poi uno buono (~15 min di gioco)
+
+# L'endpoint eventi pubblica il gol con un ritardo rispetto al punteggio del payload live: capita
+# di chiedere gli eventi PROPRIO per il gol appena rilevato e di ricevere una lista che quel gol
+# non ce l'ha ancora. Senza freno non si notava, perche' il ciclo dopo si richiedeva comunque; col
+# freno la lista resterebbe indietro per ~15 minuti, e "Ultimo gol" in notifica indicherebbe il gol
+# precedente su un risultato che ne conta uno in piu'. Si concede allora un recupero al ciclo
+# successivo - ma non all'infinito: se dopo due tentativi la lista e' ancora corta non e' ritardo,
+# e' l'API che quel gol non lo attribuisce come ce lo aspettiamo (tipico degli autogol, marcati
+# sulla squadra del giocatore), e continuare a chiedere sarebbe solo spreco.
+MAX_RECUPERI_EVENTI_IN_RITARDO = 2
+
 # Shadow-log auto-preferiti: registra su disco le statistiche reali di ogni partita al momento
 # della valutazione (sia che scatti l'auto-preferito sia che la finestra si chiuda senza
 # scattare), senza cambiare alcun comportamento. Serve a raccogliere dati reali per calibrare le
@@ -863,6 +901,8 @@ try:
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
     BACKOFF_STATISTICHE_ASSENTI_ATTIVO = config.get("backoff_statistiche_assenti_attivo", BACKOFF_STATISTICHE_ASSENTI_ATTIVO)
     MINUTO_RITMO_PIENO_STATISTICHE = config.get("minuto_ritmo_pieno_statistiche", MINUTO_RITMO_PIENO_STATISTICHE)
+    BACKOFF_EVENTI_ATTIVO = config.get("backoff_eventi_attivo", BACKOFF_EVENTI_ATTIVO)
+    CICLI_BACKOFF_EVENTI = config.get("cicli_backoff_eventi", CICLI_BACKOFF_EVENTI)
     FAVORITA_IN_DIFFICOLTA_ATTIVO = config.get("favorita_in_difficolta_attivo", FAVORITA_IN_DIFFICOLTA_ATTIVO)
     SILENZIO_SENZA_STATISTICHE_ATTIVO = config.get("silenzio_senza_statistiche_attivo", SILENZIO_SENZA_STATISTICHE_ATTIVO)
     CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA = config.get("chiusura_shadow_log_partite_sparite_attiva", CHIUSURA_SHADOW_LOG_PARTITE_SPARITE_ATTIVA)
@@ -934,6 +974,10 @@ try:
     print(f"Backoff statistiche assenti: "
           f"{'ATTIVO' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else 'disattivo'}"
           f"{f' (ritmo pieno fino al {MINUTO_RITMO_PIENO_STATISTICHE}°)' if BACKOFF_STATISTICHE_ASSENTI_ATTIVO else ''}",
+          flush=True)
+    print(f"Freno chiamata eventi: "
+          f"{'ATTIVO' if BACKOFF_EVENTI_ATTIVO else 'disattivo'}"
+          f"{f' (su cambio punteggio + 1 volta ogni {CICLI_BACKOFF_EVENTI} cicli)' if BACKOFF_EVENTI_ATTIVO else ''}",
           flush=True)
     print(f"Un aggiornamento per blocco di 15 min (chat principale): "
           f"{'ATTIVO' if UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO else 'disattivo'} | "
@@ -1204,6 +1248,36 @@ def deve_chiedere_statistiche(fixture_id, minuto=None):
     ogni = CICLI_BACKOFF_STATISTICHE if vuote < SOGLIA_BACKOFF_LUNGO else CICLI_BACKOFF_STATISTICHE_LUNGO
     # "ogni 3 cicli" = due saltati e poi uno buono.
     return stato.get("cicli_saltati_statistiche", 0) >= ogni - 1
+
+
+def deve_chiedere_eventi(fixture_id, punteggio_cambiato, partita_da_ricapitolare):
+    """False quando la chiamata eventi di questo ciclo si puo' saltare per QUESTA partita.
+
+    Motivazione estesa accanto a CICLI_BACKOFF_EVENTI. In breve: fra due cicli la lista eventi
+    cambia solo se e' successo qualcosa, e il "qualcosa" piu' frequente - il gol - si legge gia'
+    dal payload live senza spendere una chiamata. Le tre eccezioni qui sotto sono le uniche in cui
+    saltare cambierebbe quello che finisce in chat, non solo quando ci finisce:
+
+      - punteggio_cambiato: gol appena segnato (serve il nome del marcatore, subito) o gol
+        annullato (la lista che abbiamo in memoria contiene un gol che non esiste piu');
+      - prima lettura della partita: senza la base di confronto, i cartellini e i rigori gia'
+        avvenuti prima che il bot vedesse la partita verrebbero notificati come nuovi al primo
+        ciclo che chiede davvero (stesso criterio del default di prev_cartellini_rossi);
+      - partita_da_ricapitolare: il recap finale elenca marcatori, cartellini rossi e rigori
+        presi da qui, e mandarlo incompleto e' peggio che spendere la chiamata.
+
+    Chi chiama azzera cicli_saltati_eventi quando la chiamata viene fatta davvero e marca
+    eventi_letti quando l'API ha risposto (non quando la chiamata e' fallita: un fallimento non
+    lascia nessuna base di confronto, quindi vale ancora come "prima lettura")."""
+    if not BACKOFF_EVENTI_ATTIVO:
+        return True
+    if punteggio_cambiato or partita_da_ricapitolare:
+        return True
+    stato = stato_partite.get(fixture_id, {})
+    if not stato.get("eventi_letti"):
+        return True
+    # "ogni 5 cicli" = quattro saltati e poi uno buono.
+    return stato.get("cicli_saltati_eventi", 0) >= CICLI_BACKOFF_EVENTI - 1
 
 
 def lega_esclusa_per_mancanza_statistiche(league_country, league_name):
@@ -8272,27 +8346,65 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["andata_controllata"] = True
                 stato_partite[fixture_id]["andata_info"] = None
 
+        # Freno sulla chiamata eventi: si chiede al cambio di punteggio, alla prima lettura della
+        # partita, prima del recap finale, e comunque una volta ogni CICLI_BACKOFF_EVENTI cicli.
+        # Motivazione e casistica in deve_chiedere_eventi() e accanto a CICLI_BACKOFF_EVENTI.
+        #
+        # Il gol NON dipende da questa chiamata per essere rilevato: il punteggio arriva dal
+        # payload live ed e' gia' stato confrontato sopra (classifica_cambio_punteggio). Qui si
+        # prende il contorno - chi ha segnato, cartellini rossi, rigori - e proprio perche' e'
+        # contorno puo' viaggiare a intervalli invece che ad ogni ciclo.
+        punteggio_cambiato = gol_appena_segnato or punteggio_corretto_al_ribasso
+        # Il recap finale (piu' sotto) elenca marcatori, cartellini e rigori presi da qui: parte
+        # una volta sola per partita, e deve trovare la lista completa. Dopo che e' partito
+        # (notified_final) non c'e' piu' nessuno da servire e la partita torna sotto il freno.
+        partita_da_ricapitolare = (status_short in STATI_PARTITA_CONCLUSA
+                                   and not stato_precedente.get("notified_final"))
+        eventi_da_chiedere = deve_chiedere_eventi(
+            fixture_id, punteggio_cambiato, partita_da_ricapitolare)
+
         # fetch_fixture_events restituisce None quando la CHIAMATA fallisce (rate-limit, timeout,
         # rete) e una lista quando l'API ha risposto davvero. La distinzione e' l'unica cosa che
         # separa "questa partita non ha eventi" da "non lo sappiamo", e qui sotto cambia tutto:
         # sovrascrivere lo stato con liste vuote significa dimenticare i cartellini e i rigori gia'
-        # notificati, e ritrovarseli come "nuovi" al primo ciclo che riesce.
+        # notificati, e ritrovarseli come "nuovi" al primo ciclo che riesce. Il ciclo saltato dal
+        # freno finisce nello stesso ramo per lo stesso identico motivo: anche li' non sappiamo,
+        # e quello che sappiamo va tenuto.
         #
         # Visto in produzione il 25/08: alle 19:09:34 un rate-limit su fetch_fixture_events ha congelato le
         # chiamate per 65s; alle 19:14:09 il rosso al 100' di D. T. Diop (Hapoel Beer Sheva), gia'
         # mandato in chat alle 18:58:51, e' tornato in chat identico. Stessa dinamica il 26/08 alle
         # 21:17:09 su Celje-Slovan Bratislava (fixture 1622628): "Nessun gol registrato" su una
         # partita da 3 gol, e al ciclo dopo il rigore del 34' segnalato come appena avvenuto.
-        events = fetch_fixture_events(fixture_id)
-        eventi_non_recuperati = events is None
-        if eventi_non_recuperati:
+        if eventi_da_chiedere:
+            stato_partite[fixture_id]["cicli_saltati_eventi"] = 0
+            events = fetch_fixture_events(fixture_id)
+        else:
+            stato_partite[fixture_id]["cicli_saltati_eventi"] = (
+                stato_partite[fixture_id].get("cicli_saltati_eventi", 0) + 1)
+            events = None
+        # "aggiornati" = abbiamo davvero una lista fresca di questo ciclo. Falso sia quando la
+        # chiamata e' fallita sia quando non l'abbiamo fatta: chi legge "events" piu' sotto deve
+        # distinguere una lista vuota vera da una lista vuota perche' non l'abbiamo chiesta.
+        eventi_aggiornati = events is not None
+        eventi_non_recuperati = eventi_da_chiedere and not eventi_aggiornati
+        if not eventi_aggiornati:
             events = []
             goals = stato_precedente.get("goals", [])
             cartellini_rossi = list(stato_precedente.get("cartellini_rossi", []))
             rigori = list(stato_precedente.get("rigori", []))
-            log("    ⚠️ Eventi non recuperati: chiamata API fallita (rate-limit/timeout/rete), "
-                "si tiene quanto gia' noto e si riprova al prossimo ciclo")
+            if eventi_non_recuperati:
+                log("    ⚠️ Eventi non recuperati: chiamata API fallita (rate-limit/timeout/rete), "
+                    "si tiene quanto gia' noto e si riprova al prossimo ciclo")
+            else:
+                saltati = stato_partite[fixture_id]["cicli_saltati_eventi"]
+                log(f"    ⏭️ Eventi non richiesti: punteggio fermo su {score_home}-{score_away}, "
+                    f"si richiedono tra {max(0, CICLI_BACKOFF_EVENTI - 1 - saltati)} cicli "
+                    f"(o subito, al primo gol)")
         else:
+            # Da qui in poi la partita ha una base di confronto: i prossimi cicli possono saltare
+            # la chiamata senza rischiare di rimandare in chat cartellini e rigori gia' visti.
+            stato_partite[fixture_id]["eventi_letti"] = True
             goals = extract_goals(events)
             goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
             cartellini_rossi = extract_cartellini_rossi(events)
@@ -8302,11 +8414,35 @@ def processa_partita(fixture, notifiche_attive=True):
             else:
                 log("    ⚽ Nessun gol registrato")
 
-        # Cartellini rossi e rigori: stessa lista fresca ad ogni ciclo (nessuna chiamata in più,
-        # è già dentro "events"), confrontata con quella salvata al ciclo precedente per capire
-        # quali sono nuovi. Se stato_precedente è vuoto (prima volta che vediamo la partita) il
-        # default fa combaciare le due liste, cosi' non si notifica un cartellino/rigore già
-        # avvenuto prima che il bot iniziasse a monitorarla (stesso criterio usato per i gol).
+            # Lista eventi indietro sul punteggio: si forza la richiesta al ciclo successivo invece
+            # di aspettare il turno del freno, per un massimo di MAX_RECUPERI_EVENTI_IN_RITARDO
+            # volte di fila (motivazione estesa accanto alla costante). Il conteggio dei recuperi
+            # riparte da zero ad ogni cambio di punteggio: ogni gol nuovo e' un inseguimento nuovo.
+            recuperi_in_ritardo = 0 if punteggio_cambiato else stato_precedente.get(
+                "recuperi_eventi_in_ritardo", 0)
+            if len(goals) < (score_home or 0) + (score_away or 0):
+                if recuperi_in_ritardo < MAX_RECUPERI_EVENTI_IN_RITARDO:
+                    stato_partite[fixture_id]["recuperi_eventi_in_ritardo"] = recuperi_in_ritardo + 1
+                    stato_partite[fixture_id]["cicli_saltati_eventi"] = CICLI_BACKOFF_EVENTI - 1
+                    log(f"    ⏳ Eventi indietro sul punteggio ({len(goals)} gol elencati su "
+                        f"{(score_home or 0) + (score_away or 0)}): si richiedono al prossimo ciclo")
+                else:
+                    stato_partite[fixture_id]["recuperi_eventi_in_ritardo"] = recuperi_in_ritardo
+                    log(f"    ⏳ Eventi ancora indietro sul punteggio dopo "
+                        f"{recuperi_in_ritardo} tentativi: l'API non attribuisce quel gol come ce "
+                        f"lo aspettiamo (autogol?), si torna al ritmo normale")
+            else:
+                stato_partite[fixture_id]["recuperi_eventi_in_ritardo"] = 0
+
+        # Cartellini rossi e rigori: stessa lista già dentro "events" (nessuna chiamata in più),
+        # confrontata con quella salvata al ciclo precedente per capire quali sono nuovi. Nei cicli
+        # in cui gli eventi non si chiedono (vedi il freno sopra) le due liste sono per costruzione
+        # la stessa - lo stato precedente ricopiato - e il confronto non trova niente di nuovo: il
+        # cartellino resta lì e viene notificato al primo ciclo che chiede davvero, con il ritardo
+        # che il freno mette in conto. Se stato_precedente è vuoto (prima volta che vediamo la
+        # partita - e proprio per questo la chiamata lì si fa sempre) il default fa combaciare le
+        # due liste, cosi' non si notifica un cartellino/rigore già avvenuto prima che il bot
+        # iniziasse a monitorarla (stesso criterio usato per i gol).
         #
         # Il confronto passa da eventi_davvero_nuovi() e non da una chiave esatta: ne' il minuto
         # ne' il nome del giocatore sono stabili fra due letture dell'API, e bastava che uno dei
@@ -8328,19 +8464,21 @@ def processa_partita(fixture, notifiche_attive=True):
             # Tempi regolamentari finiti in parità: supplementari/rigori in corso. Su richiesta,
             # da qui in poi nessuna notifica per questa partita - niente statistiche da recuperare
             # (nessuna notifica le userebbe), e quando finirà davvero (AET/PEN, più sotto) non
-            # partirà nemmeno il recap finale. I gol restano comunque tracciati sopra (stessa
-            # chiamata "events" di sempre, nessun costo aggiuntivo), così un gol ai supplementari
-            # non manca allo shadow-log quando la partita si chiude per davvero.
+            # partirà nemmeno il recap finale. I gol restano comunque tracciati sopra: il punteggio
+            # arriva dal payload live, e un punteggio che cambia è una delle condizioni che fanno
+            # scattare la chiamata eventi anche sotto il freno, così un gol ai supplementari non
+            # manca allo shadow-log quando la partita si chiude per davvero.
             log(f"  -> Tempi regolamentari finiti ({status_short}, {minuto}'): supplementari/rigori in corso, notifiche sospese")
             return
 
-        # Pausa tra le due chiamate di questa stessa partita (eventi appena fatta, statistiche
-        # tra un attimo): senza, con molte partite live nello stesso ciclo (es. più gironi di
-        # qualificazione in contemporanea) il ritmo reale era di 2 chiamate quasi consecutive per
-        # partita e solo 1s di pausa PRIMA della partita successiva - con una decina di partite
-        # live si arriva facilmente a 100+ richieste/minuto, il limite per-minuto dell'abbonamento
-        # API-Football (visto coi rate-limit sporadici anche a traffico medio basso). Ora ogni
-        # partita costa 2 chiamate ben distanziate invece di una raffica.
+        # Pausa prima della chiamata statistiche di questa partita: senza, con molte partite live
+        # nello stesso ciclo (es. più gironi di qualificazione in contemporanea) il ritmo reale era
+        # di 2 chiamate quasi consecutive per partita e solo 1s di pausa PRIMA della partita
+        # successiva - con una decina di partite live si arriva facilmente a 100+ richieste/minuto,
+        # il limite per-minuto dell'abbonamento API-Football (visto coi rate-limit sporadici anche
+        # a traffico medio basso). Ora ogni partita costa al massimo 2 chiamate ben distanziate
+        # invece di una raffica. La pausa resta anche nei cicli in cui gli eventi non si chiedono:
+        # li' la partita fa una chiamata sola, e quel secondo la distanzia dalla partita di prima.
         # Backoff: se questa partita ha gia' dimostrato di non avere statistiche, si salta il giro -
         # e con esso anche la pausa qui sotto, che serve a distanziare le chiamate che non facciamo.
         chiamata_saltata = not deve_chiedere_statistiche(fixture_id, elapsed_raw)
@@ -8433,8 +8571,9 @@ def processa_partita(fixture, notifiche_attive=True):
             if chiamata_saltata:
                 # Nessuna notizia nuova, perche' non abbiamo chiesto: si lascia intatto tutto lo
                 # stato precedente (esito, contatore delle vuote) invece di inventare un esito che
-                # non c'e' stato. La partita resta seguita: gol, cartellini e rigori arrivano dalla
-                # chiamata eventi, che non e' toccata dal backoff.
+                # non c'e' stato. La partita resta seguita: il punteggio arriva dal payload live ad
+                # ogni ciclo, e il gol viene rilevato da li'. Cartellini e rigori arrivano dalla
+                # chiamata eventi, che ha un freno suo e indipendente (vedi deve_chiedere_eventi).
                 vuote_note = stato_partite[fixture_id].get("stats_vuote_consecutive", 0)
                 saltati = stato_partite[fixture_id].get("cicli_saltati_statistiche", 0)
                 log(f"    ⏭️ Statistiche non richieste: assenti {vuote_note} volte di fila, "
@@ -9002,9 +9141,10 @@ def processa_partita(fixture, notifiche_attive=True):
         # sono indietro. Va detto accanto ai numeri, altrimenti un "Tiri 1-0" su un 1-1 si legge
         # come un dato vero. Vedi statistiche_indietro_sul_punteggio.
         #
-        # Salta il controllo se gli eventi non sono arrivati: gli autogol si contano da li', e
-        # senza quel dato un autogol si trasformerebbe in un falso "statistiche in ritardo".
-        if eventi_non_recuperati:
+        # Salta il controllo se non abbiamo una lista eventi fresca - chiamata fallita o ciclo
+        # saltato dal freno, per il controllo e' lo stesso: gli autogol si contano da li', e senza
+        # quel dato un autogol si trasformerebbe in un falso "statistiche in ritardo".
+        if not eventi_aggiornati:
             _indietro, riga_ritardo_stats = False, ""
         else:
             _indietro, riga_ritardo_stats = statistiche_indietro_sul_punteggio(
