@@ -1324,6 +1324,13 @@ FINESTRA_OSSERVAZIONI_STATISTICHE = 900  # 15 min: ~5 cicli attivi
 # la regola normale. Sopra, si chiede che le leghe vuote siano almeno il doppio di quelle che
 # pubblicano - con 12 partite vuote su 13 il rapporto reale era 5 a 1.
 LEGHE_VUOTE_MINIME_PER_AVARIA = 3
+# Quante leghe vuote servono quando NESSUNA lega sta pubblicando: li' il rapporto vuote/ok non
+# puo' dire niente (il denominatore e' zero) e l'unico indizio rimasto e' quante competizioni
+# diverse tacciono insieme. Sei e' sopra il numero di competizioni che girano in una serata povera
+# - dove tre leghe scoperte bastano a riempire il quadro - e molto sotto quello di una sera di
+# campionato, quando un guasto vero ne coinvolge decine (il 01/09 alle 21:24 erano Premier League,
+# Championship, League One, League Two, Serie C, Super League svizzera e altre insieme).
+LEGHE_VUOTE_MINIME_SENZA_CONFERME = 6
 RAPPORTO_VUOTE_SU_OK_PER_AVARIA = 2
 OSSERVAZIONI_STATISTICHE = []  # [(timestamp, (paese, lega), disponibili)]
 
@@ -1359,8 +1366,19 @@ def avaria_statistiche_diffusa():
         if disponibili:
             leghe_ok.add(chiave)
     leghe_vuote = leghe_viste - leghe_ok
-    return (len(leghe_vuote) >= LEGHE_VUOTE_MINIME_PER_AVARIA
-            and len(leghe_vuote) >= RAPPORTO_VUOTE_SU_OK_PER_AVARIA * len(leghe_ok))
+    if len(leghe_vuote) < LEGHE_VUOTE_MINIME_PER_AVARIA:
+        return False
+    if not leghe_ok:
+        # Nessuna lega che pubblica in questa finestra: il rapporto qui sotto sarebbe vero per
+        # costruzione (qualunque numero e' >= 2 * 0), quindi da solo direbbe "guasto del feed"
+        # anche in una serata in cui giocano tre sole competizioni e sono tutte davvero scoperte.
+        # E' il caso del pomeriggio del 01/09: tre partite live - Prva Liga serba, Coppa Italia,
+        # Bundesliga austriaca - tutte vuote, tre leghe su tre, e la funzione avrebbe dichiarato
+        # un'avaria con il feed perfettamente sano (quella notte aveva pubblicato regolarmente).
+        # Senza una lega buona con cui fare il confronto serve un campione piu' largo prima di
+        # dare la colpa al feed invece che al calendario.
+        return len(leghe_vuote) >= LEGHE_VUOTE_MINIME_SENZA_CONFERME
+    return len(leghe_vuote) >= RAPPORTO_VUOTE_SU_OK_PER_AVARIA * len(leghe_ok)
 
 
 # =============================================================================
@@ -8040,10 +8058,39 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # non passano di qui. Appena l'API pubblica le prime statistiche la partita torna a notificare
     # normalmente, e i gol nel frattempo non sono spariti - sono nel testo della prima notifica
     # utile, con il minuto e il marcatore.
+    #
+    # ECCEZIONE: quando a tacere non e' questa partita ma il feed intero.
+    #
+    # La regola sopra presume che l'assenza di statistiche sia un giudizio SULLA PARTITA: se l'API
+    # non pubblica niente per Bahlinger SC-Magdeburg e' perche' quella partita non e' coperta, e
+    # una notifica senza dati non varrebbe la lettura. Ma quando le statistiche mancano su decine
+    # di competizioni insieme - Premier League compresa - non e' un giudizio su nessuna partita:
+    # e' l'API rotta, e la presunzione salta.
+    #
+    # Visto in produzione il 01/09 dalle 21:24 ora italiana: l'endpoint statistiche ha smesso di
+    # rispondere ("l'API non ha restituito le due squadre") su West Ham-Wolves, Torino-Monza,
+    # tutta la Championship, tutta la League One e League Two, la Serie C, FC Zurich-Young Boys.
+    # Il bot lo aveva gia' capito - "Verdetto sulla lega sospeso: statistiche assenti su molte
+    # leghe insieme, sembra un guasto del feed" - ma quella diagnosi la usava solo per non
+    # condannare le leghe, e non arrivava fin qui: cosi' per due ore in chat sono arrivati solo i
+    # messaggi della diagnostica, mentre ogni gol di ogni partita veniva zittito da questo gate.
+    #
+    # Durante un'avaria diffusa passano SOLO gli eventi forzati (gol, cartellino rosso, rigore,
+    # recupero lungo): sono informazioni che valgono da sole anche senza una statistica accanto.
+    # Gli aggiornamenti di routine restano zitti, perche' senza tiri e corner non avrebbero niente
+    # da dire e riempirebbero la chat esattamente come il 23/08.
+    #
+    # L'eccezione NON e' un lasciapassare: si limita a non fermare qui l'evento, che prosegue e
+    # deve superare i controlli di sotto come sempre - a partire dalla goleada, perche' su un 5-0
+    # il gol resta senza valore anche quando il feed e' rotto.
     if SILENZIO_SENZA_STATISTICHE_ATTIVO and not current_stats:
-        return _verdetto_notifica(
-            fixture_id, False,
-            "statistiche non pubblicate: partita seguita in silenzio, solo shadow-log")
+        avaria_in_corso = (gol_appena_segnato or recupero_lungo) and avaria_statistiche_diffusa()
+        if not avaria_in_corso:
+            return _verdetto_notifica(
+                fixture_id, False,
+                "statistiche non pubblicate: partita seguita in silenzio, solo shadow-log")
+        log("    📡 Statistiche assenti ovunque (avaria del feed), ma l'evento passa: "
+            "non e' un giudizio su questa partita")
 
     # GOLEADA, PRIMA ANCORA DEL GOL.
     #
