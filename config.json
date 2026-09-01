@@ -24,7 +24,7 @@
   "soglia_quota_dominio_notifica": 65,
   "un_aggiornamento_per_blocco_attivo": true,
   "backoff_statistiche_assenti_attivo": true,
-  "minuto_ritmo_pieno_statistiche": 15,
+  "minuto_ritmo_pieno_statistiche": 25,
   "backoff_eventi_attivo": true,
   "cicli_backoff_eventi": 5,
   "favorita_in_difficolta_attivo": true,

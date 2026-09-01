@@ -509,6 +509,19 @@ BACKOFF_STATISTICHE_ASSENTI_ATTIVO = True
 # 25' e' oltre il ritardo di pubblicazione osservato (Fenerbahce-Lyon vuota al 13' e con i dati al
 # 17'; Atalanta al 14'; le partite segnalate a torto dalla diagnostica stanno tutte fra l'11' e il
 # 21'). Dal 25' in poi il backoff torna a valere pieno: li' una partita ancora vuota lo e' davvero.
+#
+# Il 30/08 config.json l'aveva portata a 15 come leva sul consumo API, dopo gli esaurimenti di
+# quota di fine agosto. La leva funzionava sul consumo ma riportava esattamente il difetto che
+# questo commento descrive, e il 01/09 si e' rivista in produzione: Wolfsberger AC-Lask Linz
+# (Bundesliga austriaca, lega coperta) aveva il backoff gia' armato al 16', cioe' prima ancora
+# della finestra 15'-21' in cui l'API pubblica di solito.
+#
+#   17:46:28  Wolfsberger AC vs Lask Linz - 16'  -> Statistiche non richieste (5 vuote di fila)
+#   17:49:31  Wolfsberger AC vs Lask Linz - 20'  -> Statistiche non richieste (5 vuote di fila)
+#
+# Riportata a 25 in config.json: il margine sulla quota adesso arriva dal freno sulla chiamata
+# eventi (vedi CICLI_BACKOFF_EVENTI), che vale ~37% delle chiamate totali - molto piu' di quanto
+# costi tenere il ritmo pieno fino al 25' su una finestra di dieci minuti per partita.
 MINUTO_RITMO_PIENO_STATISTICHE = 25
 
 # Freno sulla chiamata eventi (fetch_fixture_events), che finora partiva ad OGNI ciclo per OGNI
@@ -3839,6 +3852,48 @@ def ha_statistiche_disponibili(stats):
     return any(s.get("value") is not None
                for s in stats_home + stats_away
                if s.get("type", "").lower() in STATISTICHE_USATE)
+
+
+def motivo_statistiche_non_usabili(stats):
+    """Perche' questa risposta non contiene statistiche usabili, in parole, per i log.
+
+    ha_statistiche_disponibili() risponde si'/no, e nei log restava una riga sola - "l'API ha
+    risposto senza dati per questa partita" - per quattro situazioni molto diverse:
+
+      1. l'API non ha proprio la partita (risposta senza le due squadre);
+      2. le due squadre ci sono ma nessuna voce statistica: tipico dei primi minuti, non dice
+         niente sulla copertura;
+      3. l'API pubblica voci che il bot non legge (possesso palla, falli, cartellini) e non le
+         quattro di STATISTICHE_USATE: questa e' copertura parziale vera, ed e' il caso
+         Djurgardens del 16/08 che ha fatto nascere ha_statistiche_disponibili();
+      4. le quattro voci ci sono ma tutte a null: l'API le prevede e non le ha ancora riempite.
+
+    Solo il 3 e il 4 dicono qualcosa sulla lega; l'1 e il 2 possono essere solo ritardo di
+    pubblicazione. Dai log non si potevano distinguere, e la differenza cambia la diagnosi.
+
+    Serviva il 01/09: Parma-Cremonese (Coppa Italia, due squadre di Serie A) e' rimasta senza
+    statistiche per tutti i 90 minuti - dieci letture vuote di fila - e dai log non si poteva dire
+    se fosse davvero una partita scoperta o se l'API pubblicasse in un formato non letto dal bot.
+    Nello stesso ciclo anche Wolfsberger-Lask (Bundesliga austriaca) e Teleoptik-Vozdovac (Prva
+    Liga) erano vuote, quindi il quadro non era leggibile nemmeno per confronto.
+
+    Va chiamata SOLO quando ha_statistiche_disponibili() ha gia' detto False: descrive il perche',
+    non lo decide."""
+    if not stats or len(stats) < 2:
+        return "l'API non ha restituito le due squadre"
+    stats_home = stats[0].get("statistics", []) or []
+    stats_away = stats[1].get("statistics", []) or []
+    if not stats_home or not stats_away:
+        return "le due squadre ci sono, ma senza nessuna voce statistica"
+    tipi_presenti = {(s.get("type") or "").lower() for s in stats_home + stats_away}
+    mancanti = [t for t in STATISTICHE_USATE if t not in tipi_presenti]
+    if mancanti:
+        # Le altre voci pubblicate sono il dato che serve per capire se la partita e' scoperta
+        # davvero o se e' un problema di formato: si elencano, troncate per non allungare la riga.
+        altre = sorted(t for t in tipi_presenti if t and t not in STATISTICHE_USATE)
+        elenco_altre = f" (pubblica invece: {', '.join(altre[:4])}{'...' if len(altre) > 4 else ''})" if altre else ""
+        return f"mancano le voci che servono ({', '.join(mancanti)}){elenco_altre}"
+    return "le voci che servono ci sono tutte, ma sono a null (l'API non le ha ancora riempite)"
 
 
 def impronta_statistiche(stats):
@@ -8588,7 +8643,11 @@ def processa_partita(fixture, notifiche_attive=True):
                 vuote = stato_partite[fixture_id].get("stats_vuote_consecutive", 0) + 1
                 stato_partite[fixture_id]["stats_ultimo_esito"] = "vuote"
                 stato_partite[fixture_id]["stats_vuote_consecutive"] = vuote
-                log(f"    ⚠️ Statistiche assenti: l'API ha risposto senza dati per questa partita ({vuote} volte di fila)")
+                # Il perche', non solo il fatto: "senza dati" copriva quattro casi diversi, e solo
+                # due di quelli dicono qualcosa sulla copertura della lega (vedi
+                # motivo_statistiche_non_usabili).
+                log(f"    ⚠️ Statistiche assenti ({vuote} volte di fila): "
+                    f"{motivo_statistiche_non_usabili(stats)}")
                 registra_osservazione_statistiche(league_country, league_name, False, league_round)
                 # Il verdetto sulla LEGA lo dà solo una partita che da sola ha già collezionato
                 # SOGLIA_SENZA_STATISTICHE risposte vuote di fila (~3 cicli, diversi minuti di
