@@ -2766,6 +2766,13 @@ def salva_chiamate_api(dati):
 CHIAMATE_API_PER_GIORNO = carica_chiamate_api()
 _LOCK_CHIAMATE_API = threading.Lock()
 
+# Contatore monotono delle chiamate di rete davvero partite da quando il processo e' vivo. Non
+# serve a nessuna statistica - per quelle c'e' CHIAMATE_API_PER_GIORNO, che vive su disco e conta
+# per giornata - ma al ciclo principale, per sapere se una partita ha speso chiamate in questo giro
+# e quindi se c'e' davvero qualcosa da distanziare con una pausa. Monotono apposta: un contatore
+# per giornata si azzera a mezzanotte e farebbe leggere "nessuna chiamata" al primo giro dopo.
+CHIAMATE_API_PROCESSO = 0
+
 
 def registra_chiamata_api():
     """Incrementa il contatore per la data odierna (fuso Italia, coerente col resto del bot) e
@@ -2774,7 +2781,9 @@ def registra_chiamata_api():
     raffreddamento rate-limit, che non consumano quota). Il lock serve perché più thread (loop
     live, worker quote iniziali, comandi Telegram) chiamano questa funzione in parallelo:
     senza lock l'incremento letto-modificato-scritto sul dict condiviso può perdere aggiornamenti."""
+    global CHIAMATE_API_PROCESSO
     with _LOCK_CHIAMATE_API:
+        CHIAMATE_API_PROCESSO += 1
         oggi = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%Y-%m-%d")
         CHIAMATE_API_PER_GIORNO[oggi] = CHIAMATE_API_PER_GIORNO.get(oggi, 0) + 1
         if len(CHIAMATE_API_PER_GIORNO) > CHIAMATE_API_GIORNI_STORICO:
@@ -7944,6 +7953,51 @@ def classifica_cambio_punteggio(fixture_id, score_home, score_away):
     return gol_appena_segnato, corretto_al_ribasso
 
 
+def ordina_partite_per_urgenza(partite):
+    """Le partite del ciclo, riordinate mettendo davanti quelle la cui notifica non puo' aspettare.
+
+    Il ciclo scorreva le partite nell'ordine in cui le manda l'API, che non ha niente a che vedere
+    con quanto sono urgenti, e ogni partita costa circa due secondi (le sue chiamate piu' la pausa
+    che le distanzia). Chi capita in fondo alla lista viene servito alla fine, e il suo gol arriva
+    in chat quei secondi piu' tardi - a vuoto, perche' il gol lo sapevamo gia' dal payload live
+    all'inizio del giro.
+
+    Misurato sui log del 01/09: 2 partite valide -> ciclo di 2,4s; 6 -> 11,1s; 14 -> 26,3s. Circa
+    2s a partita, quindi con 14 partite l'ultima e' servita 26 secondi dopo la prima, e in una
+    serata di campionato con 40 partite valide si arriva sopra il minuto. E' ritardo che si paga
+    sulla notifica piu' importante che il bot manda.
+
+    Il riordino non costa NIENTE: il punteggio di tutte le partite e' gia' dentro la risposta live
+    che apre il ciclo, quindi sapere chi ha segnato non richiede una sola chiamata in piu'.
+
+    Ordine: prima i gol sui preferiti, poi gli altri gol, poi i preferiti senza gol, poi il resto.
+    A parita' di urgenza l'ordine dell'API resta quello che era (sorted e' stabile), cosi' il
+    riordino non rimescola nulla che non serva.
+
+    Nota su MAX_PREFERITI_SIMULTANEI: quando piu' partite sono candidate ai preferiti nello stesso
+    ciclo e i posti non bastano, entra chi viene processata prima - quindi questo ordine puo'
+    cambiare CHI entra. In pratica pesa poco: la promozione automatica passa solo dalla rotta
+    dominio, che pretende CICLI_DOMINIO_PER_AUTO_PREFERITI cicli consecutivi di dominio, e su una
+    candidata cosi' l'ordine di un singolo giro non sposta il verdetto."""
+    def urgenza(fixture):
+        fixture_id = fixture.get("fixture", {}).get("id")
+        gol = False
+        if fixture_id is not None:
+            goals = fixture.get("goals") or {}
+            # "or 0" come fa processa_partita: l'API puo' mandare null, e classifica_cambio_punteggio
+            # confronta con > e < - un None qui alzerebbe TypeError e farebbe saltare il ciclo intero.
+            gol, _ = classifica_cambio_punteggio(
+                fixture_id, goals.get("home") or 0, goals.get("away") or 0)
+        preferita = fixture_id is not None and str(fixture_id) in FAVORITE_MATCHES
+        if gol and preferita:
+            return 0
+        if gol:
+            return 1
+        return 2 if preferita else 3
+
+    return sorted(partite, key=urgenza)
+
+
 # Perche' l'ultima valutazione di deve_notificare() e' finita come e' finita, per fixture.
 #
 # Serve perche' il log diceva solo "-> Skip": con gate del dominio, freno per blocco, goleada,
@@ -8543,7 +8597,12 @@ def processa_partita(fixture, notifiche_attive=True):
             stats = None
         else:
             stato_partite[fixture_id]["cicli_saltati_statistiche"] = 0
-            time.sleep(1)
+            # Solo se gli eventi sono stati chiesti davvero: questa pausa esiste per distanziare le
+            # DUE chiamate della stessa partita, e se la prima non e' partita non c'e' niente da
+            # distanziare. Il ritmo resta comunque sotto una chiamata al secondo, perche' il giro
+            # partite mette la sua pausa dopo ogni partita che ha speso chiamate.
+            if eventi_da_chiedere:
+                time.sleep(1)
 
         # Tre esiti diversi, che prima finivano tutti e tre in due soli rami:
         #  - stats is None            -> la CHIAMATA è fallita (rate-limit, timeout, rete)
@@ -9600,15 +9659,23 @@ if __name__ == "__main__":
                         f"Partite live monitorate: {len(partite_valide)}"
                     )
 
-            # Si itera solo sulle partite valide (non su tutte le partite live del mondo): lo sleep(1)
-            # tra una chiamata e l'altra serve a distanziare le chiamate API fatte da processa_partita
-            # (statistiche + eventi), quindi non ha senso pagarlo anche per le migliaia di partite
+            # Si itera solo sulle partite valide (non su tutte le partite live del mondo): la pausa
+            # dopo ogni partita serve a distanziare le chiamate API fatte da processa_partita
+            # (statistiche + eventi), quindi non ha senso pagarla per le migliaia di partite
             # scartate (dilettanti, giovanili, campionati fuori whitelist) su cui non viene fatta
-            # nessuna chiamata. stato_partite contiene solo partite valide, quindi fixture_ids_live
-            # può essere costruito direttamente da partite_valide.
+            # nessuna chiamata. Per lo stesso motivo, piu' sotto, la pausa non si paga nemmeno per
+            # le partite valide che in questo giro non hanno speso chiamate. stato_partite contiene
+            # solo partite valide, quindi fixture_ids_live può essere costruito da partite_valide.
             fixture_ids_live = {
                 f["fixture"]["id"] for f in partite_valide if f.get("fixture", {}).get("id")
             }
+            # Chi ha appena segnato, e i preferiti, passano davanti: servire le partite nell'ordine
+            # in cui le manda l'API vuol dire far aspettare il gol dietro a una coda che non ha
+            # niente a che vedere con l'urgenza, e la coda costa ~2s a partita. Nessuna chiamata in
+            # piu': il punteggio di tutti e' gia' nella risposta live che ha appena aperto il giro.
+            # Vedi ordina_partite_per_urgenza().
+            partite_valide = ordina_partite_per_urgenza(partite_valide)
+
             # I preferiti vengono ricontrollati ogni INTERVALLO_CICLO_MOMENTUM (60s) invece che ogni
             # INTERVALLO_CICLO_ATTIVO (180s): più punti storici in meno tempo = grafico momentum più
             # denso. Le altre partite valide restano al ritmo normale. Il ciclo esterno (sleep finale)
@@ -9641,10 +9708,20 @@ if __name__ == "__main__":
                 if not attesa_raffreddamento_gia_fatta and time.time() < PROSSIMA_CHIAMATA_API_CONSENTITA:
                     attesa_raffreddamento_gia_fatta = True
                     attendi_fine_raffreddamento_api(f"ciclo #{ciclo_numero}")
+                chiamate_prima = CHIAMATE_API_PROCESSO
                 processa_partita(fixture, notifiche_attive)
                 if fid is not None:
                     stato_partite.setdefault(fid, {})["ultimo_controllo"] = time.time()
-                time.sleep(1)
+                # La pausa distanzia le CHIAMATE, non le partite: una partita che in questo giro
+                # non ne ha fatta nessuna (eventi sotto freno e statistiche sotto backoff, il caso
+                # ormai piu' comune) non ha niente da distanziare, e aspettare per lei e' solo
+                # ritardo aggiunto a tutte le partite che vengono dopo - il gol della successiva
+                # arriva in chat un secondo piu' tardi per una chiamata che non e' stata fatta.
+                # Saltarla non alza il ritmo verso l'API: le chiamate restano quelle che erano, e
+                # ognuna di quelle ha ancora la sua pausa. Resta comunque il limitatore globale a
+                # LIMITE_CHIAMATE_AL_MINUTO_SICUREZZA, che mette in coda da solo se serve.
+                if CHIAMATE_API_PROCESSO > chiamate_prima:
+                    time.sleep(1)
 
             # La pulizia si basa su "questa partita non è più tra le live", ma get_partite_live()
             # restituisce una lista vuota SIA quando non c'è nessuna partita in corso SIA quando la
