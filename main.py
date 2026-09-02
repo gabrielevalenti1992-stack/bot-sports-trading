@@ -7954,7 +7954,99 @@ def _shadow_log_ha_snapshot_aperti(fixture_id):
     return bool(stato.get("ultimo_snapshot_valore") or stato.get("ultimo_snapshot_strategie"))
 
 
-def chiudi_shadow_log_partite_sparite(fixture_ids):
+def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, eventi, notifiche_attive):
+    """Manda il recap di fine partita per una partita sparita dal feed PRIMA che il bot la vedesse
+    con status FT - il caso comune, non quello raro.
+
+    Il ramo "RISULTATO FINALE" dentro processa_partita() scatta solo se l'endpoint live restituisce
+    ANCORA la partita, con status FT, per almeno un ciclo. In produzione questo non e' praticamente
+    mai vero: l'endpoint smette di restituire una partita conclusa quasi subito, quindi quel ramo
+    non vede mai lo stato FT. Prova diretta dai log: zero "RISULTATO FINALE" dal 20/08 al 01/09
+    (12 giorni), mentre "Shadow-log chiusi a fine partita" compare regolarmente piu' volte al
+    giorno - le partite finiscono, il bot lo sa (abbastanza da chiudere lo shadow-log), ma
+    all'utente non arrivava nessun messaggio di chiusura. Da cui "non vedo risultati scritti".
+
+    Meno ricco del recap "in diretta": niente statistiche finali ne' confronto 1°T/2°T, perche'
+    quei dati non sono piu' recuperabili una volta che la partita e' sparita dal live, e chiederli
+    costerebbe una chiamata in piu' per ogni chiusura. Copre quello che conta di piu': risultato,
+    marcatori, cartellini rossi, rigori - tutti ricavabili dagli eventi che questa funzione ha
+    comunque gia' chiesto per lo shadow-log strategie, senza spendere nulla in piu'.
+
+    Stessa distinzione muta/non muta del ramo in diretta: una partita silenziata riceve il
+    riepilogo compatto "cos'e' successo dopo il silenzio", non il recap completo - tacere una
+    partita significa non volerne piu' sapere i dettagli minuto per minuto, non sparire del
+    tutto a fine gara."""
+    if not notifiche_attive:
+        return
+    stato = stato_partite.get(fixture_id, {})
+    home = stato.get("home", "?")
+    away = stato.get("away", "?")
+    league_name = stato.get("league", "")
+    league_country = stato.get("league_country", "")
+
+    goals = extract_goals(eventi) if eventi else []
+    goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
+    cartellini_rossi = extract_cartellini_rossi(eventi) if eventi else []
+    rigori = extract_rigori(eventi) if eventi else []
+
+    muted_data = SILENCED_MATCHES.get(str(fixture_id))
+    if muted_data:
+        diff_h = score_home - muted_data.get("score_home", 0)
+        diff_a = score_away - muted_data.get("score_away", 0)
+        muted_minute = muted_data.get("muted_at_minute", 0)
+
+        after_text = ""
+        if diff_h > 0:
+            after_text += f" +{diff_h}CASA"
+        if diff_a > 0:
+            after_text += f" +{diff_a}OSP"
+
+        goals_after = [g for g in goals if g["minute"] > muted_minute]
+        minutes_text = ""
+        for g in goals_after:
+            team_emoji = "CASA" if g["team"] == home else "OSP"
+            minutes_text += f" {g['minute']}'{team_emoji}"
+        if not minutes_text:
+            minutes_text = " Nessun gol dopo il silenzio"
+
+        messaggio = (
+            f"{home} vs {away}\n"
+            f"{formatta_lega(league_name, league_country)}\n"
+            f"Risultato finale: {score_home} - {score_away}{after_text}\n"
+            f"Silenziato al {muted_minute}'\n"
+            f"Gol dopo:{minutes_text}"
+        )
+        SILENCED_MATCHES.pop(str(fixture_id), None)
+        save_silenced(SILENCED_MATCHES)
+    else:
+        goals_text = testo_primo_ultimo_gol(goals, home, away)
+        cartellini_finale_text = ""
+        if cartellini_rossi:
+            righe = [f"🟥 {c['minute']}' {c['player']} ({c['team']})" for c in cartellini_rossi]
+            cartellini_finale_text = "Cartellini rossi:\n" + "\n".join(righe) + "\n"
+        rigori_finale_text = ""
+        if rigori:
+            righe = []
+            for r in rigori:
+                esito_emoji = "⚽" if r["esito"] == "segnato" else "❌"
+                righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
+            rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
+
+        messaggio = (
+            f"{home} vs {away}\n"
+            f"{formatta_lega(league_name, league_country)}\n"
+            f"RISULTATO FINALE\n\n"
+            f"{score_home} - {score_away}\n"
+            f"{goals_text}"
+            f"{cartellini_finale_text}"
+            f"{rigori_finale_text}"
+        )
+
+    chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
+    invia_messaggio_telegram(messaggio, chat_id=chat_destinazione)
+
+
+def chiudi_shadow_log_partite_sparite(fixture_ids, notifiche_attive):
     """Scrive il "risultato_finale" delle partite appena sparite dal feed live.
 
     L'esito veniva registrato SOLO dentro processa_partita, nel ramo
@@ -8013,6 +8105,7 @@ def chiudi_shadow_log_partite_sparite(fixture_ids):
                 f"risultato registrato senza i minuti dei gol")
         registra_shadow_log_strategie_risultato(
             fid, score_home, score_away, extract_goals(eventi) if eventi else [])
+        invia_recap_finale_partita_sparita(fid, score_home, score_away, eventi, notifiche_attive)
         chiuse += 1
 
     if chiuse or rimandate:
@@ -9557,13 +9650,13 @@ def processa_partita(fixture, notifiche_attive=True):
         log(f"Errore processa_partita: {e}")
 
 
-def pulisci_partite_terminate(fixture_ids_live):
+def pulisci_partite_terminate(fixture_ids_live, notifiche_attive):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
     # Prima di cancellare lo stato: chi ha snapshot aperti va chiuso con il suo risultato finale,
     # altrimenti tutto il campione raccolto durante la partita resta orfano per sempre. Le partite
     # rimandate (tetto di chiamate raggiunto, o chiamata fallita) NON si cancellano: restano qui e
     # si riprovano al giro dopo.
-    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere)
+    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere, notifiche_attive)
     if rimandate:
         ids_da_rimuovere = [fid for fid in ids_da_rimuovere if fid not in rimandate]
     for fid in ids_da_rimuovere:
@@ -9876,7 +9969,7 @@ if __name__ == "__main__":
                 log("Chiamata partite live fallita: salto la pulizia delle partite terminate "
                     "(un elenco vuoto qui non significa che le partite siano finite)")
             else:
-                pulisci_partite_terminate(fixture_ids_live)
+                pulisci_partite_terminate(fixture_ids_live, notifiche_attive)
             salva_stato_partite(stato_partite)
             # Un solo messaggio per ciclo con tutte le partite dal feed congelato, invece
             # di uno per partita mentre si scorre l'elenco.
