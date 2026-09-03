@@ -749,6 +749,32 @@ INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una fines
 # progressivo, non uno stop, e si riassorbe da solo appena la quota si azzera a mezzanotte.
 RISERVA_QUOTA_API = 900
 FATTORE_RALLENTAMENTO_QUOTA_MAX = 4  # a quota finita il ciclo dura 4 volte tanto (180s -> 720s)
+
+# MODALITA' ESSENZIALE AUTOMATICA QUANDO LA QUOTA STA PER FINIRE.
+#
+# Il rallentamento qui sopra allunga il ciclo, ma non tocca i preferiti, che sono la voce di spesa
+# piu' alta: ogni preferito viene ricontrollato ogni INTERVALLO_CICLO_MOMENTUM (60s) invece che ogni
+# INTERVALLO_CICLO_ATTIVO (180s), cioe' costa il TRIPLO di chiamate. Con tre preferiti aperti in
+# contemporanea sono sei chiamate in piu' al minuto rispetto alle stesse partite non preferite.
+#
+# La modalita' essenziale abbassa il tetto dei preferiti da 3 a 2 e stringe le fasce di ingresso:
+# e' quindi anche una leva sul consumo API, non solo sul rumore in chat. Da qui l'automatismo -
+# quando la giornata sta per finire la si accende da sola, e la si rispegne quando la quota torna.
+#
+# Due soglie diverse e non una, di proposito: con una sola, un residuo che oscilla intorno al
+# valore critico farebbe accendere e spegnere la modalita' ad ogni ciclo, con un messaggio Telegram
+# ogni volta. La distanza fra le due e' l'isteresi, la stessa idea gia' usata per l'ingresso dei
+# preferiti per dominio.
+#
+# I numeri stanno fra il rallentamento (RISERVA_QUOTA_API, 900) e l'allarme della diagnostica
+# (SOGLIA_QUOTA_RESIDUA_DIAGNOSTICA, 500): a 600 il rallentamento graduale e' gia' in corso da un
+# pezzo e non e' bastato - il 22/08, 23/08 e 29/08 la quota si e' esaurita comunque - quindi entra
+# la seconda leva. Si riesce sopra 1200 e non sopra 900: appena sopra la soglia di rallentamento la
+# situazione e' ancora tesa, e riaprire subito il terzo preferito rimetterebbe il piede
+# sull'acceleratore proprio mentre si sta cercando di arrivare a mezzanotte.
+MODALITA_ESSENZIALE_AUTO_ATTIVA = True
+SOGLIA_QUOTA_MODALITA_ESSENZIALE = 600
+SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE = 1200
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
 
@@ -955,6 +981,9 @@ try:
     VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE = config.get("volume_minimo_dominio_modalita_essenziale", VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE)
     CICLI_DOMINIO_MODALITA_ESSENZIALE = config.get("cicli_dominio_modalita_essenziale", CICLI_DOMINIO_MODALITA_ESSENZIALE)
     MINUTO_GOL_MODALITA_ESSENZIALE = config.get("minuto_gol_modalita_essenziale", MINUTO_GOL_MODALITA_ESSENZIALE)
+    MODALITA_ESSENZIALE_AUTO_ATTIVA = config.get("modalita_essenziale_auto_attiva", MODALITA_ESSENZIALE_AUTO_ATTIVA)
+    SOGLIA_QUOTA_MODALITA_ESSENZIALE = config.get("soglia_quota_modalita_essenziale", SOGLIA_QUOTA_MODALITA_ESSENZIALE)
+    SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE = config.get("soglia_quota_uscita_modalita_essenziale", SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE)
     DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
@@ -1994,7 +2023,8 @@ def carica_modalita():
             return stato
         except Exception as e:
             print(f"Errore lettura {MODALITA_FILE}: {e}", flush=True)
-    return {"essenziale": False, "dal": 0, "ultimo_promemoria": 0}
+    return {"essenziale": False, "dal": 0, "ultimo_promemoria": 0,
+            "origine": None, "manuale_dal": 0}
 
 
 def salva_modalita(stato):
@@ -2011,6 +2041,11 @@ print(f"Modalità essenziale: {'ATTIVA' if MODALITA_NOTIFICHE.get('essenziale') 
       f"{SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE}%, volume >= "
       f"{VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE}, {CICLI_DOMINIO_MODALITA_ESSENZIALE} cicli "
       f"consecutivi, gol entro il {MINUTO_GOL_MODALITA_ESSENZIALE}')", flush=True)
+print(f"Modalità essenziale automatica da quota: "
+      f"{'ATTIVA' if MODALITA_ESSENZIALE_AUTO_ATTIVA else 'disattiva'} "
+      f"(si accende sotto {SOGLIA_QUOTA_MODALITA_ESSENZIALE} richieste rimaste, "
+      f"si rispegne sopra {SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE}; "
+      f"un comando manuale vince per il resto della giornata UTC)", flush=True)
 
 
 def nota_modalita_essenziale(prefisso="\n"):
@@ -2027,7 +2062,13 @@ def nota_modalita_essenziale(prefisso="\n"):
         return ""
     dal = MODALITA_NOTIFICHE.get("dal") or 0
     da_quanto = f" da {_durata_leggibile(time.time() - dal)}" if dal else ""
-    return (f"{prefisso}🔕 Modalità essenziale attiva{da_quanto}: solo le "
+    # Da dove viene la modalità cambia cosa deve fare l'utente: se l'ha accesa la quota, sapere
+    # che si rispegne da sola evita sia di aspettare invano sia di forzarla senza motivo.
+    if MODALITA_NOTIFICHE.get("origine") == "automatica":
+        causa = " (accesa dalla quota API in esaurimento, si rispegne da sola quando risale)"
+    else:
+        causa = ""
+    return (f"{prefisso}🔕 Modalità essenziale attiva{da_quanto}{causa}: solo le "
             f"{MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, e di quelle solo gol, rossi, "
             f"rigori e recupero lungo. Invia /modalitacompleta per riavere tutte le notifiche.")
 
@@ -3057,6 +3098,103 @@ def nota_riserva_quota(fattore):
                 f"in attesa del reset")
     return (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
             f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
+
+
+def quota_residua_attendibile():
+    """Le richieste rimaste oggi, ma solo se la lettura e' abbastanza fresca da poterci decidere
+    sopra. None quando il dato manca o e' vecchio.
+
+    Su un header stantio ci si e' gia' sbagliati: il 29/08 e il 30/08 l'API continuava a dichiarare
+    7499/7500 richieste rimaste mentre rifiutava ogni chiamata. Cambiare modalita' al buio e'
+    peggio che non cambiarla, quindi qui si preferisce non rispondere."""
+    residuo = ULTIMA_QUOTA_API.get("residuo")
+    aggiornata = ULTIMA_QUOTA_API.get("aggiornata", 0)
+    if residuo is None or not aggiornata:
+        return None
+    if (time.time() - aggiornata) > ETA_MASSIMA_QUOTA_ATTENDIBILE:
+        return None
+    try:
+        return int(residuo)
+    except (TypeError, ValueError):
+        return None
+
+
+def scelta_manuale_di_oggi():
+    """True se l'utente ha scelto la modalita' a mano nella giornata di quota in corso.
+
+    Serve a non litigare con l'utente: se ha appena chiesto la modalita' completa mentre la quota
+    era bassa, l'automatismo non deve riaccendere l'essenziale al ciclo dopo, altrimenti il comando
+    manuale non varrebbe niente.
+
+    La scadenza e' la giornata UTC perche' e' li' che si azzera la quota API: la scelta vale per la
+    giornata a cui si riferisce, e il giorno dopo l'automatismo torna libero. E' anche la garanzia
+    che non si ripeta la modalita' rimasta accesa per giorni senza che nessuno se ne accorgesse:
+    nessuna decisione, manuale o automatica, sopravvive indefinitamente da sola."""
+    manuale_dal = MODALITA_NOTIFICHE.get("manuale_dal") or 0
+    if not manuale_dal:
+        return False
+    adesso_utc = datetime.datetime.now(datetime.timezone.utc).date()
+    scelta_utc = datetime.datetime.fromtimestamp(manuale_dal, datetime.timezone.utc).date()
+    return scelta_utc == adesso_utc
+
+
+def aggiorna_modalita_da_quota():
+    """Accende la modalita' essenziale quando la quota giornaliera sta finendo e la rispegne quando
+    torna. Ritorna il testo da annunciare in chat, "" se non e' cambiato niente.
+
+    Due regole tengono insieme automatismo e comando manuale, ed e' tutto il disegno:
+
+      - si ACCENDE solo se l'utente non ha gia' deciso a mano oggi (vedi scelta_manuale_di_oggi);
+      - si SPEGNE solo quello che ha acceso l'automatismo. Una modalita' essenziale accesa a mano
+        resta accesa anche quando la quota torna: l'utente l'ha chiesta per il rumore, non per la
+        quota, e non tocca a questa funzione revocare quella scelta.
+
+    Il risultato e' che il comando manuale vince sempre sulla giornata in corso, in entrambe le
+    direzioni, senza bisogno di un interruttore separato per disattivare l'automatismo."""
+    global MODALITA_NOTIFICHE
+    if not MODALITA_ESSENZIALE_AUTO_ATTIVA:
+        return ""
+    finita = quota_giornaliera_finita() is True
+    residuo = quota_residua_attendibile()
+    if residuo is None and not finita:
+        return ""
+
+    essenziale = bool(MODALITA_NOTIFICHE.get("essenziale"))
+    adesso = time.time()
+    manuale_dal = MODALITA_NOTIFICHE.get("manuale_dal") or 0
+
+    if not essenziale:
+        if not (finita or residuo <= SOGLIA_QUOTA_MODALITA_ESSENZIALE):
+            return ""
+        if scelta_manuale_di_oggi():
+            return ""
+        MODALITA_NOTIFICHE = {"essenziale": True, "dal": adesso, "ultimo_promemoria": adesso,
+                              "origine": "automatica", "manuale_dal": manuale_dal}
+        salva_modalita(MODALITA_NOTIFICHE)
+        quanto = ("esaurita secondo l'API" if finita
+                  else f"sotto le {SOGLIA_QUOTA_MODALITA_ESSENZIALE} richieste ({residuo} rimaste)")
+        log(f"🔕 Modalità essenziale accesa automaticamente: quota {quanto}")
+        return (f"🔕 Modalità essenziale accesa automaticamente: quota API {quanto}.\n"
+                f"Da ora si seguono solo le {MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, "
+                f"e di quelle solo gol, rossi, rigori e recupero lungo: meno preferiti aperti "
+                f"vuol dire meno chiamate, per arrivare a fine giornata invece di restare ciechi.\n"
+                f"Si rispegne da sola quando la quota risale sopra "
+                f"{SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE}. Puoi comunque forzarla con "
+                f"/modalitacompleta: la tua scelta vale per tutta la giornata.")
+
+    # Da qui in giu' la modalita' e' accesa: si valuta solo se spegnerla.
+    if MODALITA_NOTIFICHE.get("origine") != "automatica":
+        return ""
+    if finita or residuo is None or residuo < SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE:
+        return ""
+    dal = MODALITA_NOTIFICHE.get("dal") or 0
+    durata = f" (era attiva da {_durata_leggibile(adesso - dal)})" if dal else ""
+    MODALITA_NOTIFICHE = {"essenziale": False, "dal": 0, "ultimo_promemoria": 0,
+                          "origine": None, "manuale_dal": manuale_dal}
+    salva_modalita(MODALITA_NOTIFICHE)
+    log(f"🔔 Modalità completa ripristinata automaticamente: quota risalita a {residuo}")
+    return (f"🔔 Modalità completa ripristinata automaticamente{durata}: la quota API è risalita "
+            f"({residuo} richieste rimaste). Tornano tutte le notifiche.")
 
 
 def _classifica_errore_http(status_code):
@@ -4648,7 +4786,11 @@ def cmd_modalitaessenziale(chat_id):
             json={"chat_id": chat_id, "text": f"La modalità essenziale è già attiva{da_quanto}."}, timeout=5)
         return
     adesso = time.time()
-    MODALITA_NOTIFICHE = {"essenziale": True, "dal": adesso, "ultimo_promemoria": adesso}
+    # origine "manuale" + manuale_dal: dicono all'automatismo della quota di non disfare questa
+    # scelta (vedi aggiorna_modalita_da_quota). Una modalita' accesa a mano resta accesa anche
+    # quando la quota torna disponibile.
+    MODALITA_NOTIFICHE = {"essenziale": True, "dal": adesso, "ultimo_promemoria": adesso,
+                          "origine": "manuale", "manuale_dal": adesso}
     salva_modalita(MODALITA_NOTIFICHE)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -4682,7 +4824,11 @@ def cmd_modalitacompleta(chat_id):
     # Dire per quanto e' rimasta accesa e' l'unico modo per accorgersi a posteriori di averla
     # dimenticata: "era attiva da 5g 3h" spiega da solo le notifiche che non sono arrivate.
     durata = f" (era attiva da {_durata_leggibile(time.time() - dal)})" if dal else ""
-    MODALITA_NOTIFICHE = {"essenziale": False, "dal": 0, "ultimo_promemoria": 0}
+    # manuale_dal blocca l'automatismo della quota per il resto della giornata UTC: senza,
+    # con la quota bassa la modalita' essenziale si riaccenderebbe al ciclo successivo e questo
+    # comando non varrebbe niente.
+    MODALITA_NOTIFICHE = {"essenziale": False, "dal": 0, "ultimo_promemoria": 0,
+                          "origine": "manuale", "manuale_dal": time.time()}
     salva_modalita(MODALITA_NOTIFICHE)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -9975,6 +10121,18 @@ if __name__ == "__main__":
                 continue
             if not notifiche_attive:
                 log(f"Fuori dall'orario attivo ({fascia_oraria}): monitoraggio silenzioso, nessuna notifica.")
+
+            # Modalità essenziale automatica quando la quota giornaliera sta finendo. Sta PRIMA del
+            # promemoria qui sotto per non annunciare come "ancora attiva" una modalità che in
+            # questo stesso giro sta per essere spenta.
+            #
+            # L'annuncio segue notifiche_attive come tutto il resto: il cambio di modalità avviene
+            # comunque, anche di notte - lì serve a risparmiare chiamate, ed è proprio quando la
+            # quota si esaurisce - ma il messaggio parte solo in fascia oraria. Lo stato resta
+            # comunque leggibile in /piano, /diagnostica, /uptime e nel messaggio "Bot attivo".
+            annuncio_modalita = aggiorna_modalita_da_quota()
+            if annuncio_modalita and notifiche_attive:
+                invia_messaggio_telegram(annuncio_modalita)
 
             # Promemoria della modalità essenziale, stesso ritmo di quello della pausa manuale: è
             # una modalità che si accende e resta accesa in silenzio, e senza un richiamo periodico

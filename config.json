@@ -154,5 +154,8 @@
   "soglia_quota_dominio_modalita_essenziale": 85,
   "volume_minimo_dominio_modalita_essenziale": 20,
   "cicli_dominio_modalita_essenziale": 4,
-  "minuto_gol_modalita_essenziale": 20
+  "minuto_gol_modalita_essenziale": 20,
+  "modalita_essenziale_auto_attiva": true,
+  "soglia_quota_modalita_essenziale": 600,
+  "soglia_quota_uscita_modalita_essenziale": 1200
 }
