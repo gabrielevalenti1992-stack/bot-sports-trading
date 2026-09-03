@@ -57,10 +57,11 @@
   "odds_bookmaker_nome": "Bet365",
   "odds_bet_nome": "Match Winner",
   "odds_refresh_minuti_prima_kickoff": 90,
+  "pausa_fuori_orario_attivo": true,
   "orario_attivo_inizio_ora": 12,
   "orario_attivo_inizio_minuto": 0,
   "orario_attivo_fine_ora": 23,
-  "orario_attivo_fine_minuto": 30,
+  "orario_attivo_fine_minuto": 0,
   "intervallo_snapshot_valore": 900,
   "diagnostica_automatica_attiva": true,
   "intervallo_diagnostica_automatica": 1800,
@@ -148,5 +149,17 @@
     "Taca de Portugal",
     "Scottish Cup",
     "Scottish League Cup"
-  ]
+  ],
+  "max_preferiti_modalita_essenziale": 2,
+  "soglia_quota_dominio_modalita_essenziale": 85,
+  "volume_minimo_dominio_modalita_essenziale": 20,
+  "cicli_dominio_modalita_essenziale": 4,
+  "minuto_gol_modalita_essenziale": 20,
+  "modalita_essenziale_auto_attiva": true,
+  "soglia_quota_modalita_essenziale": 600,
+  "soglia_quota_uscita_modalita_essenziale": 1200,
+  "minuto_inizio_stop_finale": 80,
+  "minuto_fine_stop_finale": 90,
+  "scarto_stop_finale": 2,
+  "scarto_max_notifica_recupero": 1
 }

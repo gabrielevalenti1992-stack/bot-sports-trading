@@ -277,6 +277,30 @@ CICLI_MINIMI_PERMANENZA_PREFERITI = 2
 # regole standard.
 SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 
+# FINALE DI PARTITA GIA' DECISA: dominio e preferiti tacciono.
+#
+# La goleada qui sopra ferma tutto oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto, in qualunque
+# momento. Questo e' piu' stretto ma vale solo nell'ultimo tratto: da MINUTO_INIZIO_STOP_FINALE in
+# poi, con piu' di SCARTO_STOP_FINALE gol di scarto, gli aggiornamenti di dominio e le soglie
+# reattive dei preferiti non hanno piu' niente da dire - il tempo per ribaltare la partita non c'e'
+# piu', e una notifica "sta dominando" al esimo minuto su un 3-0 e' rumore.
+#
+# I GOL continuano a passare: sono piu' in alto in deve_notificare() e non vengono toccati. Qui si
+# fermano solo gli aggiornamenti di routine.
+#
+# La finestra finisce a 90 e non serve estenderla ai minuti di recupero: l'API riporta "elapsed"
+# fermo a 90 durante il recupero del secondo tempo (i minuti extra stanno nel campo "extra", letto
+# a parte per il recupero lungo), quindi un 90+4 arriva qui dentro come minuto 90 ed e' gia' coperto.
+MINUTO_INIZIO_STOP_FINALE = 80
+MINUTO_FINE_STOP_FINALE = 90
+SCARTO_STOP_FINALE = 2
+
+# Il recupero lungo si segnala solo se la partita e' ancora in bilico. Misurato sui log 28/08-03/09:
+# 79 notifiche di recupero in 7 giorni, di cui il 30% arrivate in raffica (fino a 4 in 13 secondi,
+# il 29/08 alle 14:57), perche' a fine primo tempo tutte le partite del turno finiscono insieme.
+# Su una partita gia' indirizzata quel messaggio non aggiunge niente.
+SCARTO_MAX_NOTIFICA_RECUPERO = 1
+
 # Auto-preferiti: una partita che si accende merita di essere seguita dal canale preferiti senza
 # aspettare che venga cliccata a mano tra le tante notifiche normali.
 #
@@ -366,6 +390,34 @@ VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI = 16
 # ciclo e ridiscendere: si promuove solo dopo questi cicli CONSECUTIVI sopra soglia (il contatore
 # si azzera appena scende), cioe' ~9 minuti di gioco a ciclo attivo da 180s.
 CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
+
+# --- Le stesse fasce, ma per la MODALITA' ESSENZIALE: poche partite, e solo le migliori.
+#
+# In modalita' essenziale il bot non deve seguire tutto quello che passa: deve tenere in mano due
+# partite sole, quelle in cui sta succedendo davvero qualcosa. Non e' un secondo meccanismo, sono
+# gli stessi tre assi di sopra (tetto, quota, volume, isteresi) con i numeri stretti.
+#
+# I numeri NON sono a occhio: vengono dalle 62 promozioni reali registrate nei log dal 30/08 al
+# 03/09 (analisi in ritroso_modalita_essenziale.py). La distribuzione delle quote di dominio
+# all'ingresso ha mediana 84% e minimo 76%, quindi la soglia a 85% tiene esattamente la meta'
+# migliore delle partite che oggi entrano: 30 su 62 invece di 62, cioe' 6 al giorno invece di 12.
+MAX_PREFERITI_MODALITA_ESSENZIALE = 2
+SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE = 85
+# Alzato insieme alla quota, per lo stesso motivo per cui i due assi vanno accoppiati sopra: fra le
+# promozioni osservate ce ne sono 8 al 100% di dominio, diverse arrivate prima del 25', cioe'
+# proprio i casi in cui la percentuale e' altissima perche' si e' giocato pochissimo (4 tiri a 0 fa
+# 100%). Con la sola quota alzata quelle passerebbero per prime, che e' il contrario di "le
+# migliori". Questo e' l'unico dei quattro numeri che il ritroso non puo' confermare: il volume
+# all'ingresso non finisce nei log, finisce solo nello shadow-log su disco.
+VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE = 20
+# Un ciclo in piu' di dominio ininterrotto (~3 minuti). Nei dati il 77% delle promozioni entra
+# esattamente al terzo ciclo, il minimo consentito: chiedere il quarto non le cancella - la maggior
+# parte ci arriverebbe poco dopo - ma scarta quelle in cui il dominio si sgonfia subito, che sono
+# le stesse partite che poi uscivano dai preferiti dopo pochi minuti senza aver detto niente.
+CICLI_DOMINIO_MODALITA_ESSENZIALE = 4
+# Rotta gol (oggi spenta da config): stessa idea, finestra piu' stretta. Due gol entro il 20'
+# invece che entro il 25'.
+MINUTO_GOL_MODALITA_ESSENZIALE = 20
 
 # Gate dominio sulle notifiche generali (chat principale, partite NON preferite): prima di
 # valutare le regole a volume grezzo (differenza tiri, partita attiva, refresh forzato, momentum
@@ -721,6 +773,32 @@ INTERVALLO_CICLO_ATTIVO = 180  # secondi tra un ciclo e l'altro dentro una fines
 # progressivo, non uno stop, e si riassorbe da solo appena la quota si azzera a mezzanotte.
 RISERVA_QUOTA_API = 900
 FATTORE_RALLENTAMENTO_QUOTA_MAX = 4  # a quota finita il ciclo dura 4 volte tanto (180s -> 720s)
+
+# MODALITA' ESSENZIALE AUTOMATICA QUANDO LA QUOTA STA PER FINIRE.
+#
+# Il rallentamento qui sopra allunga il ciclo, ma non tocca i preferiti, che sono la voce di spesa
+# piu' alta: ogni preferito viene ricontrollato ogni INTERVALLO_CICLO_MOMENTUM (60s) invece che ogni
+# INTERVALLO_CICLO_ATTIVO (180s), cioe' costa il TRIPLO di chiamate. Con tre preferiti aperti in
+# contemporanea sono sei chiamate in piu' al minuto rispetto alle stesse partite non preferite.
+#
+# La modalita' essenziale abbassa il tetto dei preferiti da 3 a 2 e stringe le fasce di ingresso:
+# e' quindi anche una leva sul consumo API, non solo sul rumore in chat. Da qui l'automatismo -
+# quando la giornata sta per finire la si accende da sola, e la si rispegne quando la quota torna.
+#
+# Due soglie diverse e non una, di proposito: con una sola, un residuo che oscilla intorno al
+# valore critico farebbe accendere e spegnere la modalita' ad ogni ciclo, con un messaggio Telegram
+# ogni volta. La distanza fra le due e' l'isteresi, la stessa idea gia' usata per l'ingresso dei
+# preferiti per dominio.
+#
+# I numeri stanno fra il rallentamento (RISERVA_QUOTA_API, 900) e l'allarme della diagnostica
+# (SOGLIA_QUOTA_RESIDUA_DIAGNOSTICA, 500): a 600 il rallentamento graduale e' gia' in corso da un
+# pezzo e non e' bastato - il 22/08, 23/08 e 29/08 la quota si e' esaurita comunque - quindi entra
+# la seconda leva. Si riesce sopra 1200 e non sopra 900: appena sopra la soglia di rallentamento la
+# situazione e' ancora tesa, e riaprire subito il terzo preferito rimetterebbe il piede
+# sull'acceleratore proprio mentre si sta cercando di arrivare a mezzanotte.
+MODALITA_ESSENZIALE_AUTO_ATTIVA = True
+SOGLIA_QUOTA_MODALITA_ESSENZIALE = 600
+SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE = 1200
 INTERVALLO_CICLO_MORTO = 1800  # secondi tra un ciclo e l'altro fuori da ogni finestra attiva (30 min)
 INTERVALLO_CICLO_MOMENTUM = 60  # secondi tra un controllo e l'altro per i preferiti (grafico momentum più denso)
 
@@ -740,6 +818,19 @@ ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca m
 # È un meccanismo indipendente dalla pausa manuale /stop (nessuno stato salvato su disco, si
 # ricalcola ogni ciclo dall'orologio): un /stop per un weekend intero non viene "riattivato" da
 # questo alle 12, e viceversa questo non manda notifiche mentre l'utente ha messo /stop.
+# Fuori dalla fascia oraria: fermare davvero il bot oppure solo tacere.
+#
+# Storicamente fuori fascia il monitoraggio restava acceso 24/7 e si spegnevano solo le notifiche,
+# per non perdere dati utili alla validazione. Costa pero' una notte intera di chiamate API su
+# partite che non producono nessun avviso, e con la quota giornaliera che si esauriva entro sera
+# (29, 30 e 31/08) quelle chiamate mancavano poi di pomeriggio, quando servono davvero.
+#
+# Con questo attivo il ciclo salta del tutto fuori fascia: nessuna chiamata, solo il battito che
+# tiene onesto l'endpoint di salute. Le partite rimaste aperte alla chiusura non restano orfane -
+# al risveglio non sono piu' nel feed live e chiudi_shadow_log_partite_sparite() ne recupera il
+# risultato finale, che e' esattamente il caso per cui quella funzione esiste.
+PAUSA_FUORI_ORARIO_ATTIVO = False
+
 ORARIO_ATTIVO_INIZIO_ORA = 12
 ORARIO_ATTIVO_INIZIO_MINUTO = 0
 ORARIO_ATTIVO_FINE_ORA = 23
@@ -899,6 +990,10 @@ try:
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     CICLI_MINIMI_PERMANENZA_PREFERITI = config.get("cicli_minimi_permanenza_preferiti", CICLI_MINIMI_PERMANENZA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
+    MINUTO_INIZIO_STOP_FINALE = config.get("minuto_inizio_stop_finale", MINUTO_INIZIO_STOP_FINALE)
+    MINUTO_FINE_STOP_FINALE = config.get("minuto_fine_stop_finale", MINUTO_FINE_STOP_FINALE)
+    SCARTO_STOP_FINALE = config.get("scarto_stop_finale", SCARTO_STOP_FINALE)
+    SCARTO_MAX_NOTIFICA_RECUPERO = config.get("scarto_max_notifica_recupero", SCARTO_MAX_NOTIFICA_RECUPERO)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
     AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
     SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
@@ -909,6 +1004,14 @@ try:
     SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI = config.get("soglia_quota_dominio_auto_preferiti", SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI)
     VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI = config.get("volume_minimo_dominio_auto_preferiti", VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI)
     CICLI_DOMINIO_PER_AUTO_PREFERITI = config.get("cicli_dominio_per_auto_preferiti", CICLI_DOMINIO_PER_AUTO_PREFERITI)
+    MAX_PREFERITI_MODALITA_ESSENZIALE = config.get("max_preferiti_modalita_essenziale", MAX_PREFERITI_MODALITA_ESSENZIALE)
+    SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE = config.get("soglia_quota_dominio_modalita_essenziale", SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE)
+    VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE = config.get("volume_minimo_dominio_modalita_essenziale", VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE)
+    CICLI_DOMINIO_MODALITA_ESSENZIALE = config.get("cicli_dominio_modalita_essenziale", CICLI_DOMINIO_MODALITA_ESSENZIALE)
+    MINUTO_GOL_MODALITA_ESSENZIALE = config.get("minuto_gol_modalita_essenziale", MINUTO_GOL_MODALITA_ESSENZIALE)
+    MODALITA_ESSENZIALE_AUTO_ATTIVA = config.get("modalita_essenziale_auto_attiva", MODALITA_ESSENZIALE_AUTO_ATTIVA)
+    SOGLIA_QUOTA_MODALITA_ESSENZIALE = config.get("soglia_quota_modalita_essenziale", SOGLIA_QUOTA_MODALITA_ESSENZIALE)
+    SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE = config.get("soglia_quota_uscita_modalita_essenziale", SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE)
     DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
@@ -951,6 +1054,7 @@ try:
     ODDS_BOOKMAKER_NOME = config.get("odds_bookmaker_nome", ODDS_BOOKMAKER_NOME)
     ODDS_BET_NOME = config.get("odds_bet_nome", ODDS_BET_NOME)
     ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = config.get("odds_refresh_minuti_prima_kickoff", ODDS_REFRESH_MINUTI_PRIMA_KICKOFF)
+    PAUSA_FUORI_ORARIO_ATTIVO = config.get("pausa_fuori_orario_attivo", PAUSA_FUORI_ORARIO_ATTIVO)
     ORARIO_ATTIVO_INIZIO_ORA = config.get("orario_attivo_inizio_ora", ORARIO_ATTIVO_INIZIO_ORA)
     ORARIO_ATTIVO_INIZIO_MINUTO = config.get("orario_attivo_inizio_minuto", ORARIO_ATTIVO_INIZIO_MINUTO)
     ORARIO_ATTIVO_FINE_ORA = config.get("orario_attivo_fine_ora", ORARIO_ATTIVO_FINE_ORA)
@@ -1003,6 +1107,13 @@ except Exception as e:
     print(f"Soglie default (config.json non trovato o errore): {e}", flush=True)
 
 PAROLE_ESCLUSE = [
+    # Calcio femminile. "women"/"femminile"/"female" c'erano gia', ma coprivano solo inglese e
+    # italiano: la Frauen Bundesliga e la Primera Division Femenina passavano indisturbate, perche'
+    # contengono "Bundesliga" e "Primera Division" e superavano cosi' il match sulla whitelist.
+    # Viste in produzione il 30 e il 31/08 (Bayern Munich W-Mainz 05 W, Barcelona W-Granad.
+    # Tenerife W). Le voci sono troncate alla radice per prendere maschile e femminile insieme:
+    # "femenin" copre femenina/femenino, "feminin" copre feminine/feminino/feminina.
+    "frauen", "femenin", "feminin", "femminil", "vrouwen", "dames", "kvinne", "kobiet",
     "women", "femminile", "female", "u21", "u20", "u19", "u18", "u17", "u16", "u15",
     "under-21", "under-20", "under-19", "under-18", "under-17", "under 21", "under 20",
     "under 19", "under 18", "under 17", "youth", "amateur", "dilettanti", "regional",
@@ -1054,6 +1165,39 @@ def squadra_giovanile(nome_squadra):
     lettere dentro un nome piu' lungo."""
     nome = _senza_accenti(nome_squadra or "")
     return any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE)
+
+
+# Squadre femminili riconosciute dal NOME, non dalla lega. Stessa ragione per cui esiste il
+# filtro giovanile qui sopra: il nome della lega non basta. La Frauen Bundesliga si riconosce, ma
+# una coppa o un torneo possono chiamarsi in modo neutro e mettere in campo squadre femminili lo
+# stesso, e l'elenco delle lingue non sara' mai completo. Il nome della squadra invece porta un
+# marcatore stabile: API-Football aggiunge " W" in coda (Bayern Munich W, Barcelona W, Nurnberg W).
+PAROLE_ESCLUSE_SQUADRE_FEMMINILI = [
+    "women", "femminile", "femenino", "femenina", "feminino", "feminine",
+    "frauen", "vrouwen", "dames", "kvinner",
+]
+
+
+def squadra_femminile(nome_squadra):
+    """True se il nome e' quello di una squadra femminile.
+
+    Il marcatore " W" si cerca solo in CODA e come parola a se': dentro il nome intercetterebbe
+    mezzo mondo, e in coda non esistono club maschili che finiscano con una W isolata."""
+    nome = _senza_accenti(nome_squadra or "").strip()
+    if re.search(r"\bw$", nome) or nome.endswith("(w)"):
+        return True
+    return any(re.search(rf"\b{re.escape(parola)}\b", nome)
+               for parola in PAROLE_ESCLUSE_SQUADRE_FEMMINILI)
+
+
+def partita_femminile(fixture):
+    """True se almeno una delle due squadre e' femminile.
+
+    Come partita_tra_giovanili(): vale per il tracciamento automatico, non per i comandi - se si
+    cerca una partita con /status la si deve poter vedere lo stesso."""
+    squadre = fixture.get("teams", {}) or {}
+    return any(squadra_femminile((squadre.get(lato) or {}).get("name", ""))
+               for lato in ("home", "away"))
 
 
 def fixture_in_whitelist(fixture):
@@ -1887,16 +2031,28 @@ STATO_PAUSA = carica_pausa()
 # preferiti. Persistita su disco come /stop, cosi' un riavvio del bot non la resetta a sua insaputa.
 # =============================================================================
 MODALITA_FILE = data_path("modalita_notifiche.json")
+INTERVALLO_PROMEMORIA_MODALITA = 6 * 3600  # 6 ore, come per /stop: ogni quanto ricordare che è attiva
 
 
 def carica_modalita():
     if os.path.exists(MODALITA_FILE):
         try:
             with open(MODALITA_FILE, 'r') as f:
-                return json.load(f)
+                stato = json.load(f)
+            # Le prime versioni salvavano solo {"essenziale": ...}, senza tenere traccia di quando
+            # era stata accesa. La data di modifica del file è però esattamente il momento
+            # dell'ultimo cambio di modalità: recuperarla da lì evita di ripartire da zero ad ogni
+            # riavvio e di annunciare "attiva da 0 ore" una modalità accesa da giorni.
+            if stato.get("essenziale") and not stato.get("dal"):
+                try:
+                    stato["dal"] = os.path.getmtime(MODALITA_FILE)
+                except OSError:
+                    stato["dal"] = time.time()
+            return stato
         except Exception as e:
             print(f"Errore lettura {MODALITA_FILE}: {e}", flush=True)
-    return {"essenziale": False}
+    return {"essenziale": False, "dal": 0, "ultimo_promemoria": 0,
+            "origine": None, "manuale_dal": 0}
 
 
 def salva_modalita(stato):
@@ -1904,6 +2060,75 @@ def salva_modalita(stato):
 
 
 MODALITA_NOTIFICHE = carica_modalita()
+
+# Stampato qui e non insieme al resto della configurazione piu' in alto: lo stato della modalita'
+# vive su disco e si conosce solo dopo averlo letto. Ed e' una riga che serve: quando la modalita'
+# resta accesa, un riavvio deve dirlo subito nei log, non lasciarlo dedurre dal silenzio.
+print(f"Modalità essenziale: {'ATTIVA' if MODALITA_NOTIFICHE.get('essenziale') else 'spenta'} "
+      f"(quando attiva: max {MAX_PREFERITI_MODALITA_ESSENZIALE} partite insieme, quota >= "
+      f"{SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE}%, volume >= "
+      f"{VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE}, {CICLI_DOMINIO_MODALITA_ESSENZIALE} cicli "
+      f"consecutivi, gol entro il {MINUTO_GOL_MODALITA_ESSENZIALE}')", flush=True)
+print(f"Modalità essenziale automatica da quota: "
+      f"{'ATTIVA' if MODALITA_ESSENZIALE_AUTO_ATTIVA else 'disattiva'} "
+      f"(si accende sotto {SOGLIA_QUOTA_MODALITA_ESSENZIALE} richieste rimaste, "
+      f"si rispegne sopra {SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE}; "
+      f"un comando manuale vince per il resto della giornata UTC)", flush=True)
+
+
+def nota_modalita_essenziale(prefisso="\n"):
+    """Riga da appendere ai messaggi di stato quando la modalità essenziale è accesa.
+
+    Risolve un problema concreto: è una modalità che si accende con un comando e poi resta lì per
+    sempre, silenziosa per definizione. Non comparendo in nessuna schermata di stato, è rimasta
+    accesa per giorni senza che nessuno se ne accorgesse, e il bot sembrava semplicemente non avere
+    più niente da segnalare. Stessa cura già usata per la pausa manuale: si vede dov'è naturale
+    guardare, e ogni tanto si ricorda da sola.
+
+    Stringa vuota quando è spenta, così i messaggi normali non cambiano di una virgola."""
+    if not MODALITA_NOTIFICHE.get("essenziale"):
+        return ""
+    dal = MODALITA_NOTIFICHE.get("dal") or 0
+    da_quanto = f" da {_durata_leggibile(time.time() - dal)}" if dal else ""
+    # Da dove viene la modalità cambia cosa deve fare l'utente: se l'ha accesa la quota, sapere
+    # che si rispegne da sola evita sia di aspettare invano sia di forzarla senza motivo.
+    if MODALITA_NOTIFICHE.get("origine") == "automatica":
+        causa = " (accesa dalla quota API in esaurimento, si rispegne da sola quando risale)"
+    else:
+        causa = ""
+    return (f"{prefisso}🔕 Modalità essenziale attiva{da_quanto}{causa}: solo le "
+            f"{MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, e di quelle solo gol, rossi, "
+            f"rigori e recupero lungo. Invia /modalitacompleta per riavere tutte le notifiche.")
+
+
+def limiti_ingresso_preferiti():
+    """Tetto e fasce di ingresso in vigore adesso: quelle normali, o quelle strette della modalità
+    essenziale.
+
+    Un unico posto da cui leggerle, invece di infilare un "se essenziale" dentro ognuna delle due
+    rotte: così le due rotte non possono divergere, e il motivo scritto nel log cita sempre la
+    soglia che ha davvero deciso, non quella di default.
+
+    NOTA sul contatore di isteresi: 'cicli' è quanti cicli consecutivi servono per promuovere, ma
+    il contatore continua a essere alimentato dalla soglia NORMALE anche in modalità essenziale.
+    È deliberato: quel contatore finisce nello shadow-log del dominio, che serve a tarare le soglie
+    guardando lo storico, e cambiargli significato a metà rovinerebbe il confronto con i dati già
+    raccolti. In modalità essenziale la stretta arriva quindi da due parti insieme - quota e volume
+    più alti nell'istante della promozione, più cicli consecutivi richiesti - senza toccare il
+    metro con cui i dati vengono misurati."""
+    if MODALITA_NOTIFICHE.get("essenziale"):
+        return {"tetto": MAX_PREFERITI_MODALITA_ESSENZIALE,
+                "quota": SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE,
+                "volume": VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE,
+                "cicli": CICLI_DOMINIO_MODALITA_ESSENZIALE,
+                "minuto_gol": MINUTO_GOL_MODALITA_ESSENZIALE,
+                "essenziale": True}
+    return {"tetto": MAX_PREFERITI_SIMULTANEI,
+            "quota": SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI,
+            "volume": VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI,
+            "cicli": CICLI_DOMINIO_PER_AUTO_PREFERITI,
+            "minuto_gol": MINUTO_GOL_AUTO_PREFERITI,
+            "essenziale": False}
 
 # =============================================================================
 # FIAMME - SOGLIE
@@ -1940,7 +2165,7 @@ def _esegui_comando(chat_id, funzione, args):
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}", "parse_mode": "Markdown"}, timeout=5)
+                json={"chat_id": chat_id, "text": f"Errore durante l'esecuzione del comando: {e}"}, timeout=5)
         except Exception:
             pass
 
@@ -2045,8 +2270,7 @@ def poll_callbacks():
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={
                                 "chat_id": chat_id,
-                                "text": "\U0001F515 Partita silenziata. Non riceverai piu alert live. Il risultato finale arrivera comunque.",
-                                "parse_mode": "Markdown"
+                                "text": "\U0001F515 Partita silenziata. Non riceverai piu alert live. Il risultato finale arrivera comunque."
                             }, timeout=5)
 
                     elif data.startswith("unmute:"):
@@ -2168,7 +2392,7 @@ def poll_callbacks():
                         if not args:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_status, " ".join(args).lower().strip("<>").strip())
 
@@ -2176,7 +2400,7 @@ def poll_callbacks():
                         if not args:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /momentum <nome squadra>", "parse_mode": "Markdown"}, timeout=5)
+                                json={"chat_id": chat_id, "text": "Usa: /momentum <nome squadra>"}, timeout=5)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_momentum, " ".join(args).lower().strip("<>").strip())
 
@@ -2235,6 +2459,8 @@ def poll_callbacks():
 
                     elif cmd == "/diagnostica":
                         esegui_comando_sicuro(chat_id, cmd_diagnostica)
+                    elif cmd == "/legenda":
+                        esegui_comando_sicuro(chat_id, cmd_legenda)
 
                     elif cmd == "/coperturaleghe":
                         esegui_comando_sicuro(chat_id, cmd_coperturaleghe)
@@ -2332,11 +2558,12 @@ def invia_messaggio_telegram(testo, chat_id=None):
     destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': destinatario, 'text': testo, 'parse_mode': 'Markdown'}
+        data = {'chat_id': destinatario, 'text': testo}
         response = requests.post(url, data=data, timeout=10)
         log(f"Telegram testo -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
-        # Markdown malformato: si rimanda lo stesso testo senza formattazione invece di perderlo.
-        # Meglio un messaggio senza grassetti che nessun messaggio - e finora era nessun messaggio.
+        # Rete di sicurezza: con i messaggi in testo semplice questo non dovrebbe piu' scattare,
+        # ma resta perche' il guasto che copre e' silenzioso (il messaggio sparisce e nessuno lo
+        # sa) e perche' basterebbe un parse_mode rimesso per sbaglio a farlo tornare.
         if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
             data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
             response = requests.post(url, data=data_semplice, timeout=10)
@@ -2366,15 +2593,14 @@ def invia_notifica_telegram(foto_path, messaggio, reply_markup=None, chat_id=Non
                 files = {'photo': photo}
                 data = {
                     'chat_id': destinatario,
-                    'caption': messaggio,
-                    'parse_mode': 'Markdown'
+                    'caption': messaggio
                 }
                 if reply_markup:
                     data['reply_markup'] = json.dumps(reply_markup)
                 response = requests.post(url, data=data, files=files, timeout=10)
                 log(f"Telegram foto -> {destinatario} - Status: {response.status_code} - {response.text[:200]}")
-            # Come per il testo: la didascalia con Markdown rotto farebbe perdere l'intera
-            # notifica, foto compresa. Il file va riaperto, il primo invio l'ha gia' consumato.
+            # Stessa rete di sicurezza del testo: una didascalia rifiutata farebbe perdere
+            # l'intera notifica, foto compresa. Il file va riaperto, il primo invio l'ha consumato.
             if response.status_code == 400 and _e_errore_parsing_markdown(response.text):
                 data_semplice = {k: v for k, v in data.items() if k != 'parse_mode'}
                 with open(foto_path, 'rb') as photo_retry:
@@ -2411,7 +2637,7 @@ def aggiorna_notifica_telegram(message_id, foto_path, messaggio, reply_markup=No
     destinatario = chat_id or TELEGRAM_CHAT_ID
     try:
         media = {"type": "photo", "media": "attach://photo",
-                 "caption": messaggio, "parse_mode": "Markdown"}
+                 "caption": messaggio}
         dati = {"chat_id": destinatario, "message_id": message_id, "media": json.dumps(media)}
         if reply_markup:
             dati["reply_markup"] = json.dumps(reply_markup)
@@ -2884,6 +3110,123 @@ def fattore_riserva_quota():
     return 1.0 + quota_bruciata * (FATTORE_RALLENTAMENTO_QUOTA_MAX - 1)
 
 
+def nota_riserva_quota(fattore):
+    """Il pezzo di log che spiega perche' il ciclo e' rallentato per la quota. "" se non lo e'.
+
+    Separata dal ciclo per non ripetere l'incoerenza vista il 30/08 alle 21:14, e poi per tutta la
+    notte: il fattore veniva calcolato da una lettura dello stato quota e il testo da un'altra, con
+    un thread di sfondo libero di aggiornare l'header in mezzo. Ne usciva una riga che si
+    contraddiceva da sola - "quota quasi finita (7499 richieste rimaste): ciclo rallentato x4.0".
+
+    Quando l'esaurimento e' dichiarato dall'API il numero dell'header non va proprio citato: e'
+    esattamente il dato che in quel momento non e' affidabile (29/08 e 30/08, header fermi su
+    7499/7500 mentre ogni chiamata veniva rifiutata)."""
+    if fattore <= 1.0:
+        return ""
+    if quota_giornaliera_finita() is True:
+        return (f", quota giornaliera esaurita secondo l'API: ciclo al minimo (x{fattore:.1f}) "
+                f"in attesa del reset")
+    return (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
+            f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
+
+
+def quota_residua_attendibile():
+    """Le richieste rimaste oggi, ma solo se la lettura e' abbastanza fresca da poterci decidere
+    sopra. None quando il dato manca o e' vecchio.
+
+    Su un header stantio ci si e' gia' sbagliati: il 29/08 e il 30/08 l'API continuava a dichiarare
+    7499/7500 richieste rimaste mentre rifiutava ogni chiamata. Cambiare modalita' al buio e'
+    peggio che non cambiarla, quindi qui si preferisce non rispondere."""
+    residuo = ULTIMA_QUOTA_API.get("residuo")
+    aggiornata = ULTIMA_QUOTA_API.get("aggiornata", 0)
+    if residuo is None or not aggiornata:
+        return None
+    if (time.time() - aggiornata) > ETA_MASSIMA_QUOTA_ATTENDIBILE:
+        return None
+    try:
+        return int(residuo)
+    except (TypeError, ValueError):
+        return None
+
+
+def scelta_manuale_di_oggi():
+    """True se l'utente ha scelto la modalita' a mano nella giornata di quota in corso.
+
+    Serve a non litigare con l'utente: se ha appena chiesto la modalita' completa mentre la quota
+    era bassa, l'automatismo non deve riaccendere l'essenziale al ciclo dopo, altrimenti il comando
+    manuale non varrebbe niente.
+
+    La scadenza e' la giornata UTC perche' e' li' che si azzera la quota API: la scelta vale per la
+    giornata a cui si riferisce, e il giorno dopo l'automatismo torna libero. E' anche la garanzia
+    che non si ripeta la modalita' rimasta accesa per giorni senza che nessuno se ne accorgesse:
+    nessuna decisione, manuale o automatica, sopravvive indefinitamente da sola."""
+    manuale_dal = MODALITA_NOTIFICHE.get("manuale_dal") or 0
+    if not manuale_dal:
+        return False
+    adesso_utc = datetime.datetime.now(datetime.timezone.utc).date()
+    scelta_utc = datetime.datetime.fromtimestamp(manuale_dal, datetime.timezone.utc).date()
+    return scelta_utc == adesso_utc
+
+
+def aggiorna_modalita_da_quota():
+    """Accende la modalita' essenziale quando la quota giornaliera sta finendo e la rispegne quando
+    torna. Ritorna il testo da annunciare in chat, "" se non e' cambiato niente.
+
+    Due regole tengono insieme automatismo e comando manuale, ed e' tutto il disegno:
+
+      - si ACCENDE solo se l'utente non ha gia' deciso a mano oggi (vedi scelta_manuale_di_oggi);
+      - si SPEGNE solo quello che ha acceso l'automatismo. Una modalita' essenziale accesa a mano
+        resta accesa anche quando la quota torna: l'utente l'ha chiesta per il rumore, non per la
+        quota, e non tocca a questa funzione revocare quella scelta.
+
+    Il risultato e' che il comando manuale vince sempre sulla giornata in corso, in entrambe le
+    direzioni, senza bisogno di un interruttore separato per disattivare l'automatismo."""
+    global MODALITA_NOTIFICHE
+    if not MODALITA_ESSENZIALE_AUTO_ATTIVA:
+        return ""
+    finita = quota_giornaliera_finita() is True
+    residuo = quota_residua_attendibile()
+    if residuo is None and not finita:
+        return ""
+
+    essenziale = bool(MODALITA_NOTIFICHE.get("essenziale"))
+    adesso = time.time()
+    manuale_dal = MODALITA_NOTIFICHE.get("manuale_dal") or 0
+
+    if not essenziale:
+        if not (finita or residuo <= SOGLIA_QUOTA_MODALITA_ESSENZIALE):
+            return ""
+        if scelta_manuale_di_oggi():
+            return ""
+        MODALITA_NOTIFICHE = {"essenziale": True, "dal": adesso, "ultimo_promemoria": adesso,
+                              "origine": "automatica", "manuale_dal": manuale_dal}
+        salva_modalita(MODALITA_NOTIFICHE)
+        quanto = ("esaurita secondo l'API" if finita
+                  else f"sotto le {SOGLIA_QUOTA_MODALITA_ESSENZIALE} richieste ({residuo} rimaste)")
+        log(f"🔕 Modalità essenziale accesa automaticamente: quota {quanto}")
+        return (f"🔕 Modalità essenziale accesa automaticamente: quota API {quanto}.\n"
+                f"Da ora si seguono solo le {MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, "
+                f"e di quelle solo gol, rossi, rigori e recupero lungo: meno preferiti aperti "
+                f"vuol dire meno chiamate, per arrivare a fine giornata invece di restare ciechi.\n"
+                f"Si rispegne da sola quando la quota risale sopra "
+                f"{SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE}. Puoi comunque forzarla con "
+                f"/modalitacompleta: la tua scelta vale per tutta la giornata.")
+
+    # Da qui in giu' la modalita' e' accesa: si valuta solo se spegnerla.
+    if MODALITA_NOTIFICHE.get("origine") != "automatica":
+        return ""
+    if finita or residuo is None or residuo < SOGLIA_QUOTA_USCITA_MODALITA_ESSENZIALE:
+        return ""
+    dal = MODALITA_NOTIFICHE.get("dal") or 0
+    durata = f" (era attiva da {_durata_leggibile(adesso - dal)})" if dal else ""
+    MODALITA_NOTIFICHE = {"essenziale": False, "dal": 0, "ultimo_promemoria": 0,
+                          "origine": None, "manuale_dal": manuale_dal}
+    salva_modalita(MODALITA_NOTIFICHE)
+    log(f"🔔 Modalità completa ripristinata automaticamente: quota risalita a {residuo}")
+    return (f"🔔 Modalità completa ripristinata automaticamente{durata}: la quota API è risalita "
+            f"({residuo} richieste rimaste). Tornano tutte le notifiche.")
+
+
 def _classifica_errore_http(status_code):
     if status_code == 429:
         return "rate_limit", "limite di richieste superato"
@@ -3137,7 +3480,7 @@ def costruisci_piano_giornata(data_str):
             continue
         # Stesso filtro del ciclo principale: una partita giovanile non deve nemmeno entrare nel
         # piano della giornata, altrimenti rientrerebbe dalla finestra oraria che il piano genera.
-        if partita_tra_giovanili(item):
+        if partita_tra_giovanili(item) or partita_femminile(item):
             continue
         kickoff_ts = fixture_info.get("timestamp")
         if not kickoff_ts:
@@ -3196,8 +3539,9 @@ def dentro_orario_attivo(now_it=None):
     """True se l'ora locale italiana corrente cade nella fascia ORARIO_ATTIVO_* (default
     12:00-23:30). Nessuna eccezione per partite già in corso a cavallo del limite. NOTA: fuori
     fascia il bot NON si ferma più - il monitoraggio (statistiche, quote, shadow-log) resta
-    attivo 24/7, solo l'invio delle notifiche Telegram viene saltato (vedi notifiche_attive nel
-    loop principale e in processa_partita)."""
+    attivo 24/7 e solo l'invio delle notifiche Telegram viene saltato (vedi notifiche_attive nel
+    loop principale e in processa_partita). Con PAUSA_FUORI_ORARIO_ATTIVO invece il ciclo si ferma
+    del tutto fuori fascia e non parte nessuna chiamata."""
     now_it = now_it if now_it is not None else datetime.datetime.now(ZoneInfo("Europe/Rome"))
     inizio = now_it.replace(hour=ORARIO_ATTIVO_INIZIO_ORA, minute=ORARIO_ATTIVO_INIZIO_MINUTO, second=0, microsecond=0)
     fine = now_it.replace(hour=ORARIO_ATTIVO_FINE_ORA, minute=ORARIO_ATTIVO_FINE_MINUTO, second=0, microsecond=0)
@@ -4163,6 +4507,8 @@ def cmd_help(chat_id):
         "entrerebbero nei preferiti con le soglie attuali\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
+        "/legenda - Cosa vogliono dire le voci della diagnostica (non è più in coda ad ogni "
+        "messaggio)\n"
         "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
         "rispecchia ancora (in cima le partite che dominano e perdono). Nessuna chiamata API\n"
         "/classificadominanza - Classifica di sempre: le squadre che segnano più spesso subito "
@@ -4177,14 +4523,14 @@ def cmd_help(chat_id):
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": help_text}, timeout=5)
 
 
 def cmd_favorites(chat_id):
     if not FAVORITE_MATCHES:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita preferita.", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita preferita."}, timeout=5)
         return
     lines = ["Partite preferite:"]
     partite_cmd = get_partite_live()
@@ -4200,7 +4546,7 @@ def cmd_favorites(chat_id):
             lines.append(f"- ID {fid} (non live)")
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=5)
 
 
 def cmd_clearfavorites(chat_id):
@@ -4208,14 +4554,14 @@ def cmd_clearfavorites(chat_id):
     save_favorites(FAVORITE_MATCHES)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "Lista preferiti svuotata.", "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "Lista preferiti svuotata."}, timeout=5)
 
 
 def cmd_silenced(chat_id):
     if not SILENCED_MATCHES:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita silenziata.", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita silenziata."}, timeout=5)
         return
     lines = ["Partite silenziate:"]
     keyboard = {"inline_keyboard": []}
@@ -4240,7 +4586,7 @@ def cmd_live(chat_id):
     if not partite_cmd:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento.", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": "Nessuna partita live monitorata al momento."}, timeout=5)
         return
     MAX_PARTITE_MOSTRATE = 20
     partite_da_mostrare = partite_cmd[:MAX_PARTITE_MOSTRATE]
@@ -4287,7 +4633,7 @@ def cmd_live(chat_id):
     lines.append(f"\nStatistiche disponibili: {n_con_dati}/{n_mostrate} mostrate")
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=5)
+        json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=5)
 
 
 def cmd_piano(chat_id):
@@ -4402,7 +4748,18 @@ def cmd_piano(chat_id):
         if dentro_orario_attivo():
             righe.append(f"Notifiche: ATTIVE (fascia oraria {fascia})")
         else:
-            righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - monitoraggio e raccolta dati comunque attivi")
+            if PAUSA_FUORI_ORARIO_ATTIVO:
+                righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - e con esse "
+                             f"tutto il resto: fuori fascia il bot non chiama l'API")
+            else:
+                righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - monitoraggio e raccolta dati comunque attivi")
+
+    # Anche dentro la fascia oraria le notifiche possono essere quasi tutte soppresse, se la
+    # modalità essenziale è accesa: senza questa riga /piano direbbe "Notifiche: ATTIVE" mentre in
+    # chat non arriva quasi niente, che è esattamente l'equivoco da evitare.
+    nota_modalita = nota_modalita_essenziale(prefisso="")
+    if nota_modalita:
+        righe.append(nota_modalita)
 
     testo = "\n".join(righe)
     for i in range(0, len(testo), 3800):
@@ -4454,19 +4811,36 @@ def cmd_modalitaessenziale(chat_id):
     lungo generano una notifica, per ridurre il rumore nelle serate con tante partite insieme."""
     global MODALITA_NOTIFICHE
     if MODALITA_NOTIFICHE.get("essenziale"):
+        dal = MODALITA_NOTIFICHE.get("dal") or 0
+        da_quanto = f" (da {_durata_leggibile(time.time() - dal)})" if dal else ""
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "La modalità essenziale è già attiva."}, timeout=5)
+            json={"chat_id": chat_id, "text": f"La modalità essenziale è già attiva{da_quanto}."}, timeout=5)
         return
-    MODALITA_NOTIFICHE = {"essenziale": True}
+    adesso = time.time()
+    # origine "manuale" + manuale_dal: dicono all'automatismo della quota di non disfare questa
+    # scelta (vedi aggiorna_modalita_da_quota). Una modalita' accesa a mano resta accesa anche
+    # quando la quota torna disponibile.
+    MODALITA_NOTIFICHE = {"essenziale": True, "dal": adesso, "ultimo_promemoria": adesso,
+                          "origine": "manuale", "manuale_dal": adesso}
     salva_modalita(MODALITA_NOTIFICHE)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={
             "chat_id": chat_id,
-            "text": "🔕 Modalità essenziale attiva: da ora solo gol, cartellini rossi, rigori e "
-                    "recupero lungo. Le notifiche di soglia (tiri, momentum) sono sospese, anche "
-                    "per i preferiti. Invia /modalitacompleta per tornare come prima."
+            "text": f"🔕 Modalità essenziale attiva: si seguono solo le "
+                    f"{MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, e di quelle solo gol, "
+                    f"cartellini rossi, rigori e recupero lungo. Tutto il resto tace.\n"
+                    f"Per entrare ora serve un dominio più netto: almeno "
+                    f"{SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE}% su volume "
+                    f"{VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE}, stabile per "
+                    f"{CICLI_DOMINIO_MODALITA_ESSENZIALE} cicli.\n"
+                    f"I preferiti già aperti restano fino a fine partita: il tetto vale sui nuovi "
+                    f"ingressi, non caccia via quelli in corso.\n"
+                    "Invia /modalitacompleta per tornare come prima.\n"
+                    "Ogni 6 ore ti ricordo che è ancora accesa, e la trovi scritta in /piano, "
+                    "/diagnostica, /uptime e nel messaggio periodico \"Bot attivo\": così non "
+                    "resta accesa per giorni senza che te ne accorga."
         }, timeout=5)
 
 
@@ -4478,11 +4852,19 @@ def cmd_modalitacompleta(chat_id):
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": "La modalità completa è già attiva."}, timeout=5)
         return
-    MODALITA_NOTIFICHE = {"essenziale": False}
+    dal = MODALITA_NOTIFICHE.get("dal") or 0
+    # Dire per quanto e' rimasta accesa e' l'unico modo per accorgersi a posteriori di averla
+    # dimenticata: "era attiva da 5g 3h" spiega da solo le notifiche che non sono arrivate.
+    durata = f" (era attiva da {_durata_leggibile(time.time() - dal)})" if dal else ""
+    # manuale_dal blocca l'automatismo della quota per il resto della giornata UTC: senza,
+    # con la quota bassa la modalita' essenziale si riaccenderebbe al ciclo successivo e questo
+    # comando non varrebbe niente.
+    MODALITA_NOTIFICHE = {"essenziale": False, "dal": 0, "ultimo_promemoria": 0,
+                          "origine": "manuale", "manuale_dal": time.time()}
     salva_modalita(MODALITA_NOTIFICHE)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "🔔 Modalità completa ripristinata: tornano le notifiche di soglia normali."}, timeout=5)
+        json={"chat_id": chat_id, "text": f"🔔 Modalità completa ripristinata{durata}: tornano le notifiche di soglia normali."}, timeout=5)
 
 
 def cmd_testpreferiti(chat_id):
@@ -4885,13 +5267,13 @@ def cmd_coperturaleghe(chat_id):
     if escluse:
         righe.append("\n".join(escluse) + "\n")
     if sorvegliate:
-        righe.append("*Con giornate senza dati:*\n" + "\n".join(sorvegliate) + "\n")
+        righe.append("Con giornate senza dati:\n" + "\n".join(sorvegliate) + "\n")
     if pulite:
         # Le leghe a posto sono la maggioranza e non aggiungono informazione: se ne mostra un
         # campione, il totale basta a sapere che sono seguite.
         mostrate = pulite[:15]
         coda = f"\n…e altre {len(pulite) - len(mostrate)}" if len(pulite) > len(mostrate) else ""
-        righe.append(f"*Regolari ({len(pulite)}):*\n" + "\n".join(mostrate) + coda)
+        righe.append(f"Regolari ({len(pulite)}):\n" + "\n".join(mostrate) + coda)
 
     invia_messaggio_telegram("\n".join(righe), chat_id=chat_id)
 
@@ -5029,6 +5411,10 @@ def cmd_diagnostica(chat_id):
     else:
         testo += "\n\n✅ Nessuna anomalia rilevata in questo controllo."
 
+    # La diagnostica serve a rispondere a "perché non ricevo niente?": se la risposta è la modalità
+    # essenziale, dirlo qui evita di andare a cercare guasti nella pipeline che non ci sono.
+    testo += nota_modalita_essenziale(prefisso="\n\n")
+
     for i in range(0, len(testo), 3800):
         pezzo = testo[i:i + 3800]
         risposta = requests.post(
@@ -5036,6 +5422,15 @@ def cmd_diagnostica(chat_id):
             json={"chat_id": chat_id, "text": pezzo}, timeout=10)
         if risposta.status_code != 200:
             log(f"Errore invio diagnostica: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
+def cmd_legenda(chat_id):
+    """La legenda dei passaggi della pipeline, su richiesta.
+
+    Prima veniva appesa in coda a OGNI diagnostica automatica: 3600 caratteri - il 95% di un
+    messaggio Telegram - identici ogni volta, spesso davanti a una riga sola di anomalia. Il
+    contenuto serve, la ripetizione no: qui resta disponibile quando la si vuole leggere."""
+    invia_messaggio_telegram(LEGENDA_DIAGNOSTICA, chat_id=chat_id)
 
 
 def cmd_apiusage(chat_id):
@@ -5135,7 +5530,7 @@ def cmd_uptime(chat_id):
         invia_messaggio_telegram(
             "UptimeRobot non è collegato.\n\n"
             "Serve la variabile d'ambiente UPTIMEROBOT_API_KEY su Render "
-            "(Environment → Add Environment Variable), con una chiave *read-only* presa da "
+            "(Environment → Add Environment Variable), con una chiave read-only presa da "
             "UptimeRobot → Integrations & API → API.\n\n"
             "Senza, il resto del bot funziona normalmente: cambia solo che questo comando non ha "
             "niente da leggere.", chat_id=chat_id)
@@ -5176,10 +5571,12 @@ def cmd_uptime(chat_id):
             chat_id=chat_id)
         return
 
-    righe = ["📡 *Disponibilità vista da fuori* (UptimeRobot)"]
+    # Niente asterischi di grassetto: i messaggi partono senza parse_mode (il Markdown spezzava gli
+    # invii con underscore e trattini nei nomi), quindi qui si vedrebbero come simboli.
+    righe = ["📡 Disponibilità vista da fuori (UptimeRobot)"]
     for m in monitor:
         emoji, descrizione = STATI_UPTIMEROBOT.get(m.get("status"), ("❔", "stato sconosciuto"))
-        righe.append(f"\n{emoji} *{m.get('friendly_name', 'senza nome')}* — {descrizione}")
+        righe.append(f"\n{emoji} {m.get('friendly_name', 'senza nome')} — {descrizione}")
 
         # Le tre percentuali arrivano in un'unica stringa "99.9-99.8-99.7" nell'ordine chiesto
         # sopra (1-7-30 giorni). Se l'account non le fornisce si salta la riga invece di stampare
@@ -5203,8 +5600,15 @@ def cmd_uptime(chat_id):
         else:
             righe.append("   Nessun disservizio negli ultimi eventi registrati")
 
-    righe.append("\n_Controllo ogni 5 minuti dall'esterno: è il solo modo per sapere se il bot è "
-                 "stato irraggiungibile: mentre era giù non stava girando per accorgersene._")
+    righe.append("\nControllo ogni 5 minuti dall'esterno: è il solo modo per sapere se il bot è "
+                 "stato irraggiungibile, perché mentre era giù non stava girando per accorgersene.")
+
+    # "Raggiungibile, 100% di uptime" e nessuna notifica in chat sono due fatti che insieme fanno
+    # sospettare un guasto silenzioso. Quando la spiegazione è la modalità essenziale, va detta
+    # proprio qui: è la schermata che si guarda quando si sospetta che il bot sia morto.
+    nota_modalita = nota_modalita_essenziale()
+    if nota_modalita:
+        righe.append(nota_modalita)
     invia_messaggio_telegram("\n".join(righe), chat_id=chat_id)
 
 
@@ -5416,7 +5820,7 @@ def cmd_status(chat_id, query):
     if not trovate:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'"}, timeout=5)
         return
     for f in trovate:
         # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
@@ -5520,7 +5924,7 @@ def cmd_status(chat_id, query):
                     log(f"Errore invio grafico /status: {e}")
                     requests.post(
                         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                        json={"chat_id": chat_id, "text": msg_text}, timeout=5)
                 finally:
                     try:
                         os.remove(foto_path)
@@ -5529,7 +5933,7 @@ def cmd_status(chat_id, query):
             else:
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                    json={"chat_id": chat_id, "text": msg_text}, timeout=5)
         except Exception as e:
             squadre_id = (
                 f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
@@ -5587,7 +5991,7 @@ def invia_momentum_partita(chat_id, fid, home, away, league, minuto, score_h, sc
             log(f"Errore invio grafico momentum: {e}")
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg_text, "parse_mode": "Markdown"}, timeout=5)
+                json={"chat_id": chat_id, "text": msg_text}, timeout=5)
         finally:
             try:
                 os.remove(foto_path)
@@ -5617,7 +6021,7 @@ def cmd_momentum(chat_id, query):
     if not trovate:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'", "parse_mode": "Markdown"}, timeout=5)
+            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'"}, timeout=5)
         return
 
     for f in trovate:
@@ -6799,9 +7203,10 @@ def invia_report_intensita_automatico(partite_valide, notifiche_attive=True):
 #   quelle leghe). Non sono più comandi Telegram: le soglie si controllano nel codice (SOGLIA_*
 #   vicino a STRATEGIE).
 #
-# Versione mandata su Telegram sotto (parse_mode Markdown): niente underscore o parentesi quadre,
-# altrimenti Telegram prova a interpretarli come corsivo/link e può rifiutare il messaggio intero
-# con un errore di parsing invece di consegnarlo.
+# Questo testo era stato scritto evitando underscore e parentesi quadre perche' i messaggi
+# partivano con parse_mode Markdown e Telegram poteva rifiutarli. Il vincolo non c'e' piu': i
+# messaggi vanno in testo semplice, quindi si puo' scrivere quello che serve. Il testo resta com'e'
+# perche' si legge bene, ma non e' piu' obbligato a esserlo.
 LEGENDA_DIAGNOSTICA = (
     "Legenda passaggi pipeline (dove può fermarsi, come intervenire):\n"
     "CHIAMATE API: una parte delle richieste ad API-Football sta fallendo. Il messaggio riporta "
@@ -7060,11 +7465,13 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             evidenza_non_copertura = stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE
             if esito_stats in ("vuote", "errore") and evidenza_non_copertura:
                 categoria = "COPERTURA STATISTICHE"
+                # Il "cosa vuol dire" sta nella legenda (/legenda), non qui: ripetuto per ogni
+                # partita segnalata erano 149 caratteri a testa, e in una diagnostica da 17 righe
+                # facevano da soli piu' di 2500 caratteri di testo identico.
                 testo_anomalia = (
-                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
-                    f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
-                    f"seguita e negli shadow-log, ma non manda notifiche - gol compresi - finché "
-                    f"l'API non pubblica i primi dati.")
+                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica "
+                    f"statistiche per questa partita (al {minuto_api}') - resta seguita, "
+                    f"ma non manda notifiche, gol compresi")
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
@@ -7088,9 +7495,9 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 trovate[categoria] = testo_anomalia
             else:
                 solo_log["STATISTICHE IN RITARDO"] = (
-                    f"STATISTICHE IN RITARDO - {home}-{away}: l'API non ha ancora pubblicato statistiche "
-                    f"al {minuto_api}'. Sotto il {MINUTO_MINIMO_VERDETTO_STATISTICHE}' non è un verdetto "
-                    f"di non copertura: la partita intanto resta muta.")
+                    f"STATISTICHE IN RITARDO - {home}-{away}: l'API non ha ancora pubblicato "
+                    f"statistiche al {minuto_api}' (sotto il {MINUTO_MINIMO_VERDETTO_STATISTICHE}' "
+                    f"non è un verdetto)")
 
         quote = quote_1x2_per_fixture(fid)
         ultimo_val = stato.get("ultimo_snapshot_valore")
@@ -7148,10 +7555,14 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             f"(già notificate, o troppo presto per essere un verdetto).")
         return
 
+    # La legenda NON va nel messaggio: sono 3600 caratteri - il 95% di un messaggio Telegram -
+    # ripetuti identici ad ogni diagnostica, davanti a righe che spesso sono una sola. Chi legge
+    # vuole sapere cosa e' successo, non ripassare ogni volta come funziona la pipeline. Resta
+    # disponibile su richiesta con /legenda, e resta nei log di Render con il dettaglio completo.
     testo = (
         "🔍 Diagnostica automatica - trovate anomalie nella pipeline dati:\n\n"
         + "\n".join(f"- {a}" for a in anomalie_nuove)
-        + "\n\n" + LEGENDA_DIAGNOSTICA
+        + "\n\nSpiegazione dei passaggi: /legenda"
     )
     for i in range(0, len(testo), 3800):
         invia_messaggio_telegram(testo[i:i + 3800])
@@ -7572,9 +7983,11 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
         return False, "rotta gol spenta (entrano solo le partite dominate)"
     if minuto is None:
         return False, "minuto non disponibile"
-    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+    limiti = limiti_ingresso_preferiti()
+    if len(FAVORITE_MATCHES) >= limiti["tetto"]:
         # Non si marca la partita come già valutata: appena si libera un posto torna in gioco.
-        return False, f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+        return False, (f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {limiti['tetto']}"
+                       + (", modalità essenziale)" if limiti["essenziale"] else ")"))
 
     gol_totali = score_home + score_away
     scarto = abs(score_home - score_away)
@@ -7582,14 +7995,14 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
     # messaggio di ingresso finivano scritti due volte nella stessa riga.
     if gol_totali < SOGLIA_GOL_AUTO_PREFERITI:
         return False, f"{gol_totali} gol (ne servono {SOGLIA_GOL_AUTO_PREFERITI})"
-    if minuto > MINUTO_GOL_AUTO_PREFERITI:
-        return False, f"i {gol_totali} gol sono arrivati dopo il {MINUTO_GOL_AUTO_PREFERITI}'"
+    if minuto > limiti["minuto_gol"]:
+        return False, f"i {gol_totali} gol sono arrivati dopo il {limiti['minuto_gol']}'"
     # Lo scarto decide se la partita è ancora aperta: con 2 gol passa l'1-1 ma non il 2-0, con 3
     # gol passa il 2-1. Un 2-0 al 20' non è una partita viva, è una partita che si sta chiudendo.
     # Copre da sé anche la goleada: con al massimo un gol di scarto non ci si arriva mai.
     if scarto > SCARTO_MAX_AUTO_PREFERITI:
         return False, f"{scarto} gol di scarto, partita già indirizzata"
-    return True, (f"{gol_totali} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' "
+    return True, (f"{gol_totali} gol entro il {limiti['minuto_gol']}' "
                   f"con la partita ancora aperta")
 
 
@@ -7630,6 +8043,12 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
         stato["dominio_minuto_al_max"] = minuto
         stato["dominio_situazione_al_max"] = dominio["situazione"]
 
+    # Il contatore di isteresi resta ancorato alla soglia NORMALE anche in modalita' essenziale:
+    # finisce nello shadow-log del dominio, che serve a tarare le soglie confrontando lo storico, e
+    # cambiargli metro a meta' renderebbe incomparabili i dati gia' raccolti. La stretta della
+    # modalita' essenziale arriva piu' sotto, dove si chiede una quota/volume piu' alti adesso e
+    # piu' cicli consecutivi.
+    limiti = limiti_ingresso_preferiti()
     sopra_soglia = (quota is not None
                     and quota >= SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI
                     and volume >= VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI)
@@ -7648,12 +8067,13 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
         return False, "auto-preferiti disattivati"
     if minuto is None:
         return False, "minuto non disponibile"
-    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+    if len(FAVORITE_MATCHES) >= limiti["tetto"]:
         # Come la rotta gol: non si marca la partita come gia' valutata, appena si libera un posto
         # torna in gioco. Il tetto e' lo stesso identico dei preferiti manuali e della rotta gol,
         # non uno dedicato: e' li' per proteggere il numero di chiamate API, e le chiamate non
         # sanno da quale porta sia entrata la partita.
-        return False, f"gia' {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+        return False, (f"gia' {len(FAVORITE_MATCHES)} preferiti attivi (max {limiti['tetto']}"
+                       + (", modalita' essenziale)" if limiti["essenziale"] else ")"))
     # Goleada: qui serve un controllo esplicito, mentre la rotta gol la evita da sola (con al
     # massimo un gol di scarto non ci si arriva mai). Una squadra puo' benissimo dominare all'85%
     # mentre e' gia' avanti 4-0, ed e' proprio la partita che il resto del bot smette di notificare.
@@ -7661,13 +8081,13 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
         return False, f"{abs(score_home - score_away)} gol di scarto, partita gia' decisa"
     if quota is None:
         return False, "nessun dominio misurabile (statistiche assenti o troppo poco gioco)"
-    if not sopra_soglia:
+    coda_essenziale = " in modalita' essenziale" if limiti["essenziale"] else ""
+    if not sopra_soglia or quota < limiti["quota"] or volume < limiti["volume"]:
         return False, (f"dominio {quota}% su volume {volume} "
-                       f"(servono {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}% e volume "
-                       f"{VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI})")
-    if cicli < CICLI_DOMINIO_PER_AUTO_PREFERITI:
+                       f"(servono {limiti['quota']}% e volume {limiti['volume']}{coda_essenziale})")
+    if cicli < limiti["cicli"]:
         return False, (f"dominio {quota}% da {cicli} cicli "
-                       f"(ne servono {CICLI_DOMINIO_PER_AUTO_PREFERITI} di fila)")
+                       f"(ne servono {limiti['cicli']} di fila{coda_essenziale})")
 
     chi = "la squadra di casa" if dominio["lato"] == 0 else "la squadra ospite"
     coda = {"sotto": "e sta perdendo", "bloccata": "e non segna", "avanti": "ed e' avanti"}[dominio["situazione"]]
@@ -7875,7 +8295,99 @@ def _shadow_log_ha_snapshot_aperti(fixture_id):
     return bool(stato.get("ultimo_snapshot_valore") or stato.get("ultimo_snapshot_strategie"))
 
 
-def chiudi_shadow_log_partite_sparite(fixture_ids):
+def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, eventi, notifiche_attive):
+    """Manda il recap di fine partita per una partita sparita dal feed PRIMA che il bot la vedesse
+    con status FT - il caso comune, non quello raro.
+
+    Il ramo "RISULTATO FINALE" dentro processa_partita() scatta solo se l'endpoint live restituisce
+    ANCORA la partita, con status FT, per almeno un ciclo. In produzione questo non e' praticamente
+    mai vero: l'endpoint smette di restituire una partita conclusa quasi subito, quindi quel ramo
+    non vede mai lo stato FT. Prova diretta dai log: zero "RISULTATO FINALE" dal 20/08 al 01/09
+    (12 giorni), mentre "Shadow-log chiusi a fine partita" compare regolarmente piu' volte al
+    giorno - le partite finiscono, il bot lo sa (abbastanza da chiudere lo shadow-log), ma
+    all'utente non arrivava nessun messaggio di chiusura. Da cui "non vedo risultati scritti".
+
+    Meno ricco del recap "in diretta": niente statistiche finali ne' confronto 1°T/2°T, perche'
+    quei dati non sono piu' recuperabili una volta che la partita e' sparita dal live, e chiederli
+    costerebbe una chiamata in piu' per ogni chiusura. Copre quello che conta di piu': risultato,
+    marcatori, cartellini rossi, rigori - tutti ricavabili dagli eventi che questa funzione ha
+    comunque gia' chiesto per lo shadow-log strategie, senza spendere nulla in piu'.
+
+    Stessa distinzione muta/non muta del ramo in diretta: una partita silenziata riceve il
+    riepilogo compatto "cos'e' successo dopo il silenzio", non il recap completo - tacere una
+    partita significa non volerne piu' sapere i dettagli minuto per minuto, non sparire del
+    tutto a fine gara."""
+    if not notifiche_attive:
+        return
+    stato = stato_partite.get(fixture_id, {})
+    home = stato.get("home", "?")
+    away = stato.get("away", "?")
+    league_name = stato.get("league", "")
+    league_country = stato.get("league_country", "")
+
+    goals = extract_goals(eventi) if eventi else []
+    goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
+    cartellini_rossi = extract_cartellini_rossi(eventi) if eventi else []
+    rigori = extract_rigori(eventi) if eventi else []
+
+    muted_data = SILENCED_MATCHES.get(str(fixture_id))
+    if muted_data:
+        diff_h = score_home - muted_data.get("score_home", 0)
+        diff_a = score_away - muted_data.get("score_away", 0)
+        muted_minute = muted_data.get("muted_at_minute", 0)
+
+        after_text = ""
+        if diff_h > 0:
+            after_text += f" +{diff_h}CASA"
+        if diff_a > 0:
+            after_text += f" +{diff_a}OSP"
+
+        goals_after = [g for g in goals if g["minute"] > muted_minute]
+        minutes_text = ""
+        for g in goals_after:
+            team_emoji = "CASA" if g["team"] == home else "OSP"
+            minutes_text += f" {g['minute']}'{team_emoji}"
+        if not minutes_text:
+            minutes_text = " Nessun gol dopo il silenzio"
+
+        messaggio = (
+            f"{home} vs {away}\n"
+            f"{formatta_lega(league_name, league_country)}\n"
+            f"Risultato finale: {score_home} - {score_away}{after_text}\n"
+            f"Silenziato al {muted_minute}'\n"
+            f"Gol dopo:{minutes_text}"
+        )
+        SILENCED_MATCHES.pop(str(fixture_id), None)
+        save_silenced(SILENCED_MATCHES)
+    else:
+        goals_text = testo_primo_ultimo_gol(goals, home, away)
+        cartellini_finale_text = ""
+        if cartellini_rossi:
+            righe = [f"🟥 {c['minute']}' {c['player']} ({c['team']})" for c in cartellini_rossi]
+            cartellini_finale_text = "Cartellini rossi:\n" + "\n".join(righe) + "\n"
+        rigori_finale_text = ""
+        if rigori:
+            righe = []
+            for r in rigori:
+                esito_emoji = "⚽" if r["esito"] == "segnato" else "❌"
+                righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
+            rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
+
+        messaggio = (
+            f"{home} vs {away}\n"
+            f"{formatta_lega(league_name, league_country)}\n"
+            f"RISULTATO FINALE\n\n"
+            f"{score_home} - {score_away}\n"
+            f"{goals_text}"
+            f"{cartellini_finale_text}"
+            f"{rigori_finale_text}"
+        )
+
+    chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
+    invia_messaggio_telegram(messaggio, chat_id=chat_destinazione)
+
+
+def chiudi_shadow_log_partite_sparite(fixture_ids, notifiche_attive):
     """Scrive il "risultato_finale" delle partite appena sparite dal feed live.
 
     L'esito veniva registrato SOLO dentro processa_partita, nel ramo
@@ -7934,6 +8446,7 @@ def chiudi_shadow_log_partite_sparite(fixture_ids):
                 f"risultato registrato senza i minuti dei gol")
         registra_shadow_log_strategie_risultato(
             fid, score_home, score_away, extract_goals(eventi) if eventi else [])
+        invia_recap_finale_partita_sparita(fid, score_home, score_away, eventi, notifiche_attive)
         chiuse += 1
 
     if chiuse or rimandate:
@@ -8116,9 +8629,25 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
                 f"goleada: {diff_gol} gol di scarto (oltre {SOGLIA_GOLEADA_STOP_NOTIFICHE})"
                 + (", gol compresi" if evento_forzato else ""))
 
+    # MODALITÀ ESSENZIALE: si seguono DUE partite, non tutte quelle che passano.
+    #
+    # Sta prima del passaggio d'ufficio per gol ed eventi forzati, e deve stare lì: altrimenti
+    # "solo 2 partite" non vorrebbe dire niente, perché i gol di tutte le altre continuerebbero ad
+    # arrivare come prima ed è esattamente il flusso che si sta chiudendo. Il taglio non è
+    # arbitrario: le partite che restano sono quelle promosse dalle fasce strette di
+    # limiti_ingresso_preferiti(), cioè le migliori per dominio.
+    #
+    # Cosa NON cambia: la partita continua a essere seguita e ad alimentare gli shadow-log, come
+    # per ogni altra notifica soppressa qui dentro. Tacere non vuol dire smettere di guardare.
+    if MODALITA_NOTIFICHE.get("essenziale") and str(fixture_id) not in FAVORITE_MATCHES:
+        return _verdetto_notifica(
+            fixture_id, False,
+            f"modalità essenziale: si seguono solo le {MAX_PREFERITI_MODALITA_ESSENZIALE} partite "
+            f"migliori, questa non è fra quelle")
+
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
-    # passare).
+    # passare, per le partite selezionate qui sopra).
     if gol_appena_segnato or recupero_lungo:
         return _verdetto_notifica(
             fixture_id, True,
@@ -8128,6 +8657,24 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     # sospeso finché non torna la modalità completa.
     if MODALITA_NOTIFICHE.get("essenziale"):
         return _verdetto_notifica(fixture_id, False, "modalità essenziale attiva")
+
+    # FINALE DI PARTITA GIA' DECISA: dominio e preferiti tacciono.
+    #
+    # Sta DOPO il ramo dei gol (che passano sempre, molto piu' in alto) e PRIMA sia del ramo dei
+    # preferiti sia del gate del dominio: sono esattamente i due percorsi da fermare, e metterlo
+    # qui li copre entrambi con una riga sola invece di ripetere la condizione in due punti che
+    # possono divergere.
+    #
+    # Il minuto 90 comprende anche il recupero del secondo tempo: l'API tiene "elapsed" fermo a 90
+    # e mette i minuti extra in un campo a parte, quindi un 90+4 arriva qui come 90.
+    if (minuto is not None and score_home is not None and score_away is not None
+            and MINUTO_INIZIO_STOP_FINALE <= minuto <= MINUTO_FINE_STOP_FINALE
+            and abs(score_home - score_away) > SCARTO_STOP_FINALE):
+        return _verdetto_notifica(
+            fixture_id, False,
+            f"finale di partita decisa: {abs(score_home - score_away)} gol di scarto al {minuto}' "
+            f"(niente dominio o preferiti fra il {MINUTO_INIZIO_STOP_FINALE}' e il "
+            f"{MINUTO_FINE_STOP_FINALE}' oltre {SCARTO_STOP_FINALE} gol)")
 
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
@@ -9193,9 +9740,24 @@ def processa_partita(fixture, notifiche_attive=True):
                         motivo_dominio)
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
+        # Il recupero lungo fa scattare una notifica solo se la partita e' ancora in bilico: su un
+        # 3-0 quanti minuti si giocheranno ancora non cambia niente di quello che si puo' fare.
+        # Non si tocca "recupero_da_segnalare": se la partita notifica per un altro motivo (un gol,
+        # una soglia), la riga del recupero resta nel testo. Qui si toglie solo il potere di essere
+        # LUI a far partire il messaggio.
+        # Se il punteggio manca si lascia passare come prima: senza il dato non si puo' giudicare, e
+        # perdere una notizia vale piu' di una notifica in piu'.
+        if score_home is None or score_away is None:
+            recupero_notificabile = recupero_da_segnalare is not None
+        else:
+            recupero_notificabile = (recupero_da_segnalare is not None
+                                     and abs(score_home - score_away) <= SCARTO_MAX_NOTIFICA_RECUPERO)
+        if recupero_da_segnalare and not recupero_notificabile:
+            log(f"    ⏱ Recupero non notificato: {abs(score_home - score_away)} gol di scarto "
+                f"(massimo {SCARTO_MAX_NOTIFICA_RECUPERO})")
         if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict,
                                gol_appena_segnato=evento_forzato,
-                               recupero_lungo=recupero_da_segnalare is not None,
+                               recupero_lungo=recupero_notificabile,
                                score_home=score_home, score_away=score_away,
                                current_stats=current_stats):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
@@ -9478,13 +10040,13 @@ def processa_partita(fixture, notifiche_attive=True):
         log(f"Errore processa_partita: {e}")
 
 
-def pulisci_partite_terminate(fixture_ids_live):
+def pulisci_partite_terminate(fixture_ids_live, notifiche_attive):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
     # Prima di cancellare lo stato: chi ha snapshot aperti va chiuso con il suo risultato finale,
     # altrimenti tutto il campione raccolto durante la partita resta orfano per sempre. Le partite
     # rimandate (tetto di chiamate raggiunto, o chiamata fallita) NON si cancellano: restano qui e
     # si riprovano al giro dopo.
-    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere)
+    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere, notifiche_attive)
     if rimandate:
         ids_da_rimuovere = [fid for fid in ids_da_rimuovere if fid not in rimandate]
     for fid in ids_da_rimuovere:
@@ -9562,6 +10124,7 @@ def imposta_comandi_telegram():
         {"command": "shadowlogstrategie", "description": "Dati raccolti in background sull'efficacia delle strategie"},
         {"command": "shadowlogdominio", "description": "A che quota di dominio arrivano le partite osservate"},
         {"command": "diagnostica", "description": "Controllo dal vivo di ogni partita live"},
+        {"command": "legenda", "description": "Cosa vogliono dire le voci della diagnostica"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "apiusage", "description": "Chiamate API-Football fatte al giorno"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},
@@ -9582,7 +10145,10 @@ def imposta_comandi_telegram():
 if __name__ == "__main__":
     log("=== Bot avviato ===")
     imposta_comandi_telegram()
-    invia_messaggio_telegram("Bot avviato\nMonitoraggio partite live in corso...")
+    # La modalità essenziale sopravvive ai riavvii (è su disco): senza ricordarla qui, un deploy
+    # ripartiva annunciando "monitoraggio in corso" mentre quasi tutte le notifiche erano spente.
+    invia_messaggio_telegram("Bot avviato\nMonitoraggio partite live in corso..."
+                             + nota_modalita_essenziale())
 
     while True:
         # Tutto il corpo del ciclo è protetto da questo try/except: prima non lo era, quindi
@@ -9623,9 +10189,49 @@ if __name__ == "__main__":
             # alla validazione futura, sia il bug delle partite che finiscono a cavallo dell'orario di
             # stop restando orfane nello shadow-log (nessun risultato finale mai registrato).
             notifiche_attive = dentro_orario_attivo()
+            fascia_oraria = (f"{ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
+                             f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}")
+            if not notifiche_attive and PAUSA_FUORI_ORARIO_ATTIVO:
+                # Pausa vera: si esce dal giro prima di qualunque chiamata. Il battito continua,
+                # altrimenti l'endpoint di salute direbbe "BOT FERMO" per tutta la notte, e usa
+                # lavora=False perche' qui non completare un giro e' la cosa giusta, non un guasto.
+                segna_battito(f"in pausa fuori fascia oraria ({fascia_oraria})", lavora=False)
+                log(f"Fuori dall'orario attivo ({fascia_oraria}): bot in pausa, nessuna chiamata API. "
+                    f"Attesa {INTERVALLO_CICLO_MORTO}s...")
+                time.sleep(INTERVALLO_CICLO_MORTO)
+                continue
             if not notifiche_attive:
-                log(f"Fuori dall'orario attivo ({ORARIO_ATTIVO_INIZIO_ORA:02d}:{ORARIO_ATTIVO_INIZIO_MINUTO:02d}-"
-                    f"{ORARIO_ATTIVO_FINE_ORA:02d}:{ORARIO_ATTIVO_FINE_MINUTO:02d}): monitoraggio silenzioso, nessuna notifica.")
+                log(f"Fuori dall'orario attivo ({fascia_oraria}): monitoraggio silenzioso, nessuna notifica.")
+
+            # Modalità essenziale automatica quando la quota giornaliera sta finendo. Sta PRIMA del
+            # promemoria qui sotto per non annunciare come "ancora attiva" una modalità che in
+            # questo stesso giro sta per essere spenta.
+            #
+            # L'annuncio segue notifiche_attive come tutto il resto: il cambio di modalità avviene
+            # comunque, anche di notte - lì serve a risparmiare chiamate, ed è proprio quando la
+            # quota si esaurisce - ma il messaggio parte solo in fascia oraria. Lo stato resta
+            # comunque leggibile in /piano, /diagnostica, /uptime e nel messaggio "Bot attivo".
+            annuncio_modalita = aggiorna_modalita_da_quota()
+            if annuncio_modalita and notifiche_attive:
+                invia_messaggio_telegram(annuncio_modalita)
+
+            # Promemoria della modalità essenziale, stesso ritmo di quello della pausa manuale: è
+            # una modalità che si accende e resta accesa in silenzio, e senza un richiamo periodico
+            # è già rimasta attiva per giorni facendo sembrare il bot muto per un guasto. Solo
+            # dentro la fascia oraria: un promemoria alle 4 di notte sarebbe solo un altro disturbo.
+            if notifiche_attive and MODALITA_NOTIFICHE.get("essenziale"):
+                adesso_modalita = time.time()
+                if adesso_modalita - (MODALITA_NOTIFICHE.get("ultimo_promemoria") or 0) >= INTERVALLO_PROMEMORIA_MODALITA:
+                    dal_modalita = MODALITA_NOTIFICHE.get("dal") or 0
+                    da_quanto_modalita = (f" da {_durata_leggibile(adesso_modalita - dal_modalita)}"
+                                          if dal_modalita else "")
+                    invia_messaggio_telegram(
+                        f"🔕 Modalità essenziale ancora attiva{da_quanto_modalita}: stai ricevendo solo "
+                        f"gol, rossi, rigori e recupero lungo. Invia /modalitacompleta per riavere "
+                        f"tutte le notifiche.")
+                    MODALITA_NOTIFICHE["ultimo_promemoria"] = adesso_modalita
+                    salva_modalita(MODALITA_NOTIFICHE)
+                    log(f"Promemoria modalità essenziale inviato (attiva{da_quanto_modalita}).")
 
             aggiorna_piano_giornata_se_serve()
             aggiorna_quote_prepartita_imminenti()
@@ -9677,11 +10283,14 @@ if __name__ == "__main__":
                 f for f in partite
                 if fixture_in_whitelist(f)
             ]
-            partite_valide = [f for f in in_whitelist if not partita_tra_giovanili(f)]
+            partite_valide = [f for f in in_whitelist
+                              if not partita_tra_giovanili(f) and not partita_femminile(f)]
             # Le giovanili si contano a parte invece di sparire dentro il totale: se un giorno il
             # filtro dovesse escludere una partita vera, il numero lo mostra subito invece di
             # lasciar credere che quella partita non fosse live.
-            escluse_giovanili = len(in_whitelist) - len(partite_valide)
+            escluse_giovanili = sum(1 for f in in_whitelist if partita_tra_giovanili(f))
+            escluse_femminili = sum(1 for f in in_whitelist
+                                    if partita_femminile(f) and not partita_tra_giovanili(f))
             # "0 totali, 0 valide" da solo e' ambiguo, ed e' costato tempo a interpretarlo: la
             # stessa riga usciva sia quando non c'era davvero nessuna partita, sia quando la
             # chiamata era fallita e get_partite_live() aveva restituito una lista vuota. Il 29/08,
@@ -9692,18 +10301,24 @@ if __name__ == "__main__":
                     "non vuol dire che non ci siano partite in corso")
             else:
                 log(f"Partite live: {len(partite)} totali, {len(partite_valide)} valide"
-                    + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else ""))
+                    + (f" ({escluse_giovanili} escluse: squadre giovanili)" if escluse_giovanili else "")
+                    + (f" ({escluse_femminili} escluse: squadre femminili)" if escluse_femminili else ""))
 
             if notifiche_attive and (ciclo_numero == 1 or ciclo_numero % 10 == 0):
                 if chiamata_partite_live_fallita:
                     invia_messaggio_telegram(
                         f"Bot attivo - Ciclo #{ciclo_numero}\n"
                         f"Ultima chiamata API fallita (vedi errore sopra): dato partite live non affidabile"
+                        + nota_modalita_essenziale()
                     )
                 else:
+                    # È il messaggio che dice "sto lavorando" mentre in chat non arriva nulla:
+                    # se il motivo è la modalità essenziale, deve dirlo qui invece di lasciar
+                    # credere che semplicemente non stia succedendo niente in campo.
                     invia_messaggio_telegram(
                         f"Bot attivo - Ciclo #{ciclo_numero}\n"
                         f"Partite live monitorate: {len(partite_valide)}"
+                        + nota_modalita_essenziale()
                     )
 
             # Si itera solo sulle partite valide (non su tutte le partite live del mondo): la pausa
@@ -9783,7 +10398,7 @@ if __name__ == "__main__":
                 log("Chiamata partite live fallita: salto la pulizia delle partite terminate "
                     "(un elenco vuoto qui non significa che le partite siano finite)")
             else:
-                pulisci_partite_terminate(fixture_ids_live)
+                pulisci_partite_terminate(fixture_ids_live, notifiche_attive)
             salva_stato_partite(stato_partite)
             # Un solo messaggio per ciclo con tutte le partite dal feed congelato, invece
             # di uno per partita mentre si scorre l'elenco.
@@ -9815,11 +10430,9 @@ if __name__ == "__main__":
             # dei preferiti rallenta: costano 3 chiamate a giro, quindi sono proprio loro a bruciare
             # la quota piu' in fretta.
             fattore = fattore_riserva_quota()
-            nota_quota = ""
+            nota_quota = nota_riserva_quota(fattore)
             if fattore > 1.0:
                 prossimo_intervallo = int(prossimo_intervallo * fattore)
-                nota_quota = (f", quota quasi finita ({ULTIMA_QUOTA_API.get('residuo')} richieste rimaste): "
-                              f"ciclo rallentato x{fattore:.1f} per arrivare a fine giornata")
             log(f"Attesa {prossimo_intervallo}s ({'finestra attiva' if ciclo_attivo else 'nessuna finestra attiva, ciclo rallentato'}{', preferito live: ciclo accelerato' if preferito_live else ''}{nota_quota})...")
             # Ultima riga prima dell'attesa: il giro è arrivato in fondo senza eccezioni.
             segna_giro_completato()
