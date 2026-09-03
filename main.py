@@ -367,6 +367,34 @@ VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI = 16
 # si azzera appena scende), cioe' ~9 minuti di gioco a ciclo attivo da 180s.
 CICLI_DOMINIO_PER_AUTO_PREFERITI = 3
 
+# --- Le stesse fasce, ma per la MODALITA' ESSENZIALE: poche partite, e solo le migliori.
+#
+# In modalita' essenziale il bot non deve seguire tutto quello che passa: deve tenere in mano due
+# partite sole, quelle in cui sta succedendo davvero qualcosa. Non e' un secondo meccanismo, sono
+# gli stessi tre assi di sopra (tetto, quota, volume, isteresi) con i numeri stretti.
+#
+# I numeri NON sono a occhio: vengono dalle 62 promozioni reali registrate nei log dal 30/08 al
+# 03/09 (analisi in ritroso_modalita_essenziale.py). La distribuzione delle quote di dominio
+# all'ingresso ha mediana 84% e minimo 76%, quindi la soglia a 85% tiene esattamente la meta'
+# migliore delle partite che oggi entrano: 30 su 62 invece di 62, cioe' 6 al giorno invece di 12.
+MAX_PREFERITI_MODALITA_ESSENZIALE = 2
+SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE = 85
+# Alzato insieme alla quota, per lo stesso motivo per cui i due assi vanno accoppiati sopra: fra le
+# promozioni osservate ce ne sono 8 al 100% di dominio, diverse arrivate prima del 25', cioe'
+# proprio i casi in cui la percentuale e' altissima perche' si e' giocato pochissimo (4 tiri a 0 fa
+# 100%). Con la sola quota alzata quelle passerebbero per prime, che e' il contrario di "le
+# migliori". Questo e' l'unico dei quattro numeri che il ritroso non puo' confermare: il volume
+# all'ingresso non finisce nei log, finisce solo nello shadow-log su disco.
+VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE = 20
+# Un ciclo in piu' di dominio ininterrotto (~3 minuti). Nei dati il 77% delle promozioni entra
+# esattamente al terzo ciclo, il minimo consentito: chiedere il quarto non le cancella - la maggior
+# parte ci arriverebbe poco dopo - ma scarta quelle in cui il dominio si sgonfia subito, che sono
+# le stesse partite che poi uscivano dai preferiti dopo pochi minuti senza aver detto niente.
+CICLI_DOMINIO_MODALITA_ESSENZIALE = 4
+# Rotta gol (oggi spenta da config): stessa idea, finestra piu' stretta. Due gol entro il 20'
+# invece che entro il 25'.
+MINUTO_GOL_MODALITA_ESSENZIALE = 20
+
 # Gate dominio sulle notifiche generali (chat principale, partite NON preferite): prima di
 # valutare le regole a volume grezzo (differenza tiri, partita attiva, refresh forzato, momentum
 # 15 min) si chiede se in questa partita STIA COMANDANDO QUALCUNO. Le regole restano identiche, ma
@@ -922,6 +950,11 @@ try:
     SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI = config.get("soglia_quota_dominio_auto_preferiti", SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI)
     VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI = config.get("volume_minimo_dominio_auto_preferiti", VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI)
     CICLI_DOMINIO_PER_AUTO_PREFERITI = config.get("cicli_dominio_per_auto_preferiti", CICLI_DOMINIO_PER_AUTO_PREFERITI)
+    MAX_PREFERITI_MODALITA_ESSENZIALE = config.get("max_preferiti_modalita_essenziale", MAX_PREFERITI_MODALITA_ESSENZIALE)
+    SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE = config.get("soglia_quota_dominio_modalita_essenziale", SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE)
+    VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE = config.get("volume_minimo_dominio_modalita_essenziale", VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE)
+    CICLI_DOMINIO_MODALITA_ESSENZIALE = config.get("cicli_dominio_modalita_essenziale", CICLI_DOMINIO_MODALITA_ESSENZIALE)
+    MINUTO_GOL_MODALITA_ESSENZIALE = config.get("minuto_gol_modalita_essenziale", MINUTO_GOL_MODALITA_ESSENZIALE)
     DOMINIO_GATE_NOTIFICHE_ATTIVO = config.get("dominio_gate_notifiche_attivo", DOMINIO_GATE_NOTIFICHE_ATTIVO)
     SOGLIA_QUOTA_DOMINIO_NOTIFICA = config.get("soglia_quota_dominio_notifica", SOGLIA_QUOTA_DOMINIO_NOTIFICA)
     UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO = config.get("un_aggiornamento_per_blocco_attivo", UN_AGGIORNAMENTO_PER_BLOCCO_ATTIVO)
@@ -1970,6 +2003,15 @@ def salva_modalita(stato):
 
 MODALITA_NOTIFICHE = carica_modalita()
 
+# Stampato qui e non insieme al resto della configurazione piu' in alto: lo stato della modalita'
+# vive su disco e si conosce solo dopo averlo letto. Ed e' una riga che serve: quando la modalita'
+# resta accesa, un riavvio deve dirlo subito nei log, non lasciarlo dedurre dal silenzio.
+print(f"Modalità essenziale: {'ATTIVA' if MODALITA_NOTIFICHE.get('essenziale') else 'spenta'} "
+      f"(quando attiva: max {MAX_PREFERITI_MODALITA_ESSENZIALE} partite insieme, quota >= "
+      f"{SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE}%, volume >= "
+      f"{VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE}, {CICLI_DOMINIO_MODALITA_ESSENZIALE} cicli "
+      f"consecutivi, gol entro il {MINUTO_GOL_MODALITA_ESSENZIALE}')", flush=True)
+
 
 def nota_modalita_essenziale(prefisso="\n"):
     """Riga da appendere ai messaggi di stato quando la modalità essenziale è accesa.
@@ -1985,8 +2027,39 @@ def nota_modalita_essenziale(prefisso="\n"):
         return ""
     dal = MODALITA_NOTIFICHE.get("dal") or 0
     da_quanto = f" da {_durata_leggibile(time.time() - dal)}" if dal else ""
-    return (f"{prefisso}🔕 Modalità essenziale attiva{da_quanto}: passano solo gol, rossi, rigori e "
-            f"recupero lungo. Invia /modalitacompleta per riavere tutte le notifiche.")
+    return (f"{prefisso}🔕 Modalità essenziale attiva{da_quanto}: solo le "
+            f"{MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, e di quelle solo gol, rossi, "
+            f"rigori e recupero lungo. Invia /modalitacompleta per riavere tutte le notifiche.")
+
+
+def limiti_ingresso_preferiti():
+    """Tetto e fasce di ingresso in vigore adesso: quelle normali, o quelle strette della modalità
+    essenziale.
+
+    Un unico posto da cui leggerle, invece di infilare un "se essenziale" dentro ognuna delle due
+    rotte: così le due rotte non possono divergere, e il motivo scritto nel log cita sempre la
+    soglia che ha davvero deciso, non quella di default.
+
+    NOTA sul contatore di isteresi: 'cicli' è quanti cicli consecutivi servono per promuovere, ma
+    il contatore continua a essere alimentato dalla soglia NORMALE anche in modalità essenziale.
+    È deliberato: quel contatore finisce nello shadow-log del dominio, che serve a tarare le soglie
+    guardando lo storico, e cambiargli significato a metà rovinerebbe il confronto con i dati già
+    raccolti. In modalità essenziale la stretta arriva quindi da due parti insieme - quota e volume
+    più alti nell'istante della promozione, più cicli consecutivi richiesti - senza toccare il
+    metro con cui i dati vengono misurati."""
+    if MODALITA_NOTIFICHE.get("essenziale"):
+        return {"tetto": MAX_PREFERITI_MODALITA_ESSENZIALE,
+                "quota": SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE,
+                "volume": VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE,
+                "cicli": CICLI_DOMINIO_MODALITA_ESSENZIALE,
+                "minuto_gol": MINUTO_GOL_MODALITA_ESSENZIALE,
+                "essenziale": True}
+    return {"tetto": MAX_PREFERITI_SIMULTANEI,
+            "quota": SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI,
+            "volume": VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI,
+            "cicli": CICLI_DOMINIO_PER_AUTO_PREFERITI,
+            "minuto_gol": MINUTO_GOL_AUTO_PREFERITI,
+            "essenziale": False}
 
 # =============================================================================
 # FIAMME - SOGLIE
@@ -4581,9 +4654,16 @@ def cmd_modalitaessenziale(chat_id):
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={
             "chat_id": chat_id,
-            "text": "🔕 Modalità essenziale attiva: da ora solo gol, cartellini rossi, rigori e "
-                    "recupero lungo. Le notifiche di soglia (tiri, momentum) sono sospese, anche "
-                    "per i preferiti. Invia /modalitacompleta per tornare come prima.\n"
+            "text": f"🔕 Modalità essenziale attiva: si seguono solo le "
+                    f"{MAX_PREFERITI_MODALITA_ESSENZIALE} partite migliori, e di quelle solo gol, "
+                    f"cartellini rossi, rigori e recupero lungo. Tutto il resto tace.\n"
+                    f"Per entrare ora serve un dominio più netto: almeno "
+                    f"{SOGLIA_QUOTA_DOMINIO_MODALITA_ESSENZIALE}% su volume "
+                    f"{VOLUME_MINIMO_DOMINIO_MODALITA_ESSENZIALE}, stabile per "
+                    f"{CICLI_DOMINIO_MODALITA_ESSENZIALE} cicli.\n"
+                    f"I preferiti già aperti restano fino a fine partita: il tetto vale sui nuovi "
+                    f"ingressi, non caccia via quelli in corso.\n"
+                    "Invia /modalitacompleta per tornare come prima.\n"
                     "Ogni 6 ore ti ricordo che è ancora accesa, e la trovi scritta in /piano, "
                     "/diagnostica, /uptime e nel messaggio periodico \"Bot attivo\": così non "
                     "resta accesa per giorni senza che te ne accorga."
@@ -7710,9 +7790,11 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
         return False, "rotta gol spenta (entrano solo le partite dominate)"
     if minuto is None:
         return False, "minuto non disponibile"
-    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+    limiti = limiti_ingresso_preferiti()
+    if len(FAVORITE_MATCHES) >= limiti["tetto"]:
         # Non si marca la partita come già valutata: appena si libera un posto torna in gioco.
-        return False, f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+        return False, (f"già {len(FAVORITE_MATCHES)} preferiti attivi (max {limiti['tetto']}"
+                       + (", modalità essenziale)" if limiti["essenziale"] else ")"))
 
     gol_totali = score_home + score_away
     scarto = abs(score_home - score_away)
@@ -7720,14 +7802,14 @@ def deve_aggiungere_automaticamente_ai_preferiti(minuto, score_home, score_away)
     # messaggio di ingresso finivano scritti due volte nella stessa riga.
     if gol_totali < SOGLIA_GOL_AUTO_PREFERITI:
         return False, f"{gol_totali} gol (ne servono {SOGLIA_GOL_AUTO_PREFERITI})"
-    if minuto > MINUTO_GOL_AUTO_PREFERITI:
-        return False, f"i {gol_totali} gol sono arrivati dopo il {MINUTO_GOL_AUTO_PREFERITI}'"
+    if minuto > limiti["minuto_gol"]:
+        return False, f"i {gol_totali} gol sono arrivati dopo il {limiti['minuto_gol']}'"
     # Lo scarto decide se la partita è ancora aperta: con 2 gol passa l'1-1 ma non il 2-0, con 3
     # gol passa il 2-1. Un 2-0 al 20' non è una partita viva, è una partita che si sta chiudendo.
     # Copre da sé anche la goleada: con al massimo un gol di scarto non ci si arriva mai.
     if scarto > SCARTO_MAX_AUTO_PREFERITI:
         return False, f"{scarto} gol di scarto, partita già indirizzata"
-    return True, (f"{gol_totali} gol entro il {MINUTO_GOL_AUTO_PREFERITI}' "
+    return True, (f"{gol_totali} gol entro il {limiti['minuto_gol']}' "
                   f"con la partita ancora aperta")
 
 
@@ -7768,6 +7850,12 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
         stato["dominio_minuto_al_max"] = minuto
         stato["dominio_situazione_al_max"] = dominio["situazione"]
 
+    # Il contatore di isteresi resta ancorato alla soglia NORMALE anche in modalita' essenziale:
+    # finisce nello shadow-log del dominio, che serve a tarare le soglie confrontando lo storico, e
+    # cambiargli metro a meta' renderebbe incomparabili i dati gia' raccolti. La stretta della
+    # modalita' essenziale arriva piu' sotto, dove si chiede una quota/volume piu' alti adesso e
+    # piu' cicli consecutivi.
+    limiti = limiti_ingresso_preferiti()
     sopra_soglia = (quota is not None
                     and quota >= SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI
                     and volume >= VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI)
@@ -7786,12 +7874,13 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
         return False, "auto-preferiti disattivati"
     if minuto is None:
         return False, "minuto non disponibile"
-    if len(FAVORITE_MATCHES) >= MAX_PREFERITI_SIMULTANEI:
+    if len(FAVORITE_MATCHES) >= limiti["tetto"]:
         # Come la rotta gol: non si marca la partita come gia' valutata, appena si libera un posto
         # torna in gioco. Il tetto e' lo stesso identico dei preferiti manuali e della rotta gol,
         # non uno dedicato: e' li' per proteggere il numero di chiamate API, e le chiamate non
         # sanno da quale porta sia entrata la partita.
-        return False, f"gia' {len(FAVORITE_MATCHES)} preferiti attivi (max {MAX_PREFERITI_SIMULTANEI})"
+        return False, (f"gia' {len(FAVORITE_MATCHES)} preferiti attivi (max {limiti['tetto']}"
+                       + (", modalita' essenziale)" if limiti["essenziale"] else ")"))
     # Goleada: qui serve un controllo esplicito, mentre la rotta gol la evita da sola (con al
     # massimo un gol di scarto non ci si arriva mai). Una squadra puo' benissimo dominare all'85%
     # mentre e' gia' avanti 4-0, ed e' proprio la partita che il resto del bot smette di notificare.
@@ -7799,13 +7888,13 @@ def deve_aggiungere_automaticamente_ai_preferiti_per_dominio(fixture_id, current
         return False, f"{abs(score_home - score_away)} gol di scarto, partita gia' decisa"
     if quota is None:
         return False, "nessun dominio misurabile (statistiche assenti o troppo poco gioco)"
-    if not sopra_soglia:
+    coda_essenziale = " in modalita' essenziale" if limiti["essenziale"] else ""
+    if not sopra_soglia or quota < limiti["quota"] or volume < limiti["volume"]:
         return False, (f"dominio {quota}% su volume {volume} "
-                       f"(servono {SOGLIA_QUOTA_DOMINIO_AUTO_PREFERITI}% e volume "
-                       f"{VOLUME_MINIMO_DOMINIO_AUTO_PREFERITI})")
-    if cicli < CICLI_DOMINIO_PER_AUTO_PREFERITI:
+                       f"(servono {limiti['quota']}% e volume {limiti['volume']}{coda_essenziale})")
+    if cicli < limiti["cicli"]:
         return False, (f"dominio {quota}% da {cicli} cicli "
-                       f"(ne servono {CICLI_DOMINIO_PER_AUTO_PREFERITI} di fila)")
+                       f"(ne servono {limiti['cicli']} di fila{coda_essenziale})")
 
     chi = "la squadra di casa" if dominio["lato"] == 0 else "la squadra ospite"
     coda = {"sotto": "e sta perdendo", "bloccata": "e non segna", "avanti": "ed e' avanti"}[dominio["situazione"]]
@@ -8347,9 +8436,25 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
                 f"goleada: {diff_gol} gol di scarto (oltre {SOGLIA_GOLEADA_STOP_NOTIFICHE})"
                 + (", gol compresi" if evento_forzato else ""))
 
+    # MODALITÀ ESSENZIALE: si seguono DUE partite, non tutte quelle che passano.
+    #
+    # Sta prima del passaggio d'ufficio per gol ed eventi forzati, e deve stare lì: altrimenti
+    # "solo 2 partite" non vorrebbe dire niente, perché i gol di tutte le altre continuerebbero ad
+    # arrivare come prima ed è esattamente il flusso che si sta chiudendo. Il taglio non è
+    # arbitrario: le partite che restano sono quelle promosse dalle fasce strette di
+    # limiti_ingresso_preferiti(), cioè le migliori per dominio.
+    #
+    # Cosa NON cambia: la partita continua a essere seguita e ad alimentare gli shadow-log, come
+    # per ogni altra notifica soppressa qui dentro. Tacere non vuol dire smettere di guardare.
+    if MODALITA_NOTIFICHE.get("essenziale") and str(fixture_id) not in FAVORITE_MATCHES:
+        return _verdetto_notifica(
+            fixture_id, False,
+            f"modalità essenziale: si seguono solo le {MAX_PREFERITI_MODALITA_ESSENZIALE} partite "
+            f"migliori, questa non è fra quelle")
+
     # PRIORITÀ MASSIMA: gol appena segnato o recupero lungo appena concluso -> notifica sempre,
     # anche in modalità essenziale (sono esattamente gli eventi che quella modalità vuole lasciar
-    # passare).
+    # passare, per le partite selezionate qui sopra).
     if gol_appena_segnato or recupero_lungo:
         return _verdetto_notifica(
             fixture_id, True,

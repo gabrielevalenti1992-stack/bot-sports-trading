@@ -149,5 +149,10 @@
     "Taca de Portugal",
     "Scottish Cup",
     "Scottish League Cup"
-  ]
+  ],
+  "max_preferiti_modalita_essenziale": 2,
+  "soglia_quota_dominio_modalita_essenziale": 85,
+  "volume_minimo_dominio_modalita_essenziale": 20,
+  "cicli_dominio_modalita_essenziale": 4,
+  "minuto_gol_modalita_essenziale": 20
 }
