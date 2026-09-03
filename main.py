@@ -277,6 +277,30 @@ CICLI_MINIMI_PERMANENZA_PREFERITI = 2
 # regole standard.
 SOGLIA_GOLEADA_STOP_NOTIFICHE = 3
 
+# FINALE DI PARTITA GIA' DECISA: dominio e preferiti tacciono.
+#
+# La goleada qui sopra ferma tutto oltre SOGLIA_GOLEADA_STOP_NOTIFICHE gol di scarto, in qualunque
+# momento. Questo e' piu' stretto ma vale solo nell'ultimo tratto: da MINUTO_INIZIO_STOP_FINALE in
+# poi, con piu' di SCARTO_STOP_FINALE gol di scarto, gli aggiornamenti di dominio e le soglie
+# reattive dei preferiti non hanno piu' niente da dire - il tempo per ribaltare la partita non c'e'
+# piu', e una notifica "sta dominando" al esimo minuto su un 3-0 e' rumore.
+#
+# I GOL continuano a passare: sono piu' in alto in deve_notificare() e non vengono toccati. Qui si
+# fermano solo gli aggiornamenti di routine.
+#
+# La finestra finisce a 90 e non serve estenderla ai minuti di recupero: l'API riporta "elapsed"
+# fermo a 90 durante il recupero del secondo tempo (i minuti extra stanno nel campo "extra", letto
+# a parte per il recupero lungo), quindi un 90+4 arriva qui dentro come minuto 90 ed e' gia' coperto.
+MINUTO_INIZIO_STOP_FINALE = 80
+MINUTO_FINE_STOP_FINALE = 90
+SCARTO_STOP_FINALE = 2
+
+# Il recupero lungo si segnala solo se la partita e' ancora in bilico. Misurato sui log 28/08-03/09:
+# 79 notifiche di recupero in 7 giorni, di cui il 30% arrivate in raffica (fino a 4 in 13 secondi,
+# il 29/08 alle 14:57), perche' a fine primo tempo tutte le partite del turno finiscono insieme.
+# Su una partita gia' indirizzata quel messaggio non aggiunge niente.
+SCARTO_MAX_NOTIFICA_RECUPERO = 1
+
 # Auto-preferiti: una partita che si accende merita di essere seguita dal canale preferiti senza
 # aspettare che venga cliccata a mano tra le tante notifiche normali.
 #
@@ -966,6 +990,10 @@ try:
     DURATA_MAX_SENZA_NOTIFICA_PREFERITI = config.get("durata_max_senza_notifica_preferiti", DURATA_MAX_SENZA_NOTIFICA_PREFERITI)
     CICLI_MINIMI_PERMANENZA_PREFERITI = config.get("cicli_minimi_permanenza_preferiti", CICLI_MINIMI_PERMANENZA_PREFERITI)
     SOGLIA_GOLEADA_STOP_NOTIFICHE = config.get("soglia_goleada_stop_notifiche", SOGLIA_GOLEADA_STOP_NOTIFICHE)
+    MINUTO_INIZIO_STOP_FINALE = config.get("minuto_inizio_stop_finale", MINUTO_INIZIO_STOP_FINALE)
+    MINUTO_FINE_STOP_FINALE = config.get("minuto_fine_stop_finale", MINUTO_FINE_STOP_FINALE)
+    SCARTO_STOP_FINALE = config.get("scarto_stop_finale", SCARTO_STOP_FINALE)
+    SCARTO_MAX_NOTIFICA_RECUPERO = config.get("scarto_max_notifica_recupero", SCARTO_MAX_NOTIFICA_RECUPERO)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
     AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
     SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
@@ -2431,6 +2459,8 @@ def poll_callbacks():
 
                     elif cmd == "/diagnostica":
                         esegui_comando_sicuro(chat_id, cmd_diagnostica)
+                    elif cmd == "/legenda":
+                        esegui_comando_sicuro(chat_id, cmd_legenda)
 
                     elif cmd == "/coperturaleghe":
                         esegui_comando_sicuro(chat_id, cmd_coperturaleghe)
@@ -4477,6 +4507,8 @@ def cmd_help(chat_id):
         "entrerebbero nei preferiti con le soglie attuali\n"
         "/diagnostica - Controllo dal vivo di ogni partita live: dati arrivati, quota, shadow-log, "
         "eventuali anomalie\n"
+        "/legenda - Cosa vogliono dire le voci della diagnostica (non è più in coda ad ogni "
+        "messaggio)\n"
         "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
         "rispecchia ancora (in cima le partite che dominano e perdono). Nessuna chiamata API\n"
         "/classificadominanza - Classifica di sempre: le squadre che segnano più spesso subito "
@@ -5390,6 +5422,15 @@ def cmd_diagnostica(chat_id):
             json={"chat_id": chat_id, "text": pezzo}, timeout=10)
         if risposta.status_code != 200:
             log(f"Errore invio diagnostica: HTTP {risposta.status_code} - {risposta.text[:300]}")
+
+
+def cmd_legenda(chat_id):
+    """La legenda dei passaggi della pipeline, su richiesta.
+
+    Prima veniva appesa in coda a OGNI diagnostica automatica: 3600 caratteri - il 95% di un
+    messaggio Telegram - identici ogni volta, spesso davanti a una riga sola di anomalia. Il
+    contenuto serve, la ripetizione no: qui resta disponibile quando la si vuole leggere."""
+    invia_messaggio_telegram(LEGENDA_DIAGNOSTICA, chat_id=chat_id)
 
 
 def cmd_apiusage(chat_id):
@@ -7424,11 +7465,13 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             evidenza_non_copertura = stato.get("stats_vuote_consecutive", 0) >= SOGLIA_SENZA_STATISTICHE
             if esito_stats in ("vuote", "errore") and evidenza_non_copertura:
                 categoria = "COPERTURA STATISTICHE"
+                # Il "cosa vuol dire" sta nella legenda (/legenda), non qui: ripetuto per ogni
+                # partita segnalata erano 149 caratteri a testa, e in una diagnostica da 17 righe
+                # facevano da soli piu' di 2500 caratteri di testo identico.
                 testo_anomalia = (
-                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica statistiche "
-                    f"per questa partita (al {minuto_api}'). Non è un blocco del bot: la partita resta "
-                    f"seguita e negli shadow-log, ma non manda notifiche - gol compresi - finché "
-                    f"l'API non pubblica i primi dati.")
+                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica "
+                    f"statistiche per questa partita (al {minuto_api}') - resta seguita, "
+                    f"ma non manda notifiche, gol compresi")
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
@@ -7452,9 +7495,9 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 trovate[categoria] = testo_anomalia
             else:
                 solo_log["STATISTICHE IN RITARDO"] = (
-                    f"STATISTICHE IN RITARDO - {home}-{away}: l'API non ha ancora pubblicato statistiche "
-                    f"al {minuto_api}'. Sotto il {MINUTO_MINIMO_VERDETTO_STATISTICHE}' non è un verdetto "
-                    f"di non copertura: la partita intanto resta muta.")
+                    f"STATISTICHE IN RITARDO - {home}-{away}: l'API non ha ancora pubblicato "
+                    f"statistiche al {minuto_api}' (sotto il {MINUTO_MINIMO_VERDETTO_STATISTICHE}' "
+                    f"non è un verdetto)")
 
         quote = quote_1x2_per_fixture(fid)
         ultimo_val = stato.get("ultimo_snapshot_valore")
@@ -7512,10 +7555,14 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
             f"(già notificate, o troppo presto per essere un verdetto).")
         return
 
+    # La legenda NON va nel messaggio: sono 3600 caratteri - il 95% di un messaggio Telegram -
+    # ripetuti identici ad ogni diagnostica, davanti a righe che spesso sono una sola. Chi legge
+    # vuole sapere cosa e' successo, non ripassare ogni volta come funziona la pipeline. Resta
+    # disponibile su richiesta con /legenda, e resta nei log di Render con il dettaglio completo.
     testo = (
         "🔍 Diagnostica automatica - trovate anomalie nella pipeline dati:\n\n"
         + "\n".join(f"- {a}" for a in anomalie_nuove)
-        + "\n\n" + LEGENDA_DIAGNOSTICA
+        + "\n\nSpiegazione dei passaggi: /legenda"
     )
     for i in range(0, len(testo), 3800):
         invia_messaggio_telegram(testo[i:i + 3800])
@@ -8611,6 +8658,24 @@ def deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=None
     if MODALITA_NOTIFICHE.get("essenziale"):
         return _verdetto_notifica(fixture_id, False, "modalità essenziale attiva")
 
+    # FINALE DI PARTITA GIA' DECISA: dominio e preferiti tacciono.
+    #
+    # Sta DOPO il ramo dei gol (che passano sempre, molto piu' in alto) e PRIMA sia del ramo dei
+    # preferiti sia del gate del dominio: sono esattamente i due percorsi da fermare, e metterlo
+    # qui li copre entrambi con una riga sola invece di ripetere la condizione in due punti che
+    # possono divergere.
+    #
+    # Il minuto 90 comprende anche il recupero del secondo tempo: l'API tiene "elapsed" fermo a 90
+    # e mette i minuti extra in un campo a parte, quindi un 90+4 arriva qui come 90.
+    if (minuto is not None and score_home is not None and score_away is not None
+            and MINUTO_INIZIO_STOP_FINALE <= minuto <= MINUTO_FINE_STOP_FINALE
+            and abs(score_home - score_away) > SCARTO_STOP_FINALE):
+        return _verdetto_notifica(
+            fixture_id, False,
+            f"finale di partita decisa: {abs(score_home - score_away)} gol di scarto al {minuto}' "
+            f"(niente dominio o preferiti fra il {MINUTO_INIZIO_STOP_FINALE}' e il "
+            f"{MINUTO_FINE_STOP_FINALE}' oltre {SCARTO_STOP_FINALE} gol)")
+
     stato = stato_partite.get(fixture_id, {})
     ultima_casa = stato.get("tiri_casa", -1)
     ultima_ospite = stato.get("tiri_ospite", -1)
@@ -9675,9 +9740,24 @@ def processa_partita(fixture, notifiche_attive=True):
                         motivo_dominio)
 
         evento_forzato = gol_appena_segnato or bool(nuovi_cartellini_rossi) or bool(nuovi_rigori)
+        # Il recupero lungo fa scattare una notifica solo se la partita e' ancora in bilico: su un
+        # 3-0 quanti minuti si giocheranno ancora non cambia niente di quello che si puo' fare.
+        # Non si tocca "recupero_da_segnalare": se la partita notifica per un altro motivo (un gol,
+        # una soglia), la riga del recupero resta nel testo. Qui si toglie solo il potere di essere
+        # LUI a far partire il messaggio.
+        # Se il punteggio manca si lascia passare come prima: senza il dato non si puo' giudicare, e
+        # perdere una notizia vale piu' di una notifica in piu'.
+        if score_home is None or score_away is None:
+            recupero_notificabile = recupero_da_segnalare is not None
+        else:
+            recupero_notificabile = (recupero_da_segnalare is not None
+                                     and abs(score_home - score_away) <= SCARTO_MAX_NOTIFICA_RECUPERO)
+        if recupero_da_segnalare and not recupero_notificabile:
+            log(f"    ⏱ Recupero non notificato: {abs(score_home - score_away)} gol di scarto "
+                f"(massimo {SCARTO_MAX_NOTIFICA_RECUPERO})")
         if not deve_notificare(fixture_id, tiri_casa, tiri_ospite, minuto, delta_stats=stats_dict,
                                gol_appena_segnato=evento_forzato,
-                               recupero_lungo=recupero_da_segnalare is not None,
+                               recupero_lungo=recupero_notificabile,
                                score_home=score_home, score_away=score_away,
                                current_stats=current_stats):
             prev_notified = stato_partite.get(fixture_id, {}).get("notified_final", False)
@@ -10044,6 +10124,7 @@ def imposta_comandi_telegram():
         {"command": "shadowlogstrategie", "description": "Dati raccolti in background sull'efficacia delle strategie"},
         {"command": "shadowlogdominio", "description": "A che quota di dominio arrivano le partite osservate"},
         {"command": "diagnostica", "description": "Controllo dal vivo di ogni partita live"},
+        {"command": "legenda", "description": "Cosa vogliono dire le voci della diagnostica"},
         {"command": "funzioni", "description": "Funzioni stabili, in validazione, novità"},
         {"command": "apiusage", "description": "Chiamate API-Football fatte al giorno"},
         {"command": "intensita", "description": "Classifica partite live per intensità"},

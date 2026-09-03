@@ -157,5 +157,9 @@
   "minuto_gol_modalita_essenziale": 20,
   "modalita_essenziale_auto_attiva": true,
   "soglia_quota_modalita_essenziale": 600,
-  "soglia_quota_uscita_modalita_essenziale": 1200
+  "soglia_quota_uscita_modalita_essenziale": 1200,
+  "minuto_inizio_stop_finale": 80,
+  "minuto_fine_stop_finale": 90,
+  "scarto_stop_finale": 2,
+  "scarto_max_notifica_recupero": 1
 }
