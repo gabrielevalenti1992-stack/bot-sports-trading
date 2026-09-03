@@ -1941,16 +1941,27 @@ STATO_PAUSA = carica_pausa()
 # preferiti. Persistita su disco come /stop, cosi' un riavvio del bot non la resetta a sua insaputa.
 # =============================================================================
 MODALITA_FILE = data_path("modalita_notifiche.json")
+INTERVALLO_PROMEMORIA_MODALITA = 6 * 3600  # 6 ore, come per /stop: ogni quanto ricordare che è attiva
 
 
 def carica_modalita():
     if os.path.exists(MODALITA_FILE):
         try:
             with open(MODALITA_FILE, 'r') as f:
-                return json.load(f)
+                stato = json.load(f)
+            # Le prime versioni salvavano solo {"essenziale": ...}, senza tenere traccia di quando
+            # era stata accesa. La data di modifica del file è però esattamente il momento
+            # dell'ultimo cambio di modalità: recuperarla da lì evita di ripartire da zero ad ogni
+            # riavvio e di annunciare "attiva da 0 ore" una modalità accesa da giorni.
+            if stato.get("essenziale") and not stato.get("dal"):
+                try:
+                    stato["dal"] = os.path.getmtime(MODALITA_FILE)
+                except OSError:
+                    stato["dal"] = time.time()
+            return stato
         except Exception as e:
             print(f"Errore lettura {MODALITA_FILE}: {e}", flush=True)
-    return {"essenziale": False}
+    return {"essenziale": False, "dal": 0, "ultimo_promemoria": 0}
 
 
 def salva_modalita(stato):
@@ -1958,6 +1969,24 @@ def salva_modalita(stato):
 
 
 MODALITA_NOTIFICHE = carica_modalita()
+
+
+def nota_modalita_essenziale(prefisso="\n"):
+    """Riga da appendere ai messaggi di stato quando la modalità essenziale è accesa.
+
+    Risolve un problema concreto: è una modalità che si accende con un comando e poi resta lì per
+    sempre, silenziosa per definizione. Non comparendo in nessuna schermata di stato, è rimasta
+    accesa per giorni senza che nessuno se ne accorgesse, e il bot sembrava semplicemente non avere
+    più niente da segnalare. Stessa cura già usata per la pausa manuale: si vede dov'è naturale
+    guardare, e ogni tanto si ricorda da sola.
+
+    Stringa vuota quando è spenta, così i messaggi normali non cambiano di una virgola."""
+    if not MODALITA_NOTIFICHE.get("essenziale"):
+        return ""
+    dal = MODALITA_NOTIFICHE.get("dal") or 0
+    da_quanto = f" da {_durata_leggibile(time.time() - dal)}" if dal else ""
+    return (f"{prefisso}🔕 Modalità essenziale attiva{da_quanto}: passano solo gol, rossi, rigori e "
+            f"recupero lungo. Invia /modalitacompleta per riavere tutte le notifiche.")
 
 # =============================================================================
 # FIAMME - SOGLIE
@@ -4482,6 +4511,13 @@ def cmd_piano(chat_id):
             else:
                 righe.append(f"Notifiche: in pausa fuori fascia oraria ({fascia}) - monitoraggio e raccolta dati comunque attivi")
 
+    # Anche dentro la fascia oraria le notifiche possono essere quasi tutte soppresse, se la
+    # modalità essenziale è accesa: senza questa riga /piano direbbe "Notifiche: ATTIVE" mentre in
+    # chat non arriva quasi niente, che è esattamente l'equivoco da evitare.
+    nota_modalita = nota_modalita_essenziale(prefisso="")
+    if nota_modalita:
+        righe.append(nota_modalita)
+
     testo = "\n".join(righe)
     for i in range(0, len(testo), 3800):
         pezzo = testo[i:i + 3800]
@@ -4532,11 +4568,14 @@ def cmd_modalitaessenziale(chat_id):
     lungo generano una notifica, per ridurre il rumore nelle serate con tante partite insieme."""
     global MODALITA_NOTIFICHE
     if MODALITA_NOTIFICHE.get("essenziale"):
+        dal = MODALITA_NOTIFICHE.get("dal") or 0
+        da_quanto = f" (da {_durata_leggibile(time.time() - dal)})" if dal else ""
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "La modalità essenziale è già attiva."}, timeout=5)
+            json={"chat_id": chat_id, "text": f"La modalità essenziale è già attiva{da_quanto}."}, timeout=5)
         return
-    MODALITA_NOTIFICHE = {"essenziale": True}
+    adesso = time.time()
+    MODALITA_NOTIFICHE = {"essenziale": True, "dal": adesso, "ultimo_promemoria": adesso}
     salva_modalita(MODALITA_NOTIFICHE)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -4544,7 +4583,10 @@ def cmd_modalitaessenziale(chat_id):
             "chat_id": chat_id,
             "text": "🔕 Modalità essenziale attiva: da ora solo gol, cartellini rossi, rigori e "
                     "recupero lungo. Le notifiche di soglia (tiri, momentum) sono sospese, anche "
-                    "per i preferiti. Invia /modalitacompleta per tornare come prima."
+                    "per i preferiti. Invia /modalitacompleta per tornare come prima.\n"
+                    "Ogni 6 ore ti ricordo che è ancora accesa, e la trovi scritta in /piano, "
+                    "/diagnostica, /uptime e nel messaggio periodico \"Bot attivo\": così non "
+                    "resta accesa per giorni senza che te ne accorga."
         }, timeout=5)
 
 
@@ -4556,11 +4598,15 @@ def cmd_modalitacompleta(chat_id):
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": "La modalità completa è già attiva."}, timeout=5)
         return
-    MODALITA_NOTIFICHE = {"essenziale": False}
+    dal = MODALITA_NOTIFICHE.get("dal") or 0
+    # Dire per quanto e' rimasta accesa e' l'unico modo per accorgersi a posteriori di averla
+    # dimenticata: "era attiva da 5g 3h" spiega da solo le notifiche che non sono arrivate.
+    durata = f" (era attiva da {_durata_leggibile(time.time() - dal)})" if dal else ""
+    MODALITA_NOTIFICHE = {"essenziale": False, "dal": 0, "ultimo_promemoria": 0}
     salva_modalita(MODALITA_NOTIFICHE)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "🔔 Modalità completa ripristinata: tornano le notifiche di soglia normali."}, timeout=5)
+        json={"chat_id": chat_id, "text": f"🔔 Modalità completa ripristinata{durata}: tornano le notifiche di soglia normali."}, timeout=5)
 
 
 def cmd_testpreferiti(chat_id):
@@ -5107,6 +5153,10 @@ def cmd_diagnostica(chat_id):
     else:
         testo += "\n\n✅ Nessuna anomalia rilevata in questo controllo."
 
+    # La diagnostica serve a rispondere a "perché non ricevo niente?": se la risposta è la modalità
+    # essenziale, dirlo qui evita di andare a cercare guasti nella pipeline che non ci sono.
+    testo += nota_modalita_essenziale(prefisso="\n\n")
+
     for i in range(0, len(testo), 3800):
         pezzo = testo[i:i + 3800]
         risposta = requests.post(
@@ -5254,10 +5304,12 @@ def cmd_uptime(chat_id):
             chat_id=chat_id)
         return
 
-    righe = ["📡 *Disponibilità vista da fuori* (UptimeRobot)"]
+    # Niente asterischi di grassetto: i messaggi partono senza parse_mode (il Markdown spezzava gli
+    # invii con underscore e trattini nei nomi), quindi qui si vedrebbero come simboli.
+    righe = ["📡 Disponibilità vista da fuori (UptimeRobot)"]
     for m in monitor:
         emoji, descrizione = STATI_UPTIMEROBOT.get(m.get("status"), ("❔", "stato sconosciuto"))
-        righe.append(f"\n{emoji} *{m.get('friendly_name', 'senza nome')}* — {descrizione}")
+        righe.append(f"\n{emoji} {m.get('friendly_name', 'senza nome')} — {descrizione}")
 
         # Le tre percentuali arrivano in un'unica stringa "99.9-99.8-99.7" nell'ordine chiesto
         # sopra (1-7-30 giorni). Se l'account non le fornisce si salta la riga invece di stampare
@@ -5281,8 +5333,15 @@ def cmd_uptime(chat_id):
         else:
             righe.append("   Nessun disservizio negli ultimi eventi registrati")
 
-    righe.append("\n_Controllo ogni 5 minuti dall'esterno: è il solo modo per sapere se il bot è "
-                 "stato irraggiungibile: mentre era giù non stava girando per accorgersene._")
+    righe.append("\nControllo ogni 5 minuti dall'esterno: è il solo modo per sapere se il bot è "
+                 "stato irraggiungibile, perché mentre era giù non stava girando per accorgersene.")
+
+    # "Raggiungibile, 100% di uptime" e nessuna notifica in chat sono due fatti che insieme fanno
+    # sospettare un guasto silenzioso. Quando la spiegazione è la modalità essenziale, va detta
+    # proprio qui: è la schermata che si guarda quando si sospetta che il bot sia morto.
+    nota_modalita = nota_modalita_essenziale()
+    if nota_modalita:
+        righe.append(nota_modalita)
     invia_messaggio_telegram("\n".join(righe), chat_id=chat_id)
 
 
@@ -9754,7 +9813,10 @@ def imposta_comandi_telegram():
 if __name__ == "__main__":
     log("=== Bot avviato ===")
     imposta_comandi_telegram()
-    invia_messaggio_telegram("Bot avviato\nMonitoraggio partite live in corso...")
+    # La modalità essenziale sopravvive ai riavvii (è su disco): senza ricordarla qui, un deploy
+    # ripartiva annunciando "monitoraggio in corso" mentre quasi tutte le notifiche erano spente.
+    invia_messaggio_telegram("Bot avviato\nMonitoraggio partite live in corso..."
+                             + nota_modalita_essenziale())
 
     while True:
         # Tutto il corpo del ciclo è protetto da questo try/except: prima non lo era, quindi
@@ -9808,6 +9870,24 @@ if __name__ == "__main__":
                 continue
             if not notifiche_attive:
                 log(f"Fuori dall'orario attivo ({fascia_oraria}): monitoraggio silenzioso, nessuna notifica.")
+
+            # Promemoria della modalità essenziale, stesso ritmo di quello della pausa manuale: è
+            # una modalità che si accende e resta accesa in silenzio, e senza un richiamo periodico
+            # è già rimasta attiva per giorni facendo sembrare il bot muto per un guasto. Solo
+            # dentro la fascia oraria: un promemoria alle 4 di notte sarebbe solo un altro disturbo.
+            if notifiche_attive and MODALITA_NOTIFICHE.get("essenziale"):
+                adesso_modalita = time.time()
+                if adesso_modalita - (MODALITA_NOTIFICHE.get("ultimo_promemoria") or 0) >= INTERVALLO_PROMEMORIA_MODALITA:
+                    dal_modalita = MODALITA_NOTIFICHE.get("dal") or 0
+                    da_quanto_modalita = (f" da {_durata_leggibile(adesso_modalita - dal_modalita)}"
+                                          if dal_modalita else "")
+                    invia_messaggio_telegram(
+                        f"🔕 Modalità essenziale ancora attiva{da_quanto_modalita}: stai ricevendo solo "
+                        f"gol, rossi, rigori e recupero lungo. Invia /modalitacompleta per riavere "
+                        f"tutte le notifiche.")
+                    MODALITA_NOTIFICHE["ultimo_promemoria"] = adesso_modalita
+                    salva_modalita(MODALITA_NOTIFICHE)
+                    log(f"Promemoria modalità essenziale inviato (attiva{da_quanto_modalita}).")
 
             aggiorna_piano_giornata_se_serve()
             aggiorna_quote_prepartita_imminenti()
@@ -9885,11 +9965,16 @@ if __name__ == "__main__":
                     invia_messaggio_telegram(
                         f"Bot attivo - Ciclo #{ciclo_numero}\n"
                         f"Ultima chiamata API fallita (vedi errore sopra): dato partite live non affidabile"
+                        + nota_modalita_essenziale()
                     )
                 else:
+                    # È il messaggio che dice "sto lavorando" mentre in chat non arriva nulla:
+                    # se il motivo è la modalità essenziale, deve dirlo qui invece di lasciar
+                    # credere che semplicemente non stia succedendo niente in campo.
                     invia_messaggio_telegram(
                         f"Bot attivo - Ciclo #{ciclo_numero}\n"
                         f"Partite live monitorate: {len(partite_valide)}"
+                        + nota_modalita_essenziale()
                     )
 
             # Si itera solo sulle partite valide (non su tutte le partite live del mondo): la pausa
