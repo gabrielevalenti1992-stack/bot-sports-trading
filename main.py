@@ -7594,9 +7594,33 @@ def fascia_minuto(elapsed):
 
 
 def risolvi_leghe_whitelist():
-    """Risolve (id, stagione) per ogni campionato in whitelist interrogando /leagues una sola
-    volta (cache 24h), per costruire/aggiornare lo storico minutaggi senza dover indovinare gli
-    ID numerici delle leghe usati dall'API."""
+    """Risolve (nome, paese, stagione) per ogni campionato in whitelist interrogando /leagues una
+    sola volta (cache 24h), per costruire/aggiornare lo storico minutaggi senza dover indovinare
+    gli ID numerici delle leghe usati dall'API. La mappa e' indicizzata per league_id.
+
+    DUE CORREZIONI, entrambe visibili in produzione il 03/09.
+
+    1) IL FILTRO E' QUELLO DEL BOT, NON UNO SUO.
+    Qui c'era un match a sottostringa bidirezionale sul solo nome
+    ("lega in nome or nome in lega"), senza guardare il paese. Cosi' "Premier League",
+    "Championship", "Serie A", "Super League" - nomi che esistono identici in decine di
+    federazioni - facevano entrare tutte le omonime: 234 leghe risolte a fronte di 82 voci in
+    whitelist. Il bot sapeva gia' come si fa, in campionato_valido(): match a confine di parola,
+    match esatto per le competizioni internazionali e, per i nomi ambigui, il paese atteso
+    (PAESE_ATTESO_LEGA_AMBIGUA dice "premier league" -> "england"). Erano due definizioni di
+    "questa lega e' in whitelist" che davano risposte diverse, ed e' la seconda ad avere ragione.
+
+    2) LA MAPPA E' INDICIZZATA PER ID, NON PER NOME.
+    Con la chiave sul nome, tutte le "Premier League" del mondo finivano nella stessa voce e
+    vinceva l'ultima arrivata: quella inglese veniva sovrascritta in silenzio. Nei log del 28/08 e
+    del 03/09 la lega 39 non compare in nessuna delle due esecuzioni, mentre Serie A (135),
+    La Liga (140), Bundesliga (78) e Ligue 1 (61) ci sono tutte - lo storico minutaggi della
+    Premier League non esisteva, e /analisi su una partita inglese non aveva dati.
+
+    Restano fuori portata i nomi ambigui che non hanno una voce in PAESE_ATTESO_LEGA_AMBIGUA (per
+    esempio "Serie A" brasiliana): li' passano ancora tutte le omonime, ma e' esattamente cio' che
+    fa anche il filtro live, quindi storico e tracciamento restano coerenti fra loro. Aggiungere
+    una voce a quella mappa li sistema entrambi in un colpo solo."""
     global LEGHE_ID_STAGIONE_CACHE, LEGHE_ID_STAGIONE_TIMESTAMP
     now = time.time()
     if LEGHE_ID_STAGIONE_CACHE and (now - LEGHE_ID_STAGIONE_TIMESTAMP) < LEGHE_ID_STAGIONE_TTL:
@@ -7609,22 +7633,36 @@ def risolvi_leghe_whitelist():
     if data is None:
         return LEGHE_ID_STAGIONE_CACHE
     mappa = {}
+    scartate = 0
     for item in data.get("response", []):
         league = item.get("league", {})
         nome = league.get("name", "")
         league_id = league.get("id")
+        paese = (item.get("country") or {}).get("name", "")
         if not nome or not league_id:
             continue
-        if not any(lega.lower() in nome.lower() or nome.lower() in lega.lower() for lega in LEGHE_CON_STATISTICHE):
+        if not campionato_valido(nome, league.get("type", ""), paese):
+            scartate += 1
             continue
-        for season in item.get("seasons", []):
-            if season.get("current"):
-                mappa[nome] = (league_id, season.get("year"))
-                break
+        # LA STAGIONE PIU' RECENTE FRA QUELLE MARCATE "current", non la prima dell'elenco.
+        #
+        # Non e' pignoleria: la stagione scelta qui e' la chiave con cui
+        # aggiorna_storico_minutaggi_lega() decide se lo storico di quella lega e' ancora valido,
+        # e se cambia BUTTA VIA tutto - partite gia' scaricate e statistiche accumulate per
+        # squadra - ripartendo da zero. Con "prendi la prima" bastava che l'API elencasse in
+        # ordine diverso due stagioni entrambe marcate current (succede intorno al rollover) per
+        # far oscillare l'anno fra una risoluzione e l'altra, e ogni oscillazione significa
+        # riscaricare da capo l'intera lega. Con il massimo la scelta e' deterministica: lo stesso
+        # insieme di stagioni da sempre la stessa risposta, in qualunque ordine arrivi.
+        anni_correnti = [s.get("year") for s in item.get("seasons", [])
+                         if s.get("current") and s.get("year") is not None]
+        if anni_correnti:
+            mappa[league_id] = (nome, paese, max(anni_correnti))
     if mappa:
         LEGHE_ID_STAGIONE_CACHE = mappa
         LEGHE_ID_STAGIONE_TIMESTAMP = now
-        log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione")
+        log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione "
+            f"({scartate} scartate dal filtro campionati)")
     return LEGHE_ID_STAGIONE_CACHE
 
 
@@ -7651,6 +7689,15 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
 
     lega_dati = STORICO_MINUTAGGI.get(league_key)
     if not lega_dati or lega_dati.get("stagione") != season:
+        # Il reset non e' piu' silenzioso. Butta via le partite gia' scaricate E le statistiche
+        # per squadra, e rimette in coda l'intero campionato: e' la cosa piu' costosa che questa
+        # funzione possa fare, e finora non lasciava traccia. Se ricompare senza che sia
+        # cambiata davvero la stagione, il log lo dice subito invece di far scoprire il problema
+        # da una bolletta di chiamate API.
+        if lega_dati:
+            log(f"Storico minutaggi: lega {league_id} azzerata, stagione cambiata da "
+                f"{lega_dati.get('stagione')} a {season} - "
+                f"{len(lega_dati.get('fixture_ids_processati', []))} partite da riscaricare")
         lega_dati = {"stagione": season, "fixture_ids_processati": [], "squadre": {}, "ultimo_aggiornamento": 0}
 
     fixtures = get_fixtures_terminati(league_id, season)
@@ -7730,7 +7777,7 @@ def aggiorna_storico_minutaggi_tutte_leghe():
         log("Storico minutaggi: nessuna lega whitelist risolta, skip aggiornamento")
         return 0
     totale = 0
-    for nome, (league_id, season) in mappa.items():
+    for league_id, (nome, paese, season) in mappa.items():
         if not season:
             continue
         totale += aggiorna_storico_minutaggi_lega(league_id, season)
@@ -7756,7 +7803,7 @@ def aggiorna_storico_minutaggi_automatico():
         return
     now = time.time()
     processate_in_questo_giro = 0
-    for nome, (league_id, season) in mappa.items():
+    for league_id, (nome, paese, season) in mappa.items():
         if processate_in_questo_giro >= STORICO_MAX_FIXTURES_PER_RUN:
             log(f"Storico minutaggi: raggiunto il limite di {STORICO_MAX_FIXTURES_PER_RUN} partite per questo ciclo, riprendo al prossimo")
             break
@@ -7766,7 +7813,7 @@ def aggiorna_storico_minutaggi_automatico():
         ultimo = lega_dati.get("ultimo_aggiornamento", 0)
         if now - ultimo < INTERVALLO_AGGIORNAMENTO_STORICO:
             continue
-        log(f"Storico minutaggi: aggiornamento automatico lega {nome} ({league_id})")
+        log(f"Storico minutaggi: aggiornamento automatico lega {nome} - {paese} ({league_id})")
         processate_in_questo_giro += aggiorna_storico_minutaggi_lega(
             league_id, season, max_fixtures=STORICO_MAX_FIXTURES_PER_RUN - processate_in_questo_giro
         )
@@ -8307,11 +8354,25 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
     giorno - le partite finiscono, il bot lo sa (abbastanza da chiudere lo shadow-log), ma
     all'utente non arrivava nessun messaggio di chiusura. Da cui "non vedo risultati scritti".
 
-    Meno ricco del recap "in diretta": niente statistiche finali ne' confronto 1°T/2°T, perche'
-    quei dati non sono piu' recuperabili una volta che la partita e' sparita dal live, e chiederli
-    costerebbe una chiamata in piu' per ogni chiusura. Copre quello che conta di piu': risultato,
-    marcatori, cartellini rossi, rigori - tutti ricavabili dagli eventi che questa funzione ha
-    comunque gia' chiesto per lo shadow-log strategie, senza spendere nulla in piu'.
+    LE STATISTICHE CI SONO, E VENGONO DALLA MEMORIA.
+
+    Qui c'era scritto che statistiche e confronto 1°T/2°T non si potevano mettere perche' "non
+    piu' recuperabili una volta che la partita e' sparita dal live". Non era vero: non sono piu'
+    recuperabili DALL'API senza pagare una chiamata, ma il bot le ha gia' in casa. Ad ogni ciclo
+    processa_partita() appende in stato_partite[fixture_id]["history"] uno snapshot
+    {minuto, stats}, e questa funzione gira PRIMA che pulisci_partite_terminate() cancelli quello
+    stato. L'ultimo snapshot e' quindi li', gratis.
+
+    Visto in chat il 04/09 alle 20:24: Arminia Bielefeld-St. Pauli e Vasas-Nyiregyhaza chiuse con
+    il solo risultato e i marcatori, mentre i log dicono che due minuti prima entrambe erano
+    tracciate al 90' con "stats=si (fresche)". I dati c'erano e venivano buttati.
+
+    Le statistiche mostrate sono quelle dell'ULTIMO RILEVAMENTO, non necessariamente il totale a
+    fine gara: l'ultimo giro utile puo' essere caduto qualche minuto prima del fischio finale, e
+    il minuto viene scritto accanto proprio per non spacciare un dato dell'87' per un dato del 90'.
+
+    Resta senza grafico, a differenza del recap "in diretta": quello si costruisce dalle
+    statistiche del ciclo corrente, che qui non esiste piu'.
 
     Stessa distinzione muta/non muta del ramo in diretta: una partita silenziata riceve il
     riepilogo compatto "cos'e' successo dopo il silenzio", non il recap completo - tacere una
@@ -8373,6 +8434,32 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
                 righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
             rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
 
+        # Ultimo snapshot raccolto durante la partita: e' gia' in memoria, non costa una chiamata.
+        # Si prende l'ultima voce di history che abbia davvero delle statistiche - le voci vengono
+        # appese solo quando l'API ha risposto con dati, ma la guardia esplicita costa nulla e
+        # copre il caso di uno storico ripristinato dal backup con voci di forma diversa.
+        history = stato.get("history") or []
+        ultimo_punto = next((h for h in reversed(history) if h.get("stats")), None)
+        statistiche_finale_text = ""
+        if ultimo_punto:
+            stats_ultime = ultimo_punto["stats"]
+            minuto_ultimo = ultimo_punto.get("minuto")
+            tiri = stats_ultime.get("Tiri totali", ("?", "?"))
+            porta = stats_ultime.get("Tiri in porta", ("?", "?"))
+            corner = stats_ultime.get("Corner", ("?", "?"))
+            al_minuto = f" (al {minuto_ultimo}')" if minuto_ultimo else ""
+            statistiche_finale_text = (
+                f"Statistiche all'ultimo rilevamento{al_minuto}:\n"
+                f"- Tiri totali: {tiri[0]} - {tiri[1]}\n"
+                f"- Tiri in porta: {porta[0]} - {porta[1]}\n"
+                f"- Corner: {corner[0]} - {corner[1]}\n"
+            )
+            stats_1h_salvate = stato.get("stats_fine_1h")
+            if stats_1h_salvate:
+                statistiche_finale_text += testo_confronto_tempi(stats_1h_salvate, stats_ultime)
+            elif len(history) > 1:
+                statistiche_finale_text += testo_confronto_tempi_parziale(history, stats_ultime)
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
@@ -8381,6 +8468,7 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
             f"{goals_text}"
             f"{cartellini_finale_text}"
             f"{rigori_finale_text}"
+            f"{statistiche_finale_text}"
         )
 
     chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
