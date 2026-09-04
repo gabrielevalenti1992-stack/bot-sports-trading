@@ -8354,11 +8354,25 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
     giorno - le partite finiscono, il bot lo sa (abbastanza da chiudere lo shadow-log), ma
     all'utente non arrivava nessun messaggio di chiusura. Da cui "non vedo risultati scritti".
 
-    Meno ricco del recap "in diretta": niente statistiche finali ne' confronto 1°T/2°T, perche'
-    quei dati non sono piu' recuperabili una volta che la partita e' sparita dal live, e chiederli
-    costerebbe una chiamata in piu' per ogni chiusura. Copre quello che conta di piu': risultato,
-    marcatori, cartellini rossi, rigori - tutti ricavabili dagli eventi che questa funzione ha
-    comunque gia' chiesto per lo shadow-log strategie, senza spendere nulla in piu'.
+    LE STATISTICHE CI SONO, E VENGONO DALLA MEMORIA.
+
+    Qui c'era scritto che statistiche e confronto 1°T/2°T non si potevano mettere perche' "non
+    piu' recuperabili una volta che la partita e' sparita dal live". Non era vero: non sono piu'
+    recuperabili DALL'API senza pagare una chiamata, ma il bot le ha gia' in casa. Ad ogni ciclo
+    processa_partita() appende in stato_partite[fixture_id]["history"] uno snapshot
+    {minuto, stats}, e questa funzione gira PRIMA che pulisci_partite_terminate() cancelli quello
+    stato. L'ultimo snapshot e' quindi li', gratis.
+
+    Visto in chat il 04/09 alle 20:24: Arminia Bielefeld-St. Pauli e Vasas-Nyiregyhaza chiuse con
+    il solo risultato e i marcatori, mentre i log dicono che due minuti prima entrambe erano
+    tracciate al 90' con "stats=si (fresche)". I dati c'erano e venivano buttati.
+
+    Le statistiche mostrate sono quelle dell'ULTIMO RILEVAMENTO, non necessariamente il totale a
+    fine gara: l'ultimo giro utile puo' essere caduto qualche minuto prima del fischio finale, e
+    il minuto viene scritto accanto proprio per non spacciare un dato dell'87' per un dato del 90'.
+
+    Resta senza grafico, a differenza del recap "in diretta": quello si costruisce dalle
+    statistiche del ciclo corrente, che qui non esiste piu'.
 
     Stessa distinzione muta/non muta del ramo in diretta: una partita silenziata riceve il
     riepilogo compatto "cos'e' successo dopo il silenzio", non il recap completo - tacere una
@@ -8420,6 +8434,32 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
                 righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
             rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
 
+        # Ultimo snapshot raccolto durante la partita: e' gia' in memoria, non costa una chiamata.
+        # Si prende l'ultima voce di history che abbia davvero delle statistiche - le voci vengono
+        # appese solo quando l'API ha risposto con dati, ma la guardia esplicita costa nulla e
+        # copre il caso di uno storico ripristinato dal backup con voci di forma diversa.
+        history = stato.get("history") or []
+        ultimo_punto = next((h for h in reversed(history) if h.get("stats")), None)
+        statistiche_finale_text = ""
+        if ultimo_punto:
+            stats_ultime = ultimo_punto["stats"]
+            minuto_ultimo = ultimo_punto.get("minuto")
+            tiri = stats_ultime.get("Tiri totali", ("?", "?"))
+            porta = stats_ultime.get("Tiri in porta", ("?", "?"))
+            corner = stats_ultime.get("Corner", ("?", "?"))
+            al_minuto = f" (al {minuto_ultimo}')" if minuto_ultimo else ""
+            statistiche_finale_text = (
+                f"Statistiche all'ultimo rilevamento{al_minuto}:\n"
+                f"- Tiri totali: {tiri[0]} - {tiri[1]}\n"
+                f"- Tiri in porta: {porta[0]} - {porta[1]}\n"
+                f"- Corner: {corner[0]} - {corner[1]}\n"
+            )
+            stats_1h_salvate = stato.get("stats_fine_1h")
+            if stats_1h_salvate:
+                statistiche_finale_text += testo_confronto_tempi(stats_1h_salvate, stats_ultime)
+            elif len(history) > 1:
+                statistiche_finale_text += testo_confronto_tempi_parziale(history, stats_ultime)
+
         messaggio = (
             f"{home} vs {away}\n"
             f"{formatta_lega(league_name, league_country)}\n"
@@ -8428,6 +8468,7 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
             f"{goals_text}"
             f"{cartellini_finale_text}"
             f"{rigori_finale_text}"
+            f"{statistiche_finale_text}"
         )
 
     chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
