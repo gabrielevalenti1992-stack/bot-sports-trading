@@ -7594,9 +7594,33 @@ def fascia_minuto(elapsed):
 
 
 def risolvi_leghe_whitelist():
-    """Risolve (id, stagione) per ogni campionato in whitelist interrogando /leagues una sola
-    volta (cache 24h), per costruire/aggiornare lo storico minutaggi senza dover indovinare gli
-    ID numerici delle leghe usati dall'API."""
+    """Risolve (nome, paese, stagione) per ogni campionato in whitelist interrogando /leagues una
+    sola volta (cache 24h), per costruire/aggiornare lo storico minutaggi senza dover indovinare
+    gli ID numerici delle leghe usati dall'API. La mappa e' indicizzata per league_id.
+
+    DUE CORREZIONI, entrambe visibili in produzione il 03/09.
+
+    1) IL FILTRO E' QUELLO DEL BOT, NON UNO SUO.
+    Qui c'era un match a sottostringa bidirezionale sul solo nome
+    ("lega in nome or nome in lega"), senza guardare il paese. Cosi' "Premier League",
+    "Championship", "Serie A", "Super League" - nomi che esistono identici in decine di
+    federazioni - facevano entrare tutte le omonime: 234 leghe risolte a fronte di 82 voci in
+    whitelist. Il bot sapeva gia' come si fa, in campionato_valido(): match a confine di parola,
+    match esatto per le competizioni internazionali e, per i nomi ambigui, il paese atteso
+    (PAESE_ATTESO_LEGA_AMBIGUA dice "premier league" -> "england"). Erano due definizioni di
+    "questa lega e' in whitelist" che davano risposte diverse, ed e' la seconda ad avere ragione.
+
+    2) LA MAPPA E' INDICIZZATA PER ID, NON PER NOME.
+    Con la chiave sul nome, tutte le "Premier League" del mondo finivano nella stessa voce e
+    vinceva l'ultima arrivata: quella inglese veniva sovrascritta in silenzio. Nei log del 28/08 e
+    del 03/09 la lega 39 non compare in nessuna delle due esecuzioni, mentre Serie A (135),
+    La Liga (140), Bundesliga (78) e Ligue 1 (61) ci sono tutte - lo storico minutaggi della
+    Premier League non esisteva, e /analisi su una partita inglese non aveva dati.
+
+    Restano fuori portata i nomi ambigui che non hanno una voce in PAESE_ATTESO_LEGA_AMBIGUA (per
+    esempio "Serie A" brasiliana): li' passano ancora tutte le omonime, ma e' esattamente cio' che
+    fa anche il filtro live, quindi storico e tracciamento restano coerenti fra loro. Aggiungere
+    una voce a quella mappa li sistema entrambi in un colpo solo."""
     global LEGHE_ID_STAGIONE_CACHE, LEGHE_ID_STAGIONE_TIMESTAMP
     now = time.time()
     if LEGHE_ID_STAGIONE_CACHE and (now - LEGHE_ID_STAGIONE_TIMESTAMP) < LEGHE_ID_STAGIONE_TTL:
@@ -7609,22 +7633,26 @@ def risolvi_leghe_whitelist():
     if data is None:
         return LEGHE_ID_STAGIONE_CACHE
     mappa = {}
+    scartate = 0
     for item in data.get("response", []):
         league = item.get("league", {})
         nome = league.get("name", "")
         league_id = league.get("id")
+        paese = (item.get("country") or {}).get("name", "")
         if not nome or not league_id:
             continue
-        if not any(lega.lower() in nome.lower() or nome.lower() in lega.lower() for lega in LEGHE_CON_STATISTICHE):
+        if not campionato_valido(nome, league.get("type", ""), paese):
+            scartate += 1
             continue
         for season in item.get("seasons", []):
             if season.get("current"):
-                mappa[nome] = (league_id, season.get("year"))
+                mappa[league_id] = (nome, paese, season.get("year"))
                 break
     if mappa:
         LEGHE_ID_STAGIONE_CACHE = mappa
         LEGHE_ID_STAGIONE_TIMESTAMP = now
-        log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione")
+        log(f"Storico minutaggi: risolte {len(mappa)} leghe whitelist con ID e stagione "
+            f"({scartate} scartate dal filtro campionati)")
     return LEGHE_ID_STAGIONE_CACHE
 
 
@@ -7730,7 +7758,7 @@ def aggiorna_storico_minutaggi_tutte_leghe():
         log("Storico minutaggi: nessuna lega whitelist risolta, skip aggiornamento")
         return 0
     totale = 0
-    for nome, (league_id, season) in mappa.items():
+    for league_id, (nome, paese, season) in mappa.items():
         if not season:
             continue
         totale += aggiorna_storico_minutaggi_lega(league_id, season)
@@ -7756,7 +7784,7 @@ def aggiorna_storico_minutaggi_automatico():
         return
     now = time.time()
     processate_in_questo_giro = 0
-    for nome, (league_id, season) in mappa.items():
+    for league_id, (nome, paese, season) in mappa.items():
         if processate_in_questo_giro >= STORICO_MAX_FIXTURES_PER_RUN:
             log(f"Storico minutaggi: raggiunto il limite di {STORICO_MAX_FIXTURES_PER_RUN} partite per questo ciclo, riprendo al prossimo")
             break
@@ -7766,7 +7794,7 @@ def aggiorna_storico_minutaggi_automatico():
         ultimo = lega_dati.get("ultimo_aggiornamento", 0)
         if now - ultimo < INTERVALLO_AGGIORNAMENTO_STORICO:
             continue
-        log(f"Storico minutaggi: aggiornamento automatico lega {nome} ({league_id})")
+        log(f"Storico minutaggi: aggiornamento automatico lega {nome} - {paese} ({league_id})")
         processate_in_questo_giro += aggiorna_storico_minutaggi_lega(
             league_id, season, max_fixtures=STORICO_MAX_FIXTURES_PER_RUN - processate_in_questo_giro
         )
