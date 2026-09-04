@@ -7644,10 +7644,20 @@ def risolvi_leghe_whitelist():
         if not campionato_valido(nome, league.get("type", ""), paese):
             scartate += 1
             continue
-        for season in item.get("seasons", []):
-            if season.get("current"):
-                mappa[league_id] = (nome, paese, season.get("year"))
-                break
+        # LA STAGIONE PIU' RECENTE FRA QUELLE MARCATE "current", non la prima dell'elenco.
+        #
+        # Non e' pignoleria: la stagione scelta qui e' la chiave con cui
+        # aggiorna_storico_minutaggi_lega() decide se lo storico di quella lega e' ancora valido,
+        # e se cambia BUTTA VIA tutto - partite gia' scaricate e statistiche accumulate per
+        # squadra - ripartendo da zero. Con "prendi la prima" bastava che l'API elencasse in
+        # ordine diverso due stagioni entrambe marcate current (succede intorno al rollover) per
+        # far oscillare l'anno fra una risoluzione e l'altra, e ogni oscillazione significa
+        # riscaricare da capo l'intera lega. Con il massimo la scelta e' deterministica: lo stesso
+        # insieme di stagioni da sempre la stessa risposta, in qualunque ordine arrivi.
+        anni_correnti = [s.get("year") for s in item.get("seasons", [])
+                         if s.get("current") and s.get("year") is not None]
+        if anni_correnti:
+            mappa[league_id] = (nome, paese, max(anni_correnti))
     if mappa:
         LEGHE_ID_STAGIONE_CACHE = mappa
         LEGHE_ID_STAGIONE_TIMESTAMP = now
@@ -7679,6 +7689,15 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
 
     lega_dati = STORICO_MINUTAGGI.get(league_key)
     if not lega_dati or lega_dati.get("stagione") != season:
+        # Il reset non e' piu' silenzioso. Butta via le partite gia' scaricate E le statistiche
+        # per squadra, e rimette in coda l'intero campionato: e' la cosa piu' costosa che questa
+        # funzione possa fare, e finora non lasciava traccia. Se ricompare senza che sia
+        # cambiata davvero la stagione, il log lo dice subito invece di far scoprire il problema
+        # da una bolletta di chiamate API.
+        if lega_dati:
+            log(f"Storico minutaggi: lega {league_id} azzerata, stagione cambiata da "
+                f"{lega_dati.get('stagione')} a {season} - "
+                f"{len(lega_dati.get('fixture_ids_processati', []))} partite da riscaricare")
         lega_dati = {"stagione": season, "fixture_ids_processati": [], "squadre": {}, "ultimo_aggiornamento": 0}
 
     fixtures = get_fixtures_terminati(league_id, season)
