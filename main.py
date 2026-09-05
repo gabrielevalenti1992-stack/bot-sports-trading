@@ -1810,8 +1810,20 @@ def squadra_dominava_prima_del_gol(stats_precedenti, lato_che_segna):
     return tiri[1] > tiri[0] and corner[1] > corner[0] and area[1] > area[0]
 
 
-def registra_gol_dominanza(squadra, ha_dominato, quanti=1):
+def registra_gol_dominanza(squadra, ha_dominato, quanti=1, team_id=None):
     """quanti = di quanto e' salito il punteggio di questa squadra fra due letture consecutive.
+
+    team_id: la voce si indicizza per ID squadra quando lo si conosce, non per nome. Il nome nudo
+    non identifica una squadra: due club diversi possono chiamarsi allo stesso modo in campionati
+    diversi, e questa classifica - a differenza di tutte le altre raccolte del bot - non aveva
+    ne' il paese ne' la lega nella chiave, quindi le avrebbe sommate in una voce sola. Sarebbe
+    uscita una percentuale che non descrive nessuna delle due: 4 gol da dominanza su 10 fra una
+    squadra al 100% e una allo 0% danno un 40% che non e' di nessuno.
+
+    Quando arriva un team_id e per quello stesso nome esiste ancora una vecchia voce indicizzata
+    per nome, i suoi contatori vengono assorbiti nella voce per ID e la vecchia sparisce: una
+    migrazione una tantum, che evita di ritrovarsi la stessa squadra due volte in classifica
+    durante il passaggio.
 
     Non e' sempre 1: fra un ciclo e l'altro passano INTERVALLO_CICLO_ATTIVO secondi (di piu' se
     c'e' stato un raffreddamento da rate-limit), e in quella finestra la stessa squadra puo'
@@ -1831,8 +1843,19 @@ def registra_gol_dominanza(squadra, ha_dominato, quanti=1):
         return
     if not CLASSIFICA_DOMINANZA_INIZIO:
         CLASSIFICA_DOMINANZA_INIZIO = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%d/%m/%Y")
+    chiave = str(team_id) if team_id is not None else squadra
     voce = CLASSIFICA_DOMINANZA.setdefault(
-        squadra, {"gol_visti": 0, "gol_con_stats": 0, "gol_da_dominanza": 0})
+        chiave, {"gol_visti": 0, "gol_con_stats": 0, "gol_da_dominanza": 0})
+    # Il nome va tenuto dentro la voce: con la chiave numerica non si ricava piu' dalla chiave,
+    # e serve per scrivere la classifica. Si riscrive ogni volta, cosi' un club che cambia
+    # denominazione a stagione in corso non resta indicizzato col nome vecchio.
+    if team_id is not None:
+        voce["nome"] = squadra
+        # Migrazione una tantum della vecchia voce per nome, se c'e'.
+        vecchia = CLASSIFICA_DOMINANZA.pop(squadra, None) if squadra != chiave else None
+        if vecchia:
+            for campo in ("gol_visti", "gol_con_stats", "gol_da_dominanza"):
+                voce[campo] = voce.get(campo, 0) + vecchia.get(campo, 0)
     # .get sul primo: le voci scritte prima che gol_visti esistesse non ce l'hanno.
     voce["gol_visti"] = voce.get("gol_visti", 0) + quanti
     if ha_dominato is not None:
@@ -1853,9 +1876,12 @@ def testo_classifica_dominanza(minimo_gol=2, top_n=20):
     quelli di partite che il bot non stava seguendo. Il messaggio lo dice, perche' letto come
     "gol fatti" quel numero sembra sbagliato - ed e' la prima cosa che si nota confrontandolo con
     il tabellino."""
+    # Le voci nuove sono indicizzate per ID e portano il nome dentro; quelle vecchie, scritte
+    # quando la chiave era il nome stesso, non hanno il campo "nome" e ricadono sulla chiave.
     righe = [
-        (squadra, dati["gol_da_dominanza"], dati["gol_con_stats"], dati.get("gol_visti", 0))
-        for squadra, dati in CLASSIFICA_DOMINANZA.items()
+        (dati.get("nome", chiave), dati["gol_da_dominanza"], dati["gol_con_stats"],
+         dati.get("gol_visti", 0))
+        for chiave, dati in CLASSIFICA_DOMINANZA.items()
         if dati["gol_con_stats"] >= minimo_gol
     ]
     if not righe:
@@ -9215,9 +9241,11 @@ def processa_partita(fixture, notifiche_attive=True):
             stats_precedenti = history_precedente[-1]["stats"] if history_precedente else None
             # Il numero di gol, non "almeno uno": registra_gol_dominanza esce da sola se e' 0 o meno.
             registra_gol_dominanza(home, squadra_dominava_prima_del_gol(stats_precedenti, "home"),
-                                   score_home - prev_score_home)
+                                   score_home - prev_score_home,
+                                   team_id=fixture["teams"]["home"].get("id"))
             registra_gol_dominanza(away, squadra_dominava_prima_del_gol(stats_precedenti, "away"),
-                                   score_away - prev_score_away)
+                                   score_away - prev_score_away,
+                                   team_id=fixture["teams"]["away"].get("id"))
         elif punteggio_corretto_al_ribasso:
             # Nessuna notifica: il risultato mostrato resta comunque aggiornato (lo stato viene
             # riscritto poco più sotto), ma dire "gol" per un gol tolto è il contrario di quello
