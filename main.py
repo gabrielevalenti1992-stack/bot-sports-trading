@@ -5402,6 +5402,8 @@ def cmd_diagnostica(chat_id):
                 "stats": current_stats_diag, "delta": delta_diag, "delta_reale": delta_reale_diag,
                 "xg_home": xg_diag[0], "xg_away": xg_diag[1],
                 "league_id": _LEGA_PER_FIXTURE.get(fid),
+                "home_id": f["teams"]["home"].get("id"),
+                "away_id": f["teams"]["away"].get("id"),
                 "stato_precedente": stato,
             }
             scattate = [emoji for _n, emoji, valuta_fn, _d in STRATEGIE if valuta_fn(p_diag) is not None]
@@ -6572,11 +6574,15 @@ def valuta_fasciacalda(p):
     due squadre segna o subisce, storicamente e nel proprio ruolo, molto sopra la media — solo se
     la partita non è già in goleada.
 
-    Lo storico guardato è SOLO quello del campionato in cui si sta giocando (league_id): senza
-    quel vincolo la ricerca per nome può pescare un omonimo di un altro campionato — vedi il
-    commento in trova_squadra_in_storico. Se il campionato non si conosce, o non è ancora nello
-    storico, la strategia tace: meglio nessun segnale che un segnale costruito sui gol di
-    un'altra squadra."""
+    Lo storico guardato è SOLO quello del campionato in cui si sta giocando (league_id), e la
+    squadra si cerca per team_id quando p lo porta (squadra_in_storico_per_id): un lookup esatto,
+    la stessa chiave con cui lo storico è già indicizzato, senza alcuna ambiguità possibile - a
+    differenza del confronto per nome (trova_squadra_in_storico), che resta solo come ripiego per
+    i chiamanti che non conoscono l'id. Prima di questa distinzione, un omonimo nello STESSO
+    campionato (raro ma non impossibile) o un cambio di denominazione a stagione in corso
+    potevano ancora ingannare il confronto testuale. Se il campionato non si conosce, o non è
+    ancora nello storico, la strategia tace: meglio nessun segnale che un segnale costruito sui
+    gol di un'altra squadra."""
     if abs(p["score_h"] - p["score_a"]) >= SOGLIA_FASCIACALDA_GOLEADA:
         return None
     league_id = p.get("league_id")
@@ -6584,7 +6590,9 @@ def valuta_fasciacalda(p):
         return None
     fascia = fascia_minuto(p["minute"])
     candidati = []
-    squadra_casa = trova_squadra_in_storico(p["home"], league_id)
+    home_id = p.get("home_id")
+    squadra_casa = (squadra_in_storico_per_id(league_id, home_id) if home_id is not None
+                    else trova_squadra_in_storico(p["home"], league_id))
     if squadra_casa and squadra_casa["casa"]["partite"] >= SOGLIA_FASCIACALDA_PARTITE_MIN:
         partite = squadra_casa["casa"]["partite"]
         fatti = squadra_casa["casa"]["fatti"].get(fascia, 0)
@@ -6593,7 +6601,9 @@ def valuta_fasciacalda(p):
             candidati.append((fatti / partite, f"{p['home']} segna spesso in casa in questa fascia ({fatti}/{partite} partite)"))
         if subiti / partite >= SOGLIA_FASCIACALDA_MEDIA:
             candidati.append((subiti / partite, f"{p['home']} subisce spesso in casa in questa fascia ({subiti}/{partite} partite)"))
-    squadra_trasferta = trova_squadra_in_storico(p["away"], league_id)
+    away_id = p.get("away_id")
+    squadra_trasferta = (squadra_in_storico_per_id(league_id, away_id) if away_id is not None
+                         else trova_squadra_in_storico(p["away"], league_id))
     if squadra_trasferta and squadra_trasferta["trasferta"]["partite"] >= SOGLIA_FASCIACALDA_PARTITE_MIN:
         partite = squadra_trasferta["trasferta"]["partite"]
         fatti = squadra_trasferta["trasferta"]["fatti"].get(fascia, 0)
@@ -7880,6 +7890,25 @@ def aggiorna_storico_minutaggi_automatico():
             league_id, season, max_fixtures=STORICO_MAX_FIXTURES_PER_RUN - processate_in_questo_giro
         )
         time.sleep(1)
+
+
+def squadra_in_storico_per_id(league_id, team_id):
+    """Lookup ESATTO per team_id, dentro il solo campionato indicato: zero ambiguita' possibile,
+    a differenza di trova_squadra_in_storico che confronta nomi. team_id e' l'id assegnato da
+    API-Football, univoco su TUTTI i campionati (non solo all'interno di uno), ed e' la stessa
+    chiave con cui aggiorna_storico_minutaggi_lega indicizza gia' lo storico - due squadre
+    diverse, anche omonime in leghe diverse, non possono mai avere lo stesso team_id.
+
+    Va preferita a trova_squadra_in_storico ovunque il chiamante conosca gia' l'id (ogni
+    fixture live la porta in teams.home.id / teams.away.id): la ricerca per nome resta
+    necessaria solo dove l'id non c'e', cioe' quando l'utente scrive un nome a mano
+    (/analisi, /status)."""
+    if league_id is None or team_id is None:
+        return None
+    lega_dati = STORICO_MINUTAGGI.get(str(league_id))
+    if not lega_dati:
+        return None
+    return lega_dati.get("squadre", {}).get(str(team_id))
 
 
 def trova_squadra_in_storico(nome_query, league_id=None):
@@ -9687,9 +9716,14 @@ def processa_partita(fixture, notifiche_attive=True):
                     "score_h": score_home, "score_a": score_away,
                     "stats": current_stats, "delta": delta_stats, "delta_reale": is_real_delta,
                     "xg_home": xg_casa, "xg_away": xg_ospite,
-                    # Il campionato serve a Fascia calda per cercare le due squadre solo nel
-                    # proprio storico e non fra gli omonimi di altri campionati.
+                    # Il campionato e gli id squadra servono a Fascia calda per cercare le due
+                    # squadre nello storico per ID esatto (squadra_in_storico_per_id), non per
+                    # nome: zero ambiguita' possibile, anche fra omonimi nello stesso campionato.
+                    # Gli id sono gia' nella risposta live (fixture["teams"][...]["id"]), nessuna
+                    # chiamata in piu' per averli.
                     "league_id": _LEGA_PER_FIXTURE.get(fixture_id),
+                    "home_id": fixture["teams"]["home"].get("id"),
+                    "away_id": fixture["teams"]["away"].get("id"),
                     "stato_precedente": stato_partite.get(fixture_id, {}),
                 }
                 segnali = []
