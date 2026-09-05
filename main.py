@@ -5252,11 +5252,12 @@ def cmd_dominio(chat_id):
 
     parti = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato"]
     if righe_sotto:
-        parti.append("🔥 *DOMINA E PERDE*\n" + "\n\n".join(ordina(righe_sotto)))
+        parti.append(f"{SIMBOLI_DOMINIO['sotto']} *DOMINA E PERDE*\n" + "\n\n".join(ordina(righe_sotto)))
     if righe_bloccate:
-        parti.append("⚡ *DOMINA E NON SEGNA*\n" + "\n\n".join(ordina(righe_bloccate)))
+        parti.append(f"{SIMBOLI_DOMINIO['bloccata']} *DOMINA E NON SEGNA*\n" + "\n\n".join(ordina(righe_bloccate)))
     if righe_avanti:
-        parti.append("▪️ *DOMINA ED È AVANTI* (il risultato rispecchia)\n" + "\n\n".join(ordina(righe_avanti)))
+        parti.append(f"{SIMBOLI_DOMINIO['avanti']} *DOMINA ED È AVANTI* (il risultato rispecchia)\n"
+                     + "\n\n".join(ordina(righe_avanti)))
     if senza_dominio:
         parti.append(f"_Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco._"
                      if senza_dominio > 1 else
@@ -6358,6 +6359,21 @@ def barra_dominio(quota):
     return "▓" * pieni + "░" * (10 - pieni)
 
 
+# Simboli delle tre situazioni di dominio, in un posto solo: la riga di notifica
+# (riga_dominio) e il comando /dominio li usavano entrambi scritti a mano, quindi potevano
+# divergere senza che nessuno se ne accorgesse.
+#
+# "sotto" era 🔥, cambiato su richiesta: quella fiamma nel bot vuol dire gia' troppe cose
+# diverse - le fiamme della classifica intensita' (simbolo_fiamma_per_posizione), il pulsante
+# "Intensita'", e soprattutto la fiamma accanto ai valori delle statistiche negli ultimi 15
+# minuti. Nella stessa notifica comparivano fianco a fianco con significati diversi.
+#
+# Il sostituto e' 🥊 e non un simbolo qualsiasi: prima di sceglierlo si e' controllato che non
+# fosse gia' in uso altrove nel file, che era esattamente il difetto della fiamma. 🎯 per esempio
+# sarebbe stato un doppione dell'emoji della strategia "Concretezza".
+SIMBOLI_DOMINIO = {"sotto": "🥊", "bloccata": "⚡", "avanti": "▪️"}
+
+
 def riga_dominio(dominio, home, away, current_stats):
     """Una riga sola che risponde a 'chi comanda e conviene guardarla?'."""
     if not dominio:
@@ -6372,7 +6388,7 @@ def riga_dominio(dominio, home, away, current_stats):
         "bloccata": "e non segna",
         "avanti": "ed è avanti",
     }[dominio["situazione"]]
-    emoji = {"sotto": "🔥", "bloccata": "⚡", "avanti": "▪️"}[dominio["situazione"]]
+    emoji = SIMBOLI_DOMINIO[dominio["situazione"]]
     return (f"{emoji} {chi} comanda {dominio['quota']}% {coda} "
             f"({tiri[0]}-{tiri[1]} tiri, {porta[0]}-{porta[1]} in porta)")
 
