@@ -237,3 +237,10 @@ certs/
 *.key
 *.crt
 
+
+# Grafici generati a runtime da matplotlib (genera_grafico_barre/momentum/combinato/minutaggi):
+# vivono il tempo di un invio Telegram, non vanno versionati
+chart_*.png
+momentum_*.png
+combinato_*.png
+minutaggi_*.png
