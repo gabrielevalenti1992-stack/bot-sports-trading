@@ -6469,7 +6469,19 @@ SOGLIA_ASSEDIO_RITMO_MIN = 4
 PESO_ASSEDIO_XG = 3
 
 SOGLIA_FASCIACALDA_MEDIA = 0.30
-SOGLIA_FASCIACALDA_PARTITE_MIN = 9
+# Quante partite NEL RUOLO (casa per la squadra di casa, trasferta per l'ospite) servono prima di
+# guardare la media di fascia. Era 9, fissa nel codice, ed e' il motivo per cui la strategia
+# risultava a 0 su 7077 righe di shadow-log: con lo storico minutaggi caricato 30 partite per lega
+# a esecuzione, e i campionati europei a 2-3 giornate giocate, nessuna squadra arrivava a 9 partite
+# in casa - misurato il 03/09 su tutte le leghe whitelist, da 0.5 (Bundesliga) a 1.9 (Belgio)
+# partite nel ruolo a testa.
+#
+# Abbassata a 2 su richiesta, per far uscire dei numeri dallo shadow-log invece di una colonna di
+# zeri. Il prezzo va tenuto presente quando si leggeranno quei numeri: con 2 partite basta UN gol
+# in una fascia per superare la soglia di 0.30 (1/2 = 0.50), quindi il segnale diventa molto piu'
+# rumoroso e la sua frequenza NON e' confrontabile con quella misurata a 9. Ora sta in config.json
+# proprio per poterla rialzare quando lo storico sara' pieno, senza toccare il codice.
+SOGLIA_FASCIACALDA_PARTITE_MIN = 2
 SOGLIA_FASCIACALDA_GOLEADA = 3
 
 SOGLIA_RIMONTA_MIN = 4
@@ -6483,6 +6495,29 @@ SOGLIA_XGTIRO_MIN = 0.15
 
 SOGLIA_QUALITA_DIFF_TIRI_MAX = 2
 SOGLIA_QUALITA_DIFF_INDICE_MIN = 0.25
+
+# Le soglie di Fascia calda si possono cambiare da config.json, e vanno riapplicate QUI e non nel
+# blocco che legge config.json piu' su (riga ~980): quel blocco gira prima di queste assegnazioni,
+# quindi un valore letto la' verrebbe subito sovrascritto dalle righe qui sopra e l'override
+# sarebbe silenziosamente perso. `config` e' il dizionario gia' caricato da quel blocco; se la
+# lettura del file era fallita il nome non esiste e restano i default scritti sopra.
+try:
+    SOGLIA_FASCIACALDA_MEDIA = config.get("soglia_fasciacalda_media", SOGLIA_FASCIACALDA_MEDIA)
+    SOGLIA_FASCIACALDA_PARTITE_MIN = config.get(
+        "soglia_fasciacalda_partite_min", SOGLIA_FASCIACALDA_PARTITE_MIN)
+    SOGLIA_FASCIACALDA_GOLEADA = config.get(
+        "soglia_fasciacalda_goleada", SOGLIA_FASCIACALDA_GOLEADA)
+except NameError:
+    pass
+
+# La soglia va detta all'avvio. La modalita' essenziale ha insegnato che un parametro che cambia
+# il comportamento senza comparire da nessuna parte resta acceso per giorni senza che si veda.
+print(f"Strategia Fascia calda: almeno {SOGLIA_FASCIACALDA_PARTITE_MIN} partite nel ruolo "
+      f"(casa/trasferta), media di fascia >= {SOGLIA_FASCIACALDA_MEDIA} gol a partita"
+      + (f" | ATTENZIONE: con {SOGLIA_FASCIACALDA_PARTITE_MIN} partite basta un solo gol in una "
+         f"fascia per superare la media, il segnale e' rumoroso e la sua frequenza non e' "
+         f"confrontabile con quella misurata a soglie piu' alte"
+         if SOGLIA_FASCIACALDA_PARTITE_MIN < 5 else ""), flush=True)
 
 
 def estrai_xg(stats_team):
