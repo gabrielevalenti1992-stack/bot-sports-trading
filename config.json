@@ -161,5 +161,6 @@
   "minuto_inizio_stop_finale": 80,
   "minuto_fine_stop_finale": 90,
   "scarto_stop_finale": 2,
-  "scarto_max_notifica_recupero": 1
+  "scarto_max_notifica_recupero": 1,
+  "limite_didascalia_telegram": 1024
 }

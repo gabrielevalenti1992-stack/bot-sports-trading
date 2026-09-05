@@ -301,6 +301,11 @@ SCARTO_STOP_FINALE = 2
 # Su una partita gia' indirizzata quel messaggio non aggiunge niente.
 SCARTO_MAX_NOTIFICA_RECUPERO = 1
 
+# Limite di Telegram per la didascalia di una foto: 1024 caratteri, contro i 4096 di un messaggio
+# di solo testo. Chi allega un grafico deve stare sotto questa soglia o perde tutto il messaggio,
+# non solo l'immagine (l'API risponde 400 e non invia niente).
+LIMITE_DIDASCALIA_TELEGRAM = 1024
+
 # Auto-preferiti: una partita che si accende merita di essere seguita dal canale preferiti senza
 # aspettare che venga cliccata a mano tra le tante notifiche normali.
 #
@@ -994,6 +999,7 @@ try:
     MINUTO_FINE_STOP_FINALE = config.get("minuto_fine_stop_finale", MINUTO_FINE_STOP_FINALE)
     SCARTO_STOP_FINALE = config.get("scarto_stop_finale", SCARTO_STOP_FINALE)
     SCARTO_MAX_NOTIFICA_RECUPERO = config.get("scarto_max_notifica_recupero", SCARTO_MAX_NOTIFICA_RECUPERO)
+    LIMITE_DIDASCALIA_TELEGRAM = config.get("limite_didascalia_telegram", LIMITE_DIDASCALIA_TELEGRAM)
     AUTO_PREFERITI_ATTIVO = config.get("auto_preferiti_attivo", AUTO_PREFERITI_ATTIVO)
     AUTO_PREFERITI_GOL_ATTIVO = config.get("auto_preferiti_gol_attivo", AUTO_PREFERITI_GOL_ATTIVO)
     SOGLIA_GOL_AUTO_PREFERITI = config.get("soglia_gol_auto_preferiti", SOGLIA_GOL_AUTO_PREFERITI)
@@ -8420,6 +8426,7 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
         )
         SILENCED_MATCHES.pop(str(fixture_id), None)
         save_silenced(SILENCED_MATCHES)
+        foto_recap = None
     else:
         goals_text = testo_primo_ultimo_gol(goals, home, away)
         cartellini_finale_text = ""
@@ -8460,19 +8467,70 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
             elif len(history) > 1:
                 statistiche_finale_text += testo_confronto_tempi_parziale(history, stats_ultime)
 
+        # Testa del messaggio: le stesse righe che porta la notifica in diretta, e che qui
+        # mancavano tutte. Nessuna delle tre costa una chiamata.
+        #
+        #  - Quote 1X2: quote_1x2_per_fixture legge PIANO_GIORNATA, che e' gia' in memoria e
+        #    copre tutta la giornata (si rigenera alle 12:00 italiane, quindi una partita che
+        #    finisce a mezzanotte e' ancora dentro il piano che l'ha vista nascere). Sono il dato
+        #    per cui il recap serve davvero: senza la quota di partenza il risultato finale non
+        #    dice se il mercato aveva ragione. Il 04/09 erano state trovate per 60 partite su 64.
+        #  - Recupero: sta in stato_partite, scritto ciclo per ciclo da processa_partita.
+        #  - Andata: idem, per i ritorni delle qualificazioni UEFA. Senza, il risultato finale di
+        #    un ritorno si legge senza sapere da dove si partiva.
+        quote_iniziali = quote_1x2_per_fixture(fixture_id)
+        quote_finale_text = testo_quote_1x2(quote_iniziali)
+
+        recupero_parti = []
+        if stato.get("recupero_1h"):
+            recupero_parti.append(f"1° tempo +{stato['recupero_1h']}'")
+        if stato.get("recupero_2h"):
+            recupero_parti.append(f"2° tempo +{stato['recupero_2h']}'")
+        recupero_finale_text = f"Recupero: {', '.join(recupero_parti)}\n" if recupero_parti else ""
+
+        andata_info = stato.get("andata_info")
+        andata_text = ""
+        titolo_ritorno = ""
+        if andata_info:
+            titolo_ritorno = " (RITORNO)"
+            andata_text = (
+                f"🔄 Andata: {andata_info['home']} {andata_info['score_home']} - "
+                f"{andata_info['score_away']} {andata_info['away']}\n\n"
+            )
+
         messaggio = (
-            f"{home} vs {away}\n"
+            f"{home} vs {away}{titolo_ritorno}\n"
             f"{formatta_lega(league_name, league_country)}\n"
             f"RISULTATO FINALE\n\n"
+            f"{andata_text}"
             f"{score_home} - {score_away}\n"
+            f"{quote_finale_text}"
             f"{goals_text}"
+            f"{recupero_finale_text}"
             f"{cartellini_finale_text}"
             f"{rigori_finale_text}"
             f"{statistiche_finale_text}"
         )
 
+        # Il grafico a barre e' l'unica cosa che qui si costruisce da zero, ma dalle statistiche
+        # gia' in memoria: matplotlib, nessuna chiamata di rete. Va pero' inviato come DIDASCALIA
+        # di una foto, e Telegram limita le didascalie a 1024 caratteri contro i 4096 di un
+        # messaggio di testo. Questo recap e' il messaggio piu' lungo che il bot scriva (gol,
+        # rossi, rigori, statistiche e confronto tempi tutti insieme), quindi se il testo non ci
+        # sta si rinuncia al grafico e non al messaggio: meglio il recap completo senza immagine
+        # che una notifica rifiutata da Telegram e persa del tutto.
+        foto_recap = None
+        if ultimo_punto and len(messaggio) <= LIMITE_DIDASCALIA_TELEGRAM:
+            foto_recap = genera_grafico_barre(fixture_id, home, away, stats_ultime)
+        elif ultimo_punto:
+            log(f"Recap finale {fixture_id}: grafico omesso, didascalia di {len(messaggio)} "
+                f"caratteri oltre il limite Telegram di {LIMITE_DIDASCALIA_TELEGRAM}")
+
     chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
-    invia_messaggio_telegram(messaggio, chat_id=chat_destinazione)
+    if foto_recap:
+        invia_notifica_telegram(foto_recap, messaggio, chat_id=chat_destinazione)
+    else:
+        invia_messaggio_telegram(messaggio, chat_id=chat_destinazione)
 
 
 def chiudi_shadow_log_partite_sparite(fixture_ids, notifiche_attive):
