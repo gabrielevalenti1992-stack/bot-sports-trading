@@ -163,7 +163,7 @@
   "scarto_stop_finale": 2,
   "scarto_max_notifica_recupero": 1,
   "limite_didascalia_telegram": 1024,
-  "soglia_fasciacalda_partite_min": 2,
+  "soglia_fasciacalda_partite_min": 4,
   "soglia_fasciacalda_media": 0.3,
   "soglia_fasciacalda_goleada": 3
 }

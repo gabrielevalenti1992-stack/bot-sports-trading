@@ -2,6 +2,7 @@ import collections
 import copy
 import hashlib
 import json
+import math
 import re
 import traceback
 import unicodedata
@@ -5400,6 +5401,7 @@ def cmd_diagnostica(chat_id):
                 "score_h": stato.get("score_home", 0), "score_a": stato.get("score_away", 0),
                 "stats": current_stats_diag, "delta": delta_diag, "delta_reale": delta_reale_diag,
                 "xg_home": xg_diag[0], "xg_away": xg_diag[1],
+                "league_id": _LEGA_PER_FIXTURE.get(fid),
                 "stato_precedente": stato,
             }
             scattate = [emoji for _n, emoji, valuta_fn, _d in STRATEGIE if valuta_fn(p_diag) is not None]
@@ -6476,12 +6478,16 @@ SOGLIA_FASCIACALDA_MEDIA = 0.30
 # in casa - misurato il 03/09 su tutte le leghe whitelist, da 0.5 (Bundesliga) a 1.9 (Belgio)
 # partite nel ruolo a testa.
 #
-# Abbassata a 2 su richiesta, per far uscire dei numeri dallo shadow-log invece di una colonna di
-# zeri. Il prezzo va tenuto presente quando si leggeranno quei numeri: con 2 partite basta UN gol
-# in una fascia per superare la soglia di 0.30 (1/2 = 0.50), quindi il segnale diventa molto piu'
-# rumoroso e la sua frequenza NON e' confrontabile con quella misurata a 9. Ora sta in config.json
-# proprio per poterla rialzare quando lo storico sara' pieno, senza toccare il codice.
-SOGLIA_FASCIACALDA_PARTITE_MIN = 2
+# Portata a 4 su richiesta: un compromesso fra il far uscire qualcosa dallo shadow-log e il non
+# riempirlo di rumore. La differenza vera non e' il numero in se' ma quanti gol servono per
+# superare la media di 0.30 nella stessa fascia:
+#   2 partite -> 1 gol  (1/2 = 0.50)   qualunque squadra che abbia segnato una volta
+#   4 partite -> 2 gol  (2/4 = 0.50)   serve che si sia ripetuta, e 1 gol solo fa 0.25, sotto
+#   9 partite -> 3 gol  (3/9 = 0.33)
+# A 4 il segnale chiede una ripetizione, che e' il minimo perche' la parola "storicamente" voglia
+# dire qualcosa. Sta in config.json per poterla rialzare quando lo storico sara' pieno, senza
+# toccare il codice.
+SOGLIA_FASCIACALDA_PARTITE_MIN = 4
 SOGLIA_FASCIACALDA_GOLEADA = 3
 
 SOGLIA_RIMONTA_MIN = 4
@@ -6512,12 +6518,18 @@ except NameError:
 
 # La soglia va detta all'avvio. La modalita' essenziale ha insegnato che un parametro che cambia
 # il comportamento senza comparire da nessuna parte resta acceso per giorni senza che si veda.
+#
+# Il numero che conta davvero non e' la soglia ma quanti gol servono nella stessa fascia per
+# superare la media, che dalle due soglie si ricava: 1 gol su 2 partite fa 0.50 e passa, 1 su 4
+# fa 0.25 e non passa. Si calcola invece di scriverlo a mano, cosi' resta vero anche se le soglie
+# vengono cambiate da config.json.
+_GOL_MINIMI_FASCIACALDA = math.ceil(SOGLIA_FASCIACALDA_MEDIA * SOGLIA_FASCIACALDA_PARTITE_MIN)
 print(f"Strategia Fascia calda: almeno {SOGLIA_FASCIACALDA_PARTITE_MIN} partite nel ruolo "
-      f"(casa/trasferta), media di fascia >= {SOGLIA_FASCIACALDA_MEDIA} gol a partita"
-      + (f" | ATTENZIONE: con {SOGLIA_FASCIACALDA_PARTITE_MIN} partite basta un solo gol in una "
-         f"fascia per superare la media, il segnale e' rumoroso e la sua frequenza non e' "
-         f"confrontabile con quella misurata a soglie piu' alte"
-         if SOGLIA_FASCIACALDA_PARTITE_MIN < 5 else ""), flush=True)
+      f"(casa/trasferta) nello stesso campionato, media di fascia >= {SOGLIA_FASCIACALDA_MEDIA} "
+      f"gol a partita (servono {_GOL_MINIMI_FASCIACALDA} gol nella stessa fascia)"
+      + (" | ATTENZIONE: basta UN gol per far scattare il segnale, che risulta quindi molto "
+         "rumoroso e non confrontabile con quello misurato a soglie piu' alte"
+         if _GOL_MINIMI_FASCIACALDA <= 1 else ""), flush=True)
 
 
 def estrai_xg(stats_team):
@@ -6558,12 +6570,21 @@ def valuta_assedio(p):
 def valuta_fasciacalda(p):
     """2. Pattern orario storico: il minuto attuale è dentro una fascia di 15' in cui una delle
     due squadre segna o subisce, storicamente e nel proprio ruolo, molto sopra la media — solo se
-    la partita non è già in goleada."""
+    la partita non è già in goleada.
+
+    Lo storico guardato è SOLO quello del campionato in cui si sta giocando (league_id): senza
+    quel vincolo la ricerca per nome può pescare un omonimo di un altro campionato — vedi il
+    commento in trova_squadra_in_storico. Se il campionato non si conosce, o non è ancora nello
+    storico, la strategia tace: meglio nessun segnale che un segnale costruito sui gol di
+    un'altra squadra."""
     if abs(p["score_h"] - p["score_a"]) >= SOGLIA_FASCIACALDA_GOLEADA:
+        return None
+    league_id = p.get("league_id")
+    if league_id is None:
         return None
     fascia = fascia_minuto(p["minute"])
     candidati = []
-    squadra_casa = trova_squadra_in_storico(p["home"])
+    squadra_casa = trova_squadra_in_storico(p["home"], league_id)
     if squadra_casa and squadra_casa["casa"]["partite"] >= SOGLIA_FASCIACALDA_PARTITE_MIN:
         partite = squadra_casa["casa"]["partite"]
         fatti = squadra_casa["casa"]["fatti"].get(fascia, 0)
@@ -6572,7 +6593,7 @@ def valuta_fasciacalda(p):
             candidati.append((fatti / partite, f"{p['home']} segna spesso in casa in questa fascia ({fatti}/{partite} partite)"))
         if subiti / partite >= SOGLIA_FASCIACALDA_MEDIA:
             candidati.append((subiti / partite, f"{p['home']} subisce spesso in casa in questa fascia ({subiti}/{partite} partite)"))
-    squadra_trasferta = trova_squadra_in_storico(p["away"])
+    squadra_trasferta = trova_squadra_in_storico(p["away"], league_id)
     if squadra_trasferta and squadra_trasferta["trasferta"]["partite"] >= SOGLIA_FASCIACALDA_PARTITE_MIN:
         partite = squadra_trasferta["trasferta"]["partite"]
         fatti = squadra_trasferta["trasferta"]["fatti"].get(fascia, 0)
@@ -7861,15 +7882,35 @@ def aggiorna_storico_minutaggi_automatico():
         time.sleep(1)
 
 
-def trova_squadra_in_storico(nome_query):
-    """Cerca una squadra per nome tra tutte le leghe salvate nello storico. Usa lo stesso
-    matching di /status (accenti, sigle, abbreviazioni, alias noti) via _nomi_squadra_matchano,
-    cosi' /analisi Milan - Juve e la sezione grafico di /status accettano le stesse forme brevi.
-    In caso di piu' corrispondenze sceglie quella con piu' partite giocate."""
+def trova_squadra_in_storico(nome_query, league_id=None):
+    """Cerca una squadra per nome nello storico minutaggi. Usa lo stesso matching di /status
+    (accenti, sigle, abbreviazioni, alias noti) via _nomi_squadra_matchano, cosi' /analisi
+    Milan - Juve e la sezione grafico di /status accettano le stesse forme brevi.
+
+    league_id RESTRINGE la ricerca a quel solo campionato, e va passato ogni volta che si sa in
+    quale campionato si sta giocando. Senza, la ricerca gira su TUTTE le leghe e in caso di piu'
+    corrispondenze tiene quella con piu' partite: un criterio che sugli omonimi sceglie
+    sistematicamente quello sbagliato, perche' le partite caricate non misurano quale squadra
+    sia quella giusta ma solo quanto e' avanti la stagione del suo campionato. Arsenal contro
+    Arsenal de Sarandi, Everton contro Everton de Vina del Mar, Barcelona contro Barcelona SC:
+    a settembre l'omonimo sudamericano ha decine di partite caricate e quello europeo due o tre,
+    quindi vince sempre lui e la squadra inglese si porta dietro le fasce di gol di un'altra
+    squadra, di un altro continente. E' lo stesso errore che il resolver delle leghe faceva
+    indicizzando per nome invece che per id.
+
+    Il default resta la ricerca su tutte le leghe perche' /analisi e /status partono da un nome
+    scritto a mano, senza campionato: li' non c'e' un id da passare."""
     if not nome_query or not nome_query.strip():
         return None
+    if league_id is not None:
+        lega_dati = STORICO_MINUTAGGI.get(str(league_id))
+        if not lega_dati:
+            return None  # di quel campionato non c'e' ancora storico: nessun ripiego altrove
+        leghe = [lega_dati]
+    else:
+        leghe = list(STORICO_MINUTAGGI.values())
     candidati = []
-    for lega_dati in STORICO_MINUTAGGI.values():
+    for lega_dati in leghe:
         for squadra in lega_dati.get("squadre", {}).values():
             nome = squadra.get("nome", "")
             if _nomi_squadra_matchano(nome_query, nome):
@@ -9646,6 +9687,9 @@ def processa_partita(fixture, notifiche_attive=True):
                     "score_h": score_home, "score_a": score_away,
                     "stats": current_stats, "delta": delta_stats, "delta_reale": is_real_delta,
                     "xg_home": xg_casa, "xg_away": xg_ospite,
+                    # Il campionato serve a Fascia calda per cercare le due squadre solo nel
+                    # proprio storico e non fra gli omonimi di altri campionati.
+                    "league_id": _LEGA_PER_FIXTURE.get(fixture_id),
                     "stato_precedente": stato_partite.get(fixture_id, {}),
                 }
                 segnali = []
