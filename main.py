@@ -8524,8 +8524,10 @@ def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, event
     fine gara: l'ultimo giro utile puo' essere caduto qualche minuto prima del fischio finale, e
     il minuto viene scritto accanto proprio per non spacciare un dato dell'87' per un dato del 90'.
 
-    Resta senza grafico, a differenza del recap "in diretta": quello si costruisce dalle
-    statistiche del ciclo corrente, che qui non esiste piu'.
+    Il grafico a barre si costruisce dallo stesso ultimo snapshot in memoria, quindi c'e' anche
+    qui: va pero' inviato come didascalia di una foto, e Telegram limita le didascalie a 1024
+    caratteri contro i 4096 di un messaggio di testo. Se il recap non ci sta si rinuncia
+    all'immagine e non al messaggio (vedi LIMITE_DIDASCALIA_TELEGRAM piu' sotto).
 
     Stessa distinzione muta/non muta del ramo in diretta: una partita silenziata riceve il
     riepilogo compatto "cos'e' successo dopo il silenzio", non il recap completo - tacere una
