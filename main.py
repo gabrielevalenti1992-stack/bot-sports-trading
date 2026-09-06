@@ -599,8 +599,8 @@ MINUTO_RITMO_PIENO_STATISTICHE = 25
 #     subito per avere il nome del marcatore nella notifica;
 #   - alla prima lettura della partita: senza quella base di confronto i cartellini e i rigori
 #     gia' avvenuti verrebbero notificati come nuovi al primo ciclo che chiede davvero;
-#   - a partita finita, prima del recap: cartellini rossi, rigori e minuti dei gol del messaggio
-#     finale vengono da qui, e devono essere completi;
+#   - a partita finita, prima di chiudere lo shadow-log: i minuti dei gol registrati insieme al
+#     risultato vengono da qui, e devono essere completi;
 #   - e comunque una volta ogni CICLI_BACKOFF_EVENTI cicli, come rete di sicurezza.
 #
 # Costo accettato: un cartellino rosso o un rigore SBAGLIATO (quello segnato muove il punteggio, e
@@ -816,7 +816,7 @@ ODDS_BET_NOME = "Match Winner"
 ODDS_REFRESH_MINUTI_PRIMA_KICKOFF = 90  # rifà la chiamata quote quando manca meno di così al kickoff
 
 # Pausa automatica notturna: fuori da questa fascia (ora locale Italia) il bot NON manda
-# notifiche Telegram (proattive: notifiche live, risultato finale, auto-preferiti) - ma il
+# notifiche Telegram (proattive: notifiche live, auto-preferiti) - ma il
 # monitoraggio (statistiche, quote, shadow-log) resta attivo 24 ore su 24, per non perdere dati
 # utili alla validazione futura e per non lasciare orfane le partite che finiscono proprio a
 # cavallo dell'orario di stop. Le risposte a comandi manuali (es. /live a qualsiasi ora) non sono
@@ -1197,6 +1197,37 @@ def squadra_femminile(nome_squadra):
                for parola in PAROLE_ESCLUSE_SQUADRE_FEMMINILI)
 
 
+# Squadre "seconde": la formazione B/riserve di un club, che nei campionati minori gioca sotto un
+# nome che e' quello della prima squadra piu' un suffisso. Non basta squadra_giovanile() qui
+# sopra: quello cerca u21/u23/youth/reserves, mentre "Freiburg II", "Real Sociedad II" e
+# "Barcelona B" non contengono nessuna di quelle parole - e sono squadre vere, tracciate davvero
+# (Real Sociedad II gioca in Segunda Division, che e' in whitelist).
+def squadra_seconda(nome_squadra):
+    """True se il nome e' quello di una seconda squadra (II, B, 2) di un club.
+
+    Solo in CODA e come parola a se': dentro il nome un "b" o un "2" intercetterebbero mezzo
+    mondo, e nessun club di prima squadra si chiama con una B isolata in fondo."""
+    nome = _senza_accenti(nome_squadra or "").strip()
+    return bool(re.search(r"\b(ii|b|2)$", nome))
+
+
+def categoria_squadra(nome_squadra):
+    """A quale versione di un club appartiene questo nome: prima squadra, femminile, o
+    giovanile/riserve.
+
+    Serve al confronto per NOME nello storico: "Bayer Leverkusen" e "Bayer Leverkusen W" si
+    somigliano abbastanza da matchare a sottostringa, ma non sono la stessa squadra e i loro gol
+    per fascia di minuto non hanno niente a che vedere. Stesso discorso per "Freiburg" e
+    "Freiburg II". Dove c'e' un team_id questo problema non esiste (vedi
+    squadra_in_storico_per_id); qui si copre il caso in cui l'id non c'e' perche' il nome l'ha
+    scritto l'utente a mano."""
+    if squadra_femminile(nome_squadra):
+        return "femminile"
+    if squadra_giovanile(nome_squadra) or squadra_seconda(nome_squadra):
+        return "riserve"
+    return "prima"
+
+
 def partita_femminile(fixture):
     """True se almeno una delle due squadre e' femminile.
 
@@ -1414,7 +1445,7 @@ def deve_chiedere_statistiche(fixture_id, minuto=None):
     return stato.get("cicli_saltati_statistiche", 0) >= ogni - 1
 
 
-def deve_chiedere_eventi(fixture_id, punteggio_cambiato, partita_da_ricapitolare):
+def deve_chiedere_eventi(fixture_id, punteggio_cambiato, partita_da_chiudere):
     """False quando la chiamata eventi di questo ciclo si puo' saltare per QUESTA partita.
 
     Motivazione estesa accanto a CICLI_BACKOFF_EVENTI. In breve: fra due cicli la lista eventi
@@ -1427,15 +1458,15 @@ def deve_chiedere_eventi(fixture_id, punteggio_cambiato, partita_da_ricapitolare
       - prima lettura della partita: senza la base di confronto, i cartellini e i rigori gia'
         avvenuti prima che il bot vedesse la partita verrebbero notificati come nuovi al primo
         ciclo che chiede davvero (stesso criterio del default di prev_cartellini_rossi);
-      - partita_da_ricapitolare: il recap finale elenca marcatori, cartellini rossi e rigori
-        presi da qui, e mandarlo incompleto e' peggio che spendere la chiamata.
+      - partita_da_chiudere: lo shadow-log strategie registra a fine partita i MINUTI dei gol
+        presi da qui, e chiuderlo senza e' peggio che spendere la chiamata.
 
     Chi chiama azzera cicli_saltati_eventi quando la chiamata viene fatta davvero e marca
     eventi_letti quando l'API ha risposto (non quando la chiamata e' fallita: un fallimento non
     lascia nessuna base di confronto, quindi vale ancora come "prima lettura")."""
     if not BACKOFF_EVENTI_ATTIVO:
         return True
-    if punteggio_cambiato or partita_da_ricapitolare:
+    if punteggio_cambiato or partita_da_chiudere:
         return True
     stato = stato_partite.get(fixture_id, {})
     if not stato.get("eventi_letti"):
@@ -1912,6 +1943,11 @@ def testo_classifica_dominanza(minimo_gol=2, top_n=20):
 # fuori whitelist (es. una coppa) controllata a mano con /status perderebbe subito lo storico se
 # usasse stato_partite. In memoria soltanto, non persistito: non è un problema se si azzera ad un
 # riavvio del bot, l'utente lo ricostruisce controllando di nuovo la partita.
+#
+# Si AFFIANCA a stato_partite[fid]["history"], non lo sostituisce: cmd_status unisce i due prima
+# di calcolare il delta. Da solo copriva le partite fuori whitelist ma affamava proprio quelle
+# seguite, dove il bot ha già i suoi rilevamenti ogni ~3 minuti e /status rispondeva "primo
+# rilevamento" comunque. Ripulito a fine partita come tutte le altre raccolte per-partita.
 STATUS_HISTORY = {}
 
 # =============================================================================
@@ -2303,7 +2339,7 @@ def poll_callbacks():
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                             json={
                                 "chat_id": chat_id,
-                                "text": "\U0001F515 Partita silenziata. Non riceverai piu alert live. Il risultato finale arrivera comunque."
+                                "text": "\U0001F515 Partita silenziata. Non riceverai piu nessun messaggio su questa partita, nemmeno a fine gara."
                             }, timeout=5)
 
                     elif data.startswith("unmute:"):
@@ -5740,7 +5776,15 @@ def cmd_funzioni(chat_id):
         "di mandarne una nuova, corretto un bug che perdeva il risultato di partite finite "
         "durante la pausa, raccolta dati automatica in background sull'efficacia di sei "
         "condizioni di gioco (tolte come comandi live), controllo automatico della pipeline "
-        "dati con avviso in chat se qualcosa si inceppa."
+        "dati con avviso in chat se qualcosa si inceppa.\n\n"
+        "Ultimissime: niente più messaggi di fine partita (né il recap completo né la riga di "
+        "chiusura delle partite silenziate) - il risultato finale continua a essere registrato "
+        "per i dati, semplicemente non arriva più in chat. Il grafico storico sotto /status ora "
+        "cerca le due squadre per id invece che per nome, così non capita più di vedere il "
+        "grafico di un'altra squadra con lo stesso nome (era successo con le femminili). "
+        "L'intensità di /status usa anche i rilevamenti che il bot ha già preso da solo, e "
+        "dichiara la finestra davvero osservata (\"dal 3' all'8'\") invece di un generico "
+        "\"ultimi 15 min\"."
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -5844,9 +5888,13 @@ def _nomi_squadra_matchano(query, nome_squadra):
 
 def cmd_status(chat_id, query):
     """/status <squadra>: info live sulla partita trovata, statistiche totali casa/trasferta,
-    intensità (ultimi 15 min) calcolata solo per questa partita — funziona anche su partite fuori
-    whitelist (es. una coppa) accumulando uno storico dedicato (STATUS_HISTORY) ad ogni chiamata —
-    e, se disponibile, la distribuzione storica gol per fascia di minuto delle due squadre."""
+    intensità del blocco di 15 minuti in corso — misurata sui rilevamenti che il bot ha già preso
+    da sé su questa partita, più quelli accumulati dalle chiamate a /status (STATUS_HISTORY), che
+    sono l'unica fonte per le partite fuori whitelist (es. una coppa) — e, se disponibile, la
+    distribuzione storica gol per fascia di minuto delle due squadre, cercate per id.
+
+    La finestra scritta accanto all'intensità è quella davvero osservata ("dal 3' all'8'"), non un
+    generico "ultimi 15 min": a inizio blocco il primo rilevamento è di pochi minuti prima."""
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
@@ -5902,14 +5950,45 @@ def cmd_status(chat_id, query):
                 history = [h for h in history if time.time() - h["timestamp"] <= 1200]
                 STATUS_HISTORY[fid] = history
 
-                delta_stats, is_real = _calcola_delta_15min_da_storico(history, current_stats, minuto)
+                # PRIMA lo storico del bot, POI quello di /status.
+                #
+                # STATUS_HISTORY esiste per le partite che il ciclo live non segue (una coppa fuori
+                # whitelist, una femminile cercata a mano): li' e' l'unica fonte possibile. Ma per
+                # una partita TRACCIATA era anche l'unica consultata, e vuol dire buttare via i
+                # rilevamenti che il bot sta gia' prendendo da solo ogni ~3 minuti per rispondere
+                # con quel poco che ha raccolto chi scrive /status in quel momento.
+                #
+                # Il 05/09 in chat, Bundesliga: /status alle 15:36 su Paderborn-Freiburg ha
+                # risposto "primo rilevamento per questa partita" mentre nei log il bot aveva gia'
+                # letto quella partita al 3' e al 6'; un minuto dopo, con due punti di /status a un
+                # minuto l'uno dall'altro, ha risposto "Intensita' (ultimi 15 min): 3.0 pt". Due
+                # risposte sbagliate di fila - una che dice di non sapere, una che spaccia un
+                # minuto per un quarto d'ora - con i dati giusti gia' in memoria.
+                #
+                # I punti si uniscono ordinati per timestamp: i due storici campionano la stessa
+                # partita a ritmi diversi e insieme la coprono meglio di ognuno per conto suo.
+                history_bot = stato_partite.get(fid, {}).get("history") or []
+                history_unita = sorted(history_bot + history, key=lambda h: h["timestamp"])
+
+                delta_stats, is_real = _calcola_delta_15min_da_storico(history_unita, current_stats, minuto)
                 if is_real:
                     punteggio = calcola_indice_intensita(delta_stats)
                     motivazioni = descrivi_motivazioni_intensita(delta_stats)
                     d_tiri = delta_stats.get("Tiri totali", (0, 0))
+                    # La finestra DICHIARATA e' quella davvero osservata, non "ultimi 15 min": il
+                    # delta parte dal primo rilevamento del blocco di 15 minuti in corso, che all'8'
+                    # puo' essere di due minuti prima (vedi punto_riferimento_delta_15min). Dire
+                    # "ultimi 15 min" li' e' falso, e lo e' proprio quando il dato e' piu' fragile.
+                    riferimento = punto_riferimento_delta_15min(history_unita, minuto)
+                    minuto_da = riferimento.get("minuto") if riferimento else None
+                    if minuto_da is None or minuto_da >= minuto:
+                        finestra = minuto_con_prefisso("entro il ", "entro l'", minuto)
+                    else:
+                        finestra = (minuto_con_prefisso("dal ", "dall'", minuto_da)
+                                    + " " + minuto_con_prefisso("al ", "all'", minuto))
                     intensita_text = (
-                        f"\n\nIntensità (ultimi 15 min) di questa partita: {punteggio:.1f} pt\n"
-                        f"Casa {d_tiri[0]} - {d_tiri[1]} Fuori | {motivazioni}"
+                        f"\n\nIntensità {finestra}: {punteggio:.1f} pt\n"
+                        f"Tiri nel periodo: {d_tiri[0]} casa - {d_tiri[1]} fuori | {motivazioni}"
                     )
                 else:
                     intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
@@ -5940,8 +6019,36 @@ def cmd_status(chat_id, query):
 
             msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
 
-            squadra_casa = trova_squadra_in_storico(home)
-            squadra_trasferta = trova_squadra_in_storico(away)
+            # IL GRAFICO E' DI QUESTE DUE SQUADRE, NON DI DUE CHE SI CHIAMANO COSI'.
+            #
+            # Qui si cercava nello storico solo per NOME e su TUTTI i campionati insieme, con
+            # trova_squadra_in_storico(home). Il match sui nomi e' a sottostringa, quindi "Bayer
+            # Leverkusen" matcha anche "Bayer Leverkusen W", e a parita' di match vince la squadra
+            # con piu' partite caricate - un criterio che sulle omonime non sceglie quella giusta,
+            # sceglie quella la cui stagione e' piu' avanti.
+            #
+            # Il 05/09 in chat: /status Union berlin ha risposto con la scheda di Bayer Leverkusen
+            # vs Union Berlin di Bundesliga (maschile, 9', 1-0) e sopra il grafico di "Bayer
+            # Leverkusen W (in casa)" e "Union Berlin W (in trasferta)". Due squadre femminili,
+            # un'altra partita, un altro campionato. La radice sta piu' indietro: il 03/09 lo
+            # storico e' stato costruito quando risolvi_leghe_whitelist() risolveva ancora 234
+            # leghe (il log lo dice), cioe' prima che imparasse a filtrare come campionato_valido,
+            # e in quelle 234 sono entrate anche le femminili. Il resolver e' stato sistemato, ma
+            # il file sul disco quelle squadre le ha ancora.
+            #
+            # La partita live porta con se' league id e team id: sono la stessa chiave con cui lo
+            # storico e' indicizzato, quindi il lookup puo' essere ESATTO come gia' fa Fascia calda
+            # (squadra_in_storico_per_id). Se in quel campionato non c'e' storico, si resta senza
+            # grafico: e' la risposta giusta, meglio di un grafico di altre due squadre.
+            league_id_status = (f.get("league") or {}).get("id")
+            home_id_status = (f.get("teams", {}).get("home") or {}).get("id")
+            away_id_status = (f.get("teams", {}).get("away") or {}).get("id")
+            squadra_casa = (squadra_in_storico_per_id(league_id_status, home_id_status)
+                            if home_id_status is not None
+                            else trova_squadra_in_storico(home, league_id_status))
+            squadra_trasferta = (squadra_in_storico_per_id(league_id_status, away_id_status)
+                                 if away_id_status is not None
+                                 else trova_squadra_in_storico(away, league_id_status))
             foto_path = None
             if (squadra_casa and squadra_casa["casa"]["partite"] > 0
                     and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
@@ -7191,10 +7298,28 @@ def _blocco_minuto(minuto):
     return (minuto or 0) // 15
 
 
-def _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente):
+# "dal 3'" ma "dall'8'": in italiano la preposizione si elide davanti ai minuti il cui nome
+# comincia per vocale - uno, otto, undici e tutti gli ottanta. Senza, la riga dell'intensita'
+# esce con "dal 3' al 8'", che e' la prima cosa che si nota leggendola.
+MINUTI_INIZIALE_VOCALE = {1, 8, 11}
+
+
+def minuto_con_prefisso(prefisso, prefisso_eliso, minuto):
+    """Il minuto preceduto dalla forma giusta: minuto_con_prefisso("al ", "all'", 8) -> "all'8'"."""
+    vocale = minuto in MINUTI_INIZIALE_VOCALE or 80 <= (minuto or 0) <= 89
+    return f"{prefisso_eliso if vocale else prefisso}{minuto}'"
+
+
+def punto_riferimento_delta_15min(history, minuto_corrente):
+    """Lo snapshot da cui si misura il delta: il piu' vecchio del blocco di 15 minuti corrente.
+    None quando il blocco non ha ancora abbastanza punti per un delta reale.
+
+    Sta fuori da _calcola_delta_15min_da_storico perche' serve anche a chi deve DIRE su quanto
+    tempo e' calcolato il delta. "Ultimi 15 min" e' il nome del blocco, non la finestra davvero
+    osservata: a inizio blocco il riferimento e' di un paio di minuti prima, e spacciarlo per un
+    quarto d'ora dice all'utente una cosa falsa proprio quando il dato e' piu' fragile."""
     blocco_corrente = _blocco_minuto(minuto_corrente)
     punti_blocco = [h for h in history if _blocco_minuto(h.get("minuto")) == blocco_corrente]
-
     # Serve ALMENO 2 punti nel blocco corrente (non solo "il blocco esiste"): con un solo punto -
     # tipicamente lo snapshot appena preso in questo stesso ciclo, che è già dentro "history" -
     # inizio_blocco coinciderebbe con current_stats e il delta sarebbe sempre (0,0) MA marcato
@@ -7202,9 +7327,15 @@ def _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente):
     # decine di partite con "0.0 pt" tutte uguali nel report automatico appena dopo un riavvio (o
     # ad ogni cambio di blocco, per un ciclo).
     if len(punti_blocco) < 2:
+        return None
+    return min(punti_blocco, key=lambda h: h["timestamp"])
+
+
+def _calcola_delta_15min_da_storico(history, current_stats, minuto_corrente):
+    inizio_blocco = punto_riferimento_delta_15min(history, minuto_corrente)
+    if inizio_blocco is None:
         return {k: (0, 0) for k in current_stats}, False
 
-    inizio_blocco = min(punti_blocco, key=lambda h: h["timestamp"])
     delta = {}
     for key in current_stats:
         curr_h, curr_a = current_stats[key]
@@ -7980,10 +8111,18 @@ def trova_squadra_in_storico(nome_query, league_id=None):
         leghe = [lega_dati]
     else:
         leghe = list(STORICO_MINUTAGGI.values())
+    # Il match sui nomi non deve attraversare le categorie: "Bayer Leverkusen" non e' "Bayer
+    # Leverkusen W", "Freiburg" non e' "Freiburg II". A sottostringa lo sarebbero, e il grafico
+    # che ne esce e' quello di un'altra squadra - visto in chat il 05/09 su /status Union berlin.
+    # Chi vuole la femminile o la seconda squadra la scrive per esteso, e il confronto torna a
+    # combaciare perche' anche la query cade nella stessa categoria.
+    categoria_query = categoria_squadra(nome_query)
     candidati = []
     for lega_dati in leghe:
         for squadra in lega_dati.get("squadre", {}).values():
             nome = squadra.get("nome", "")
+            if categoria_squadra(nome) != categoria_query:
+                continue
             if _nomi_squadra_matchano(nome_query, nome):
                 partite_totali = squadra["casa"]["partite"] + squadra["trasferta"]["partite"]
                 candidati.append((partite_totali, squadra))
@@ -8495,195 +8634,14 @@ def _shadow_log_ha_snapshot_aperti(fixture_id):
     return bool(stato.get("ultimo_snapshot_valore") or stato.get("ultimo_snapshot_strategie"))
 
 
-def invia_recap_finale_partita_sparita(fixture_id, score_home, score_away, eventi, notifiche_attive):
-    """Manda il recap di fine partita per una partita sparita dal feed PRIMA che il bot la vedesse
-    con status FT - il caso comune, non quello raro.
-
-    Il ramo "RISULTATO FINALE" dentro processa_partita() scatta solo se l'endpoint live restituisce
-    ANCORA la partita, con status FT, per almeno un ciclo. In produzione questo non e' praticamente
-    mai vero: l'endpoint smette di restituire una partita conclusa quasi subito, quindi quel ramo
-    non vede mai lo stato FT. Prova diretta dai log: zero "RISULTATO FINALE" dal 20/08 al 01/09
-    (12 giorni), mentre "Shadow-log chiusi a fine partita" compare regolarmente piu' volte al
-    giorno - le partite finiscono, il bot lo sa (abbastanza da chiudere lo shadow-log), ma
-    all'utente non arrivava nessun messaggio di chiusura. Da cui "non vedo risultati scritti".
-
-    LE STATISTICHE CI SONO, E VENGONO DALLA MEMORIA.
-
-    Qui c'era scritto che statistiche e confronto 1°T/2°T non si potevano mettere perche' "non
-    piu' recuperabili una volta che la partita e' sparita dal live". Non era vero: non sono piu'
-    recuperabili DALL'API senza pagare una chiamata, ma il bot le ha gia' in casa. Ad ogni ciclo
-    processa_partita() appende in stato_partite[fixture_id]["history"] uno snapshot
-    {minuto, stats}, e questa funzione gira PRIMA che pulisci_partite_terminate() cancelli quello
-    stato. L'ultimo snapshot e' quindi li', gratis.
-
-    Visto in chat il 04/09 alle 20:24: Arminia Bielefeld-St. Pauli e Vasas-Nyiregyhaza chiuse con
-    il solo risultato e i marcatori, mentre i log dicono che due minuti prima entrambe erano
-    tracciate al 90' con "stats=si (fresche)". I dati c'erano e venivano buttati.
-
-    Le statistiche mostrate sono quelle dell'ULTIMO RILEVAMENTO, non necessariamente il totale a
-    fine gara: l'ultimo giro utile puo' essere caduto qualche minuto prima del fischio finale, e
-    il minuto viene scritto accanto proprio per non spacciare un dato dell'87' per un dato del 90'.
-
-    Il grafico a barre si costruisce dallo stesso ultimo snapshot in memoria, quindi c'e' anche
-    qui: va pero' inviato come didascalia di una foto, e Telegram limita le didascalie a 1024
-    caratteri contro i 4096 di un messaggio di testo. Se il recap non ci sta si rinuncia
-    all'immagine e non al messaggio (vedi LIMITE_DIDASCALIA_TELEGRAM piu' sotto).
-
-    Stessa distinzione muta/non muta del ramo in diretta: una partita silenziata riceve il
-    riepilogo compatto "cos'e' successo dopo il silenzio", non il recap completo - tacere una
-    partita significa non volerne piu' sapere i dettagli minuto per minuto, non sparire del
-    tutto a fine gara."""
-    if not notifiche_attive:
-        return
-    stato = stato_partite.get(fixture_id, {})
-    home = stato.get("home", "?")
-    away = stato.get("away", "?")
-    league_name = stato.get("league", "")
-    league_country = stato.get("league_country", "")
-
-    goals = extract_goals(eventi) if eventi else []
-    goals = goals_coerenti_con_risultato(goals, home, away, score_home, score_away)
-    cartellini_rossi = extract_cartellini_rossi(eventi) if eventi else []
-    rigori = extract_rigori(eventi) if eventi else []
-
-    muted_data = SILENCED_MATCHES.get(str(fixture_id))
-    if muted_data:
-        diff_h = score_home - muted_data.get("score_home", 0)
-        diff_a = score_away - muted_data.get("score_away", 0)
-        muted_minute = muted_data.get("muted_at_minute", 0)
-
-        after_text = ""
-        if diff_h > 0:
-            after_text += f" +{diff_h}CASA"
-        if diff_a > 0:
-            after_text += f" +{diff_a}OSP"
-
-        goals_after = [g for g in goals if g["minute"] > muted_minute]
-        minutes_text = ""
-        for g in goals_after:
-            team_emoji = "CASA" if g["team"] == home else "OSP"
-            minutes_text += f" {g['minute']}'{team_emoji}"
-        if not minutes_text:
-            minutes_text = " Nessun gol dopo il silenzio"
-
-        messaggio = (
-            f"{home} vs {away}\n"
-            f"{formatta_lega(league_name, league_country)}\n"
-            f"Risultato finale: {score_home} - {score_away}{after_text}\n"
-            f"Silenziato al {muted_minute}'\n"
-            f"Gol dopo:{minutes_text}"
-        )
-        SILENCED_MATCHES.pop(str(fixture_id), None)
-        save_silenced(SILENCED_MATCHES)
-        foto_recap = None
-    else:
-        goals_text = testo_primo_ultimo_gol(goals, home, away)
-        cartellini_finale_text = ""
-        if cartellini_rossi:
-            righe = [f"🟥 {c['minute']}' {c['player']} ({c['team']})" for c in cartellini_rossi]
-            cartellini_finale_text = "Cartellini rossi:\n" + "\n".join(righe) + "\n"
-        rigori_finale_text = ""
-        if rigori:
-            righe = []
-            for r in rigori:
-                esito_emoji = "⚽" if r["esito"] == "segnato" else "❌"
-                righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
-            rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
-
-        # Ultimo snapshot raccolto durante la partita: e' gia' in memoria, non costa una chiamata.
-        # Si prende l'ultima voce di history che abbia davvero delle statistiche - le voci vengono
-        # appese solo quando l'API ha risposto con dati, ma la guardia esplicita costa nulla e
-        # copre il caso di uno storico ripristinato dal backup con voci di forma diversa.
-        history = stato.get("history") or []
-        ultimo_punto = next((h for h in reversed(history) if h.get("stats")), None)
-        statistiche_finale_text = ""
-        if ultimo_punto:
-            stats_ultime = ultimo_punto["stats"]
-            minuto_ultimo = ultimo_punto.get("minuto")
-            tiri = stats_ultime.get("Tiri totali", ("?", "?"))
-            porta = stats_ultime.get("Tiri in porta", ("?", "?"))
-            corner = stats_ultime.get("Corner", ("?", "?"))
-            al_minuto = f" (al {minuto_ultimo}')" if minuto_ultimo else ""
-            statistiche_finale_text = (
-                f"Statistiche all'ultimo rilevamento{al_minuto}:\n"
-                f"- Tiri totali: {tiri[0]} - {tiri[1]}\n"
-                f"- Tiri in porta: {porta[0]} - {porta[1]}\n"
-                f"- Corner: {corner[0]} - {corner[1]}\n"
-            )
-            stats_1h_salvate = stato.get("stats_fine_1h")
-            if stats_1h_salvate:
-                statistiche_finale_text += testo_confronto_tempi(stats_1h_salvate, stats_ultime)
-            elif len(history) > 1:
-                statistiche_finale_text += testo_confronto_tempi_parziale(history, stats_ultime)
-
-        # Testa del messaggio: le stesse righe che porta la notifica in diretta, e che qui
-        # mancavano tutte. Nessuna delle tre costa una chiamata.
-        #
-        #  - Quote 1X2: quote_1x2_per_fixture legge PIANO_GIORNATA, che e' gia' in memoria e
-        #    copre tutta la giornata (si rigenera alle 12:00 italiane, quindi una partita che
-        #    finisce a mezzanotte e' ancora dentro il piano che l'ha vista nascere). Sono il dato
-        #    per cui il recap serve davvero: senza la quota di partenza il risultato finale non
-        #    dice se il mercato aveva ragione. Il 04/09 erano state trovate per 60 partite su 64.
-        #  - Recupero: sta in stato_partite, scritto ciclo per ciclo da processa_partita.
-        #  - Andata: idem, per i ritorni delle qualificazioni UEFA. Senza, il risultato finale di
-        #    un ritorno si legge senza sapere da dove si partiva.
-        quote_iniziali = quote_1x2_per_fixture(fixture_id)
-        quote_finale_text = testo_quote_1x2(quote_iniziali)
-
-        recupero_parti = []
-        if stato.get("recupero_1h"):
-            recupero_parti.append(f"1° tempo +{stato['recupero_1h']}'")
-        if stato.get("recupero_2h"):
-            recupero_parti.append(f"2° tempo +{stato['recupero_2h']}'")
-        recupero_finale_text = f"Recupero: {', '.join(recupero_parti)}\n" if recupero_parti else ""
-
-        andata_info = stato.get("andata_info")
-        andata_text = ""
-        titolo_ritorno = ""
-        if andata_info:
-            titolo_ritorno = " (RITORNO)"
-            andata_text = (
-                f"🔄 Andata: {andata_info['home']} {andata_info['score_home']} - "
-                f"{andata_info['score_away']} {andata_info['away']}\n\n"
-            )
-
-        messaggio = (
-            f"{home} vs {away}{titolo_ritorno}\n"
-            f"{formatta_lega(league_name, league_country)}\n"
-            f"RISULTATO FINALE\n\n"
-            f"{andata_text}"
-            f"{score_home} - {score_away}\n"
-            f"{quote_finale_text}"
-            f"{goals_text}"
-            f"{recupero_finale_text}"
-            f"{cartellini_finale_text}"
-            f"{rigori_finale_text}"
-            f"{statistiche_finale_text}"
-        )
-
-        # Il grafico a barre e' l'unica cosa che qui si costruisce da zero, ma dalle statistiche
-        # gia' in memoria: matplotlib, nessuna chiamata di rete. Va pero' inviato come DIDASCALIA
-        # di una foto, e Telegram limita le didascalie a 1024 caratteri contro i 4096 di un
-        # messaggio di testo. Questo recap e' il messaggio piu' lungo che il bot scriva (gol,
-        # rossi, rigori, statistiche e confronto tempi tutti insieme), quindi se il testo non ci
-        # sta si rinuncia al grafico e non al messaggio: meglio il recap completo senza immagine
-        # che una notifica rifiutata da Telegram e persa del tutto.
-        foto_recap = None
-        if ultimo_punto and len(messaggio) <= LIMITE_DIDASCALIA_TELEGRAM:
-            foto_recap = genera_grafico_barre(fixture_id, home, away, stats_ultime)
-        elif ultimo_punto:
-            log(f"Recap finale {fixture_id}: grafico omesso, didascalia di {len(messaggio)} "
-                f"caratteri oltre il limite Telegram di {LIMITE_DIDASCALIA_TELEGRAM}")
-
-    chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
-    if foto_recap:
-        invia_notifica_telegram(foto_recap, messaggio, chat_id=chat_destinazione)
-    else:
-        invia_messaggio_telegram(messaggio, chat_id=chat_destinazione)
-
-
-def chiudi_shadow_log_partite_sparite(fixture_ids, notifiche_attive):
+def chiudi_shadow_log_partite_sparite(fixture_ids):
     """Scrive il "risultato_finale" delle partite appena sparite dal feed live.
+
+    Solo shadow-log: da qui non parte piu' nessun messaggio. Il recap di fine partita che questa
+    funzione mandava e' stato tolto insieme a tutte le altre notifiche di risultato finale (vedi
+    il commento sul ramo STATI_PARTITA_CONCLUSA dentro processa_partita). La registrazione
+    dell'esito resta, ed e' anzi l'unica ragione per cui la funzione esiste: senza, gli snapshot
+    raccolti durante la partita restano orfani.
 
     L'esito veniva registrato SOLO dentro processa_partita, nel ramo
     `status_short in STATI_PARTITA_CONCLUSA`. Ma processa_partita vede soltanto cio' che
@@ -8741,7 +8699,6 @@ def chiudi_shadow_log_partite_sparite(fixture_ids, notifiche_attive):
                 f"risultato registrato senza i minuti dei gol")
         registra_shadow_log_strategie_risultato(
             fid, score_home, score_away, extract_goals(eventi) if eventi else [])
-        invia_recap_finale_partita_sparita(fid, score_home, score_away, eventi, notifiche_attive)
         chiuse += 1
 
     if chiuse or rimandate:
@@ -9347,21 +9304,24 @@ def processa_partita(fixture, notifiche_attive=True):
                 stato_partite[fixture_id]["andata_info"] = None
 
         # Freno sulla chiamata eventi: si chiede al cambio di punteggio, alla prima lettura della
-        # partita, prima del recap finale, e comunque una volta ogni CICLI_BACKOFF_EVENTI cicli.
-        # Motivazione e casistica in deve_chiedere_eventi() e accanto a CICLI_BACKOFF_EVENTI.
+        # partita, alla chiusura della partita, e comunque una volta ogni CICLI_BACKOFF_EVENTI
+        # cicli. Motivazione e casistica in deve_chiedere_eventi() e accanto a CICLI_BACKOFF_EVENTI.
         #
         # Il gol NON dipende da questa chiamata per essere rilevato: il punteggio arriva dal
         # payload live ed e' gia' stato confrontato sopra (classifica_cambio_punteggio). Qui si
         # prende il contorno - chi ha segnato, cartellini rossi, rigori - e proprio perche' e'
         # contorno puo' viaggiare a intervalli invece che ad ogni ciclo.
         punteggio_cambiato = gol_appena_segnato or punteggio_corretto_al_ribasso
-        # Il recap finale (piu' sotto) elenca marcatori, cartellini e rigori presi da qui: parte
-        # una volta sola per partita, e deve trovare la lista completa. Dopo che e' partito
-        # (notified_final) non c'e' piu' nessuno da servire e la partita torna sotto il freno.
-        partita_da_ricapitolare = (status_short in STATI_PARTITA_CONCLUSA
-                                   and not stato_precedente.get("notified_final"))
+        # La chiusura della partita (piu' sotto) registra nello shadow-log strategie i MINUTI dei
+        # gol, non solo il risultato: e' il dato per cui quel file esiste - dice se dopo un segnale
+        # il gol e' arrivato, e quando. Serve la lista completa, e serve una volta sola per
+        # partita: dopo (notified_final) non c'e' piu' niente da raccogliere e si torna sotto il
+        # freno. Il recap in chat qui non c'entra piu' - e' stato tolto - ma la chiamata resta
+        # perche' senza i minuti dei gol lo shadow-log si chiude a meta'.
+        partita_da_chiudere = (status_short in STATI_PARTITA_CONCLUSA
+                               and not stato_precedente.get("notified_final"))
         eventi_da_chiedere = deve_chiedere_eventi(
-            fixture_id, punteggio_cambiato, partita_da_ricapitolare)
+            fixture_id, punteggio_cambiato, partita_da_chiudere)
 
         # fetch_fixture_events restituisce None quando la CHIAMATA fallisce (rate-limit, timeout,
         # rete) e una lista quando l'API ha risposto davvero. La distinzione e' l'unica cosa che
@@ -9463,8 +9423,7 @@ def processa_partita(fixture, notifiche_attive=True):
         if status_short in STATUS_OLTRE_TEMPI_REGOLAMENTARI:
             # Tempi regolamentari finiti in parità: supplementari/rigori in corso. Su richiesta,
             # da qui in poi nessuna notifica per questa partita - niente statistiche da recuperare
-            # (nessuna notifica le userebbe), e quando finirà davvero (AET/PEN, più sotto) non
-            # partirà nemmeno il recap finale. I gol restano comunque tracciati sopra: il punteggio
+            # (nessuna notifica le userebbe). I gol restano comunque tracciati sopra: il punteggio
             # arriva dal payload live, e un punteggio che cambia è una delle condizioni che fanno
             # scattare la chiamata eventi anche sotto il freno, così un gol ai supplementari non
             # manca allo shadow-log quando la partita si chiude per davvero.
@@ -9628,113 +9587,26 @@ def processa_partita(fixture, notifiche_attive=True):
         if status_short in STATI_PARTITA_CONCLUSA:
             stato = stato_partite.get(fixture_id, {})
             if not stato.get("notified_final"):
-                muted_data = SILENCED_MATCHES.get(str(fixture_id))
-
-                if muted_data:
-                    diff_h = score_home - muted_data.get("score_home", 0)
-                    diff_a = score_away - muted_data.get("score_away", 0)
-                    muted_minute = muted_data.get("muted_at_minute", 0)
-
-                    after_text = ""
-                    if diff_h > 0:
-                        after_text += f" +{diff_h}CASA"
-                    if diff_a > 0:
-                        after_text += f" +{diff_a}OSP"
-
-                    goals_after = [g for g in goals if g["minute"] > muted_minute]
-                    minutes_text = ""
-                    for g in goals_after:
-                        team_emoji = "CASA" if g["team"] == home else "OSP"
-                        minutes_text += f" {g['minute']}'{team_emoji}"
-                    if not minutes_text:
-                        minutes_text = " Nessun gol dopo il silenzio"
-
-                    messaggio = (
-                        f"{home} vs {away}\n"
-                        f"{formatta_lega(league_name, league_country)}\n"
-                        f"Risultato finale: {score_home} - {score_away}{after_text}\n"
-                        f"Silenziato al {muted_minute}'\n"
-                        f"Gol dopo:{minutes_text}"
-                    )
-                    foto_path = None
-                else:
-                    # Il grafico serve solo per l'invio Telegram più sotto: se le notifiche sono
-                    # spente (fuori orario), o se questa partita è finita ai supplementari/rigori
-                    # (status AET/PEN, niente notifica - vedi il gate più sotto), generarlo
-                    # comunque sarebbe lavoro sprecato (rendering matplotlib + scrittura file) per
-                    # un'immagine che verrebbe subito cancellata senza mai essere usata.
-                    if current_stats and notifiche_attive and status_short == "FT":
-                        foto_path = genera_grafico_barre(fixture_id, home, away, current_stats)
-                    else:
-                        foto_path = None
-
-                    goals_text = testo_primo_ultimo_gol(goals, home, away)
-
-                    recupero_parti = []
-                    if recupero_1h:
-                        recupero_parti.append(f"1° tempo +{recupero_1h}'")
-                    if recupero_2h:
-                        recupero_parti.append(f"2° tempo +{recupero_2h}'")
-                    recupero_finale_text = f"Recupero: {', '.join(recupero_parti)}\n" if recupero_parti else ""
-
-                    cartellini_finale_text = ""
-                    if cartellini_rossi:
-                        righe = [f"🟥 {c['minute']}' {c['player']} ({c['team']})" for c in cartellini_rossi]
-                        cartellini_finale_text = "Cartellini rossi:\n" + "\n".join(righe) + "\n"
-
-                    rigori_finale_text = ""
-                    if rigori:
-                        righe = []
-                        for r in rigori:
-                            esito_emoji = "⚽" if r["esito"] == "segnato" else "❌"
-                            righe.append(f"{esito_emoji} {r['minute']}' {r['player']} ({r['team']}) - {r['esito']}")
-                        rigori_finale_text = "Rigori:\n" + "\n".join(righe) + "\n"
-
-                    tempi_finale_text = ""
-                    stats_1h_salvate = stato.get("stats_fine_1h")
-                    if current_stats:
-                        if stats_1h_salvate:
-                            tempi_finale_text = testo_confronto_tempi(stats_1h_salvate, current_stats)
-                        elif history:
-                            tempi_finale_text = testo_confronto_tempi_parziale(history, current_stats)
-                        else:
-                            tempi_finale_text = "(1°T/2°T non disponibile: nessun dato raccolto per questa partita)\n"
-
-                    messaggio = (
-                        f"{home} vs {away}\n"
-                        f"{formatta_lega(league_name, league_country)}\n"
-                        f"RISULTATO FINALE\n\n"
-                        f"{score_home} - {score_away}\n"
-                        f"{goals_text}\n"
-                        f"{recupero_finale_text}"
-                        f"{cartellini_finale_text}"
-                        f"{rigori_finale_text}"
-                        f"Statistiche finali:\n"
-                        f"- Tiri totali: {tiri_casa if current_stats else '?'} - {tiri_ospite if current_stats else '?'}\n"
-                        f"- Tiri in porta: {tiri_p_casa if current_stats else '?'} - {tiri_p_ospite if current_stats else '?'}\n"
-                        f"- Corner: {corner_casa if current_stats else '?'} - {corner_ospite if current_stats else '?'}\n"
-                        f"{tempi_finale_text}"
-                    )
-
-                # L'esito va registrato sempre, notifica o no: è il dato che chiude lo shadow-log
-                # di questa partita (senza, gli snapshot già raccolti restano orfani per sempre -
-                # bug scoperto proprio perché prima la pausa fermava tutto, notifica inclusa).
+                # NESSUNA NOTIFICA DI FINE PARTITA, su richiesta.
+                #
+                # Qui si costruivano i due messaggi di chiusura: il recap "RISULTATO FINALE"
+                # (risultato, gol, recupero, cartellini, rigori, statistiche, confronto 1°T/2°T e
+                # grafico a barre) e, per le partite silenziate, la riga compatta "Risultato
+                # finale ... Silenziato al N' ... Gol dopo". Tolti entrambi: silenziare una
+                # partita vuol dire non volerne piu' sapere niente, fine gara compresa, e per le
+                # altre il risultato finale non e' un dato che serve mentre si fa trading - il bot
+                # serve a leggere la partita mentre si gioca.
+                #
+                # Quello che NON si tocca e' la registrazione dell'esito qui sotto: e' il dato che
+                # chiude lo shadow-log di questa partita. Senza, tutti gli snapshot raccolti
+                # mentre si giocava restano orfani e quindi inutili - esistono proprio per essere
+                # incrociati con come la partita e' finita davvero. Vale a prescindere da
+                # notifiche_attive e dallo status (FT/AET/PEN): non e' una notifica, e' un dato.
                 registra_shadow_log_valore_risultato(fixture_id, score_home, score_away)
                 registra_shadow_log_strategie_risultato(fixture_id, score_home, score_away, goals)
-                # AET/PEN = partita finita ai supplementari o ai rigori: su richiesta, stesso
-                # trattamento di STATUS_OLTRE_TEMPI_REGOLAMENTARI più sopra, nessuna notifica
-                # nemmeno per il recap finale. Solo FT (decisa nei 90' regolamentari) la manda.
-                if notifiche_attive and status_short == "FT":
-                    chat_destinazione = TELEGRAM_CHAT_ID_PREFERITI if str(fixture_id) in FAVORITE_MATCHES else TELEGRAM_CHAT_ID
-                    invia_notifica_telegram(foto_path, messaggio, chat_id=chat_destinazione)
 
                 SILENCED_MATCHES.pop(str(fixture_id), None)
                 save_silenced(SILENCED_MATCHES)
-                if foto_path and os.path.exists(foto_path):
-                    try:
-                        os.remove(foto_path)
-                    except:
-                        pass
 
             stato_partite[fixture_id] = {
                 "tiri_casa": stato.get("tiri_casa", 0),
@@ -10345,13 +10217,13 @@ def processa_partita(fixture, notifiche_attive=True):
         log(f"Errore processa_partita: {e}")
 
 
-def pulisci_partite_terminate(fixture_ids_live, notifiche_attive):
+def pulisci_partite_terminate(fixture_ids_live):
     ids_da_rimuovere = [fid for fid in stato_partite if fid not in fixture_ids_live]
     # Prima di cancellare lo stato: chi ha snapshot aperti va chiuso con il suo risultato finale,
     # altrimenti tutto il campione raccolto durante la partita resta orfano per sempre. Le partite
     # rimandate (tetto di chiamate raggiunto, o chiamata fallita) NON si cancellano: restano qui e
     # si riprovano al giro dopo.
-    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere, notifiche_attive)
+    rimandate = chiudi_shadow_log_partite_sparite(ids_da_rimuovere)
     if rimandate:
         ids_da_rimuovere = [fid for fid in ids_da_rimuovere if fid not in rimandate]
     for fid in ids_da_rimuovere:
@@ -10381,6 +10253,13 @@ def pulisci_partite_terminate(fixture_ids_live, notifiche_attive):
         for fid in fid_da_rimuovere:
             del ANOMALIE_DIAGNOSTICA_NOTIFICATE[fid]
         salva_anomalie_diagnostica_notificate(ANOMALIE_DIAGNOSTICA_NOTIFICATE)
+
+    # Stesso motivo per lo storico di /status: era l'unica raccolta per-partita rimasta senza
+    # pulizia a fine gara. La potatura a 20 minuti dentro cmd_status scatta solo se QUELLA stessa
+    # partita viene richiesta di nuovo, quindi una partita chiesta una volta sola si lasciava
+    # dietro il suo snapshot per tutta la vita del processo.
+    for fid in [f for f in STATUS_HISTORY if f not in fixture_ids_live]:
+        del STATUS_HISTORY[fid]
 
     # Stesso motivo per il backup dello storico momentum (vedi BACKUP_HISTORY_MOMENTUM): a fine
     # partita non serve più, e senza pulizia crescerebbe per sempre. Chiavi stringa (JSON), da
@@ -10703,7 +10582,7 @@ if __name__ == "__main__":
                 log("Chiamata partite live fallita: salto la pulizia delle partite terminate "
                     "(un elenco vuoto qui non significa che le partite siano finite)")
             else:
-                pulisci_partite_terminate(fixture_ids_live, notifiche_attive)
+                pulisci_partite_terminate(fixture_ids_live)
             salva_stato_partite(stato_partite)
             # Un solo messaggio per ciclo con tutte le partite dal feed congelato, invece
             # di uno per partita mentre si scorre l'elenco.
