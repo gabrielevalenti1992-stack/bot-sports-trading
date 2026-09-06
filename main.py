@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import traceback
 import unicodedata
 import time
@@ -2053,6 +2054,179 @@ def save_favorites(favs):
 FAVORITE_MATCHES = load_favorites()
 
 # =============================================================================
+# CLIENTI E CODICI D'INVITO: il bot era senza NESSUN controllo accessi - qualunque chat_id che
+# scrivesse a poll_callbacks() aveva tutti i comandi, /stop e /modalitaessenziale compresi. Andava
+# bene finche' a scrivere era solo Gabriele; smette di andare bene nel momento in cui altre
+# persone sanno che il bot esiste.
+#
+# Il modello e' a tre ruoli, calcolati da ruolo_chat() e MAI da un controllo sparso nei singoli
+# comandi:
+#   - "owner"   : TELEGRAM_CHAT_ID (e TELEGRAM_CHAT_ID_PREFERITI se diverso) - tutti i comandi,
+#                 nessun cambiamento di comportamento per Gabriele.
+#   - "cliente" : una chat registrata in CLIENTI - solo i comandi in COMANDI_CLIENTI.
+#   - nessuno   : chiunque altro - solo /registrati, per entrare con un codice.
+#
+# L'ingresso e' a CODICE D'INVITO, non autoregistrazione libera: Gabriele genera un codice con
+# /nuovocodice e lo passa a mano (voce, email...) alla persona che vuole far entrare. Un codice si
+# consuma alla prima registrazione andata a buon fine - non e' un abbonamento, e' un pass singolo.
+CLIENTI_FILE = data_path("clienti.json")
+CODICI_INVITO_FILE = data_path("codici_invito.json")
+
+def carica_clienti():
+    if os.path.exists(CLIENTI_FILE):
+        try:
+            with open(CLIENTI_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {CLIENTI_FILE}: {e}", flush=True)
+    return {}
+
+def salva_clienti(dati):
+    salva_json_atomico(CLIENTI_FILE, dati)
+
+def carica_codici_invito():
+    if os.path.exists(CODICI_INVITO_FILE):
+        try:
+            with open(CODICI_INVITO_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Errore lettura {CODICI_INVITO_FILE}: {e}", flush=True)
+    return {}
+
+def salva_codici_invito(dati):
+    salva_json_atomico(CODICI_INVITO_FILE, dati)
+
+CLIENTI = carica_clienti()
+CODICI_INVITO = carica_codici_invito()
+print(f"Clienti registrati: {len(CLIENTI)} | codici d'invito emessi: {len(CODICI_INVITO)} "
+      f"({sum(1 for c in CODICI_INVITO.values() if not c.get('usato_da'))} non ancora usati)",
+      flush=True)
+
+# Comandi che una chat "cliente" puo' usare. Deliberatamente minimo all'inizio (solo /dominio,
+# che e' anche l'unico a costo zero in chiamate API - legge stato_partite gia' in memoria) - vedi
+# cmd_dominio. /intensita NON c'e': fino a 40 chiamate API-Football in sequenza per lancio, sulla
+# STESSA quota da cui dipende la raccolta dati live, e con piu' clienti liberi di lanciarlo quando
+# vogliono durante le partite e' un rischio per il servizio, non solo per il singolo comando.
+# Ampliarlo in futuro e' aggiungere una voce qui, non riscrivere il gate.
+COMANDI_CLIENTI = {"/help", "/dominio"}
+
+
+def ruolo_chat(chat_id):
+    """Il ruolo di questa chat: "owner", "cliente" o None se sconosciuta - per decidere quali
+    comandi puo' usare chi scrive. Unico punto che risponde alla domanda "chi e' questo
+    chat_id": i comandi e i bottoni non fanno mai il controllo da soli, lo chiedono qui."""
+    chiave = str(chat_id)
+    if chiave == str(TELEGRAM_CHAT_ID) or (
+            TELEGRAM_CHAT_ID_PREFERITI and chiave == str(TELEGRAM_CHAT_ID_PREFERITI)):
+        return "owner"
+    if chiave in CLIENTI:
+        return "cliente"
+    return None
+
+
+def genera_codice_invito():
+    """8 caratteri, alfabeto senza 0/O/1/I/L: Gabriele lo detta o lo scrive a mano, e quelle
+    coppie si confondono facilmente sia a voce che in un font qualunque."""
+    alfabeto = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+    return "".join(secrets.choice(alfabeto) for _ in range(8))
+
+
+def cmd_nuovocodice(chat_id):
+    """Genera un codice d'invito e lo mostra SOLO a chi lo ha chiesto (l'owner): va passato a
+    mano alla persona da far entrare, non e' un annuncio."""
+    codice = genera_codice_invito()
+    while codice in CODICI_INVITO:  # collisione remotissima (32^8 combinazioni), esclusa gratis
+        codice = genera_codice_invito()
+    CODICI_INVITO[codice] = {
+        "creato_il": datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%d/%m/%Y %H:%M"),
+        "usato_da": None,
+        "usato_il": None,
+    }
+    salva_codici_invito(CODICI_INVITO)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id,
+              "text": f"Codice d'invito: {codice}\n\n"
+                      f"Dallo alla persona che vuoi far entrare: scrivendo al bot\n"
+                      f"/registrati {codice}\n"
+                      f"avra' accesso a: {', '.join(sorted(COMANDI_CLIENTI))}.\n"
+                      f"Il codice si consuma alla prima registrazione andata a buon fine."},
+        timeout=5)
+
+
+def cmd_clienti(chat_id):
+    """Elenco di chi e' dentro, per sapere chi ha accesso senza doverselo ricordare a memoria."""
+    if not CLIENTI:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Nessun cliente registrato."}, timeout=5)
+        return
+    righe = ["Clienti registrati:"]
+    for cid, info in sorted(CLIENTI.items(), key=lambda kv: kv[1].get("registrato_il", "")):
+        righe.append(f"- {cid} (dal {info.get('registrato_il', '?')}, "
+                     f"codice {info.get('codice_usato', '?')})")
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "\n".join(righe)}, timeout=5)
+
+
+def cmd_rimuovicliente(chat_id, chat_id_da_rimuovere):
+    """Toglie l'accesso a una chat. Non tocca il codice usato: resta segnato come usato, cosi'
+    non ridiventa spendibile una seconda volta da un'altra chat."""
+    chiave = str(chat_id_da_rimuovere).strip()
+    if chiave not in CLIENTI:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": f"{chiave} non risulta fra i clienti registrati."}, timeout=5)
+        return
+    del CLIENTI[chiave]
+    salva_clienti(CLIENTI)
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id,
+              "text": f"Cliente {chiave} rimosso: da ora quella chat non ha piu' accesso ai "
+                      f"comandi."}, timeout=5)
+
+
+def cmd_registrati(chat_id, codice):
+    """L'unica porta d'ingresso per chi non e' ne' owner ne' gia' cliente. Raggiungibile da
+    QUALUNQUE chat, a differenza di ogni altro comando: e' il gate stesso, deve restare fuori
+    dal gate."""
+    ruolo_attuale = ruolo_chat(chat_id)
+    if ruolo_attuale == "owner":
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Sei gia' il proprietario del bot."}, timeout=5)
+        return
+    if ruolo_attuale == "cliente":
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Sei gia' registrato."}, timeout=5)
+        return
+    codice = codice.strip().upper()
+    voce = CODICI_INVITO.get(codice)
+    if not voce or voce.get("usato_da"):
+        log(f"/registrati fallito da {chat_id}: codice '{codice}' inesistente o gia' usato")
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": "Codice non valido o gia' usato."}, timeout=5)
+        return
+    ora = datetime.datetime.now(ZoneInfo("Europe/Rome")).strftime("%d/%m/%Y %H:%M")
+    voce["usato_da"] = str(chat_id)
+    voce["usato_il"] = ora
+    salva_codici_invito(CODICI_INVITO)
+    CLIENTI[str(chat_id)] = {"registrato_il": ora, "codice_usato": codice}
+    salva_clienti(CLIENTI)
+    log(f"Nuovo cliente registrato: {chat_id} (codice {codice})")
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id,
+              "text": f"Registrazione riuscita. Comandi disponibili: "
+                      f"{', '.join(sorted(COMANDI_CLIENTI))}."}, timeout=5)
+
+
+# =============================================================================
 # OFFSET GETUPDATES TELEGRAM: deve sopravvivere ai riavvii, altrimenti dopo ogni
 # restart (redeploy, crash, riavvio Render) poll_callbacks() ripartiva da offset=0
 # e Telegram (che tiene in coda gli update non confermati fino a 24h) rimandava
@@ -2437,6 +2611,19 @@ def poll_callbacks():
                     chat_id = cq["message"]["chat"]["id"]
                     msg_id = cq["message"]["message_id"]
 
+                    # Nessuno dei bottoni sotto e' oggi raggiungibile da una chat non-owner: sono
+                    # tutti attaccati a messaggi che il ciclo automatico manda solo a
+                    # TELEGRAM_CHAT_ID/TELEGRAM_CHAT_ID_PREFERITI, oppure al menu di /setup, che
+                    # un cliente non puo' aprire (non e' in COMANDI_CLIENTI). Il controllo qui non
+                    # cambia niente OGGI: e' una rete per il giorno in cui COMANDI_CLIENTI si
+                    # allarghera' e qualcuno costruira' un bottone senza ripensare a questo file.
+                    if ruolo_chat(chat_id) != "owner":
+                        log(f"Callback '{data}' ignorato da chat non autorizzata {chat_id}")
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"]}, timeout=5)
+                        continue
+
                     if data.startswith("mute:"):
                         fid = str(int(data.split(":")[1]))
                         stato = stato_partite.get(int(fid), {})
@@ -2579,8 +2766,60 @@ def poll_callbacks():
                     cmd = parts[0].lower()
                     args = parts[1:] if len(parts) > 1 else []
 
+                    # IL GATE. Un punto solo, prima di ogni comando: aggiungerne uno nuovo qui
+                    # sotto non lo espone mai per dimenticanza a chi non dovrebbe averlo, perche'
+                    # il permesso si decide qui e non dentro ciascun elif.
+                    #
+                    # /registrati e' l'unica eccezione voluta: deve restare raggiungibile da
+                    # chiunque, altrimenti nessuno riuscirebbe mai ad entrare la prima volta.
+                    if cmd == "/registrati":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /registrati <codice>"},
+                                timeout=5)
+                            continue
+                        esegui_comando_sicuro(chat_id, cmd_registrati, args[0])
+                        continue
+
+                    ruolo = ruolo_chat(chat_id)
+                    if ruolo == "cliente" and cmd not in COMANDI_CLIENTI:
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id,
+                                  "text": f"Questo comando non e' fra quelli disponibili per te. "
+                                          f"Comandi utilizzabili: {', '.join(sorted(COMANDI_CLIENTI))}."},
+                            timeout=5)
+                        continue
+                    if ruolo is None:
+                        log(f"Comando '{cmd}' ignorato da chat non registrata {chat_id}")
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                            json={"chat_id": chat_id,
+                                  "text": "Non sei registrato. Se hai un codice d'invito, scrivi "
+                                          "/registrati <codice>."},
+                            timeout=5)
+                        continue
+                    # Da qui in poi, ruolo e' "owner" oppure "cliente" con un comando permesso:
+                    # tutto quello che segue e' identico a prima, invariato per l'owner.
+
                     if cmd == "/help":
                         esegui_comando_sicuro(chat_id, cmd_help)
+
+                    elif cmd == "/nuovocodice":
+                        esegui_comando_sicuro(chat_id, cmd_nuovocodice)
+
+                    elif cmd == "/clienti":
+                        esegui_comando_sicuro(chat_id, cmd_clienti)
+
+                    elif cmd == "/rimuovicliente":
+                        if not args:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                json={"chat_id": chat_id, "text": "Usa: /rimuovicliente <chat_id>"},
+                                timeout=5)
+                            continue
+                        esegui_comando_sicuro(chat_id, cmd_rimuovicliente, args[0])
 
                     elif cmd == "/setup":
                         esegui_comando_sicuro(chat_id, cmd_setup)
@@ -4680,6 +4919,19 @@ def testo_confronto_tempi_parziale(history, current_stats):
 # COMANDI TELEGRAM (funzioni riutilizzabili da testo e da bottoni inline)
 # =============================================================================
 def cmd_help(chat_id):
+    # Un cliente vede solo i comandi che puo' davvero usare: l'elenco completo qui sotto elenca
+    # anche /stop, /modalitaessenziale eccetera, che per lui il gate blocca comunque - mostrarli
+    # sarebbe solo rumore (o un invito a provare comandi che non funzioneranno).
+    if ruolo_chat(chat_id) != "owner":
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": "Comandi disponibili:\n"
+                          "/dominio - Le partite live ordinate per quanto il risultato tradisce "
+                          "il campo (chi sta dominando e non lo vede ancora nel punteggio)\n"
+                          "/help - Mostra questo messaggio"},
+            timeout=5)
+        return
     help_text = (
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
@@ -4718,7 +4970,10 @@ def cmd_help(chat_id):
         "/apiusage - Quante chiamate API-Football il bot fa al giorno (storico e quota residua)\n"
         "/uptime - Quanto è stato raggiungibile il bot visto da fuori (UptimeRobot): "
         "disponibilità 24h/7g/30g e ultimo disservizio\n"
-        "/setup - Menu comandi a bottoni"
+        "/setup - Menu comandi a bottoni\n"
+        "/nuovocodice - Genera un codice d'invito per far entrare un cliente\n"
+        "/clienti - Elenco delle chat registrate come clienti\n"
+        "/rimuovicliente <chat_id> - Toglie l'accesso a un cliente"
     )
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
