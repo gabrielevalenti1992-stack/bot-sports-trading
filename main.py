@@ -2529,6 +2529,14 @@ def poll_callbacks():
                         # cosi' compare esattamente dove si e' cliccato, non altrove in chat.
                         esegui_comando_sicuro(chat_id, cmd_momentum_da_bottone, fid_bottone, msg_id)
 
+                    elif data.startswith("status:"):
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"], "text": "Recupero la partita..."},
+                            timeout=5)
+                        esegui_comando_sicuro(chat_id, cmd_status_da_bottone,
+                                              int(data.split(":", 1)[1]))
+
                     elif data.startswith("cmd:"):
                         azione = data.split(":", 1)[1]
                         requests.post(
@@ -2536,6 +2544,8 @@ def poll_callbacks():
                             json={"callback_query_id": cq["id"]}, timeout=5)
                         if azione == "live":
                             esegui_comando_sicuro(chat_id, cmd_live)
+                        elif azione == "status":
+                            esegui_comando_sicuro(chat_id, cmd_status_menu)
                         elif azione == "favorites":
                             esegui_comando_sicuro(chat_id, cmd_favorites)
                         elif azione == "clearfavorites":
@@ -2576,10 +2586,11 @@ def poll_callbacks():
                         esegui_comando_sicuro(chat_id, cmd_setup)
 
                     elif cmd == "/status":
+                        # Senza argomenti si apre il menu delle partite live invece di ripetere
+                        # la sintassi: per scrivere il nome giusto bisogna gia' sapere cosa c'e'
+                        # in campo, che e' esattamente l'informazione che mancava.
                         if not args:
-                            requests.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                json={"chat_id": chat_id, "text": "Usa: /status <nome squadra>"}, timeout=5)
+                            esegui_comando_sicuro(chat_id, cmd_status_menu)
                             continue
                         esegui_comando_sicuro(chat_id, cmd_status, " ".join(args).lower().strip("<>").strip())
 
@@ -4672,7 +4683,8 @@ def cmd_help(chat_id):
     help_text = (
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
-        "/status <squadra> - Info live su una partita\n"
+        "/status - Menu delle partite live: si sceglie col bottone, senza scrivere il nome\n"
+        "/status <squadra> - Info live su una partita, cercata per nome\n"
         "/momentum <squadra> - Grafico dell'andamento pressione durante la partita (solo partite monitorate)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
@@ -6038,6 +6050,331 @@ def spiega_grafico_minutaggi_assente(league_id, home, squadra_casa, away, squadr
     return "Nessun grafico storico per questa partita."
 
 
+# Quante partite al massimo entrano nel menu a bottoni di /status. Non e' un limite di
+# Telegram (i bottoni si possono impilare a lungo) ma di leggibilita': con 20 righe il menu si
+# scorre gia' come un elenco, e sopra diventa peggio che scrivere il nome. Nei log del 06/09 le
+# partite seguite in contemporanea non hanno mai superato le 23, e nel pomeriggio del 04/09 sono
+# arrivate a 29: quando si sfora, il messaggio lo dice e si puo' sempre scrivere /status <nome>.
+MAX_BOTTONI_STATUS = 24
+
+
+def etichetta_partita_bottone(f):
+    """Testo di un bottone del menu /status: le due squadre, il punteggio e il minuto.
+
+    I nomi si accorciano al bisogno perche' un bottone lungo manda a capo la riga e il menu
+    diventa illeggibile; il punteggio e il minuto restano sempre, che sono le due cose che
+    servono per decidere quale partita guardare."""
+    squadre = f.get("teams") or {}
+    home = ((squadre.get("home") or {}).get("name") or "?")
+    away = ((squadre.get("away") or {}).get("name") or "?")
+    gol = f.get("goals") or {}
+    score_h = gol.get("home") if gol.get("home") is not None else 0
+    score_a = gol.get("away") if gol.get("away") is not None else 0
+    minuto = ((f.get("fixture") or {}).get("status") or {}).get("elapsed") or 0
+    coda = f" {score_h}-{score_a} {minuto}'"
+    spazio_nomi = 40 - len(coda)
+    if len(home) + len(away) + 1 > spazio_nomi:
+        meta = max(6, (spazio_nomi - 1) // 2)
+        home = home[:meta].rstrip()
+        away = away[:meta].rstrip()
+    return f"{home}-{away}{coda}"
+
+
+def tastiera_partite_status(partite):
+    """Un bottone per partita: cliccarlo equivale a scrivere /status su quella partita.
+
+    callback_data porta il fixture_id e non il nome: il nome e' proprio la cosa che /status
+    fatica a risolvere (omonime, accenti, abbreviazioni), mentre l'id identifica la partita
+    senza ambiguita' e sta comodamente nei 64 byte che Telegram concede."""
+    return {"inline_keyboard": [
+        [{"text": etichetta_partita_bottone(f),
+          "callback_data": f"status:{(f.get('fixture') or {}).get('id')}"}]
+        for f in partite
+    ]}
+
+
+def ordina_partite_per_menu(partite):
+    """Prima i campionati in ordine, dentro ognuno le partite piu' avanti nel minuto.
+
+    Raggruppare per campionato e' cio' che rende il menu scorribile: le partite dello stesso
+    torneo stanno vicine, come nel palinsesto."""
+    def chiave(f):
+        lega = f.get("league") or {}
+        minuto = ((f.get("fixture") or {}).get("status") or {}).get("elapsed") or 0
+        return ((lega.get("country") or "").lower(), (lega.get("name") or "").lower(), -minuto)
+    return sorted(partite, key=chiave)
+
+
+def cmd_status_menu(chat_id, intro=None):
+    """Il menu delle partite live da cui scegliere quella da guardare con /status.
+
+    Sostituisce il vecchio "Usa: /status <nome squadra>", che era un promemoria della sintassi e
+    non un aiuto: per scrivere il nome giusto bisogna gia' sapere quali partite sono in corso, e
+    indovinare come le chiama API-Football ("Nurnberg" o "Nuremberg"? "Inter" o "Internazionale"?).
+    Il menu toglie il problema alla radice - si sceglie invece di scrivere - e resta comunque
+    possibile scrivere /status <nome> per chi ha gia' in mente la partita.
+
+    Costa una sola chiamata live, la stessa di /live, e nessuna chiamata statistiche: quelle si
+    spendono solo sulla partita che viene effettivamente scelta."""
+    partite = [f for f in get_partite_live() if partita_seguita(f)]
+    if not partite:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id,
+                  "text": "Nessuna partita live seguita in questo momento.\n"
+                          "Puoi comunque cercarne una fuori whitelist con /status <nome squadra>."},
+            timeout=5)
+        return
+    ordinate = ordina_partite_per_menu(partite)
+    mostrate = ordinate[:MAX_BOTTONI_STATUS]
+    testo = intro + "\n\n" if intro else ""
+    testo += f"Scegli la partita ({len(mostrate)} live"
+    testo += f" su {len(ordinate)}, le altre con /status <nome>)" if len(ordinate) > len(mostrate) else ")"
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": testo,
+              "reply_markup": json.dumps(tastiera_partite_status(mostrate))}, timeout=5)
+
+
+def cmd_status_da_bottone(chat_id, fixture_id):
+    """/status di una partita scelta dal menu, per fixture_id invece che per nome."""
+    for f in get_partite_live():
+        if ((f.get("fixture") or {}).get("id")) == fixture_id:
+            invia_scheda_status(chat_id, f)
+            return
+    # Fra la costruzione del menu e il click puo' passare tempo, e una partita che finisce
+    # sparisce dal feed live: meglio dirlo che rispondere con una scheda vuota.
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id,
+              "text": "Quella partita non e' piu' fra le live: nel frattempo e' finita, "
+                      "oppure il feed non la restituisce piu'. Rilancia /status per il menu "
+                      "aggiornato."}, timeout=5)
+
+
+def invia_scheda_status(chat_id, f):
+    """La scheda /status di UNA partita: risultato, statistiche, intensita' e grafico storico.
+
+    Staccata da cmd_status() perche' ora ci si arriva da due strade diverse: la ricerca per
+    nome e il bottone del menu delle partite live (callback "status:<fixture_id>"). La scheda
+    deve essere identica nei due casi, e lo e' perche' e' lo stesso codice.
+
+    Isolamento errori per partita: se cerchi "man" e ci sono sia City che United, un
+    fallimento su una (API 5xx, timeout del grafico, sendPhoto rifiutato) non deve
+    interrompere il ciclo prima che l'altra venga inviata. In caso di errore manda un avviso
+    breve identificando la partita coinvolta, cosi' chi ha chiesto /status vede che una e'
+    saltata invece di ricevere una risposta muta senza sapere perche' manca."""
+    # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
+    # un fallimento su una (API 5xx, timeout del grafico, sendPhoto rifiutato) non
+    # deve piu' interrompere il ciclo prima che l'altra venga inviata. In caso di
+    # errore mando un avviso breve identificando la partita coinvolta, cosi' chi
+    # ha chiesto /status vede che una e' saltata invece di ricevere una risposta
+    # muta senza sapere perche' manca.
+    try:
+        fid = f["fixture"]["id"]
+        home = f["teams"]["home"]["name"]
+        away = f["teams"]["away"]["name"]
+        # Con il paese, come in ogni altro messaggio del bot (formatta_lega): "Serie A" da
+        # sola non dice se e' quella italiana o quella brasiliana, e nei log di questa
+        # settimana ci sono davvero Ligue 1 Francia/Algeria, Serie A Italia/Brasile e Primera
+        # Division Peru/Bolivia/Cile tutte live nello stesso pomeriggio.
+        league = formatta_lega(f.get("league", {}).get("name", ""),
+                               (f.get("league", {}) or {}).get("country", ""))
+        minuto = f["fixture"]["status"].get("elapsed") or 0
+        score_h = f["goals"]["home"] or 0
+        score_a = f["goals"]["away"] or 0
+
+        stats = get_statistiche_partita(fid)
+        stats_text = ""
+        current_stats = None
+        if stats and len(stats) >= 2:
+            sh = stats[0].get("statistics", [])
+            sa = stats[1].get("statistics", [])
+            current_stats = estrai_current_stats(sh, sa)
+            tc, to = current_stats["Tiri totali"]
+            tp, tpo = current_stats["Tiri in porta"]
+            cc, co = current_stats["Corner"]
+            ta, tao = current_stats["Tiri in area"]
+            stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
+            # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
+            # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
+            # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
+            congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
+                fid, stats, minuto, registra=False)
+            if congelato_status:
+                stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
+
+        intensita_text = ""
+        if current_stats:
+            history = STATUS_HISTORY.get(fid, [])
+            history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
+            history = [h for h in history if time.time() - h["timestamp"] <= 1200]
+            STATUS_HISTORY[fid] = history
+
+            # PRIMA lo storico del bot, POI quello di /status.
+            #
+            # STATUS_HISTORY esiste per le partite che il ciclo live non segue (una coppa fuori
+            # whitelist, una femminile cercata a mano): li' e' l'unica fonte possibile. Ma per
+            # una partita TRACCIATA era anche l'unica consultata, e vuol dire buttare via i
+            # rilevamenti che il bot sta gia' prendendo da solo ogni ~3 minuti per rispondere
+            # con quel poco che ha raccolto chi scrive /status in quel momento.
+            #
+            # Il 05/09 in chat, Bundesliga: /status alle 15:36 su Paderborn-Freiburg ha
+            # risposto "primo rilevamento per questa partita" mentre nei log il bot aveva gia'
+            # letto quella partita al 3' e al 6'; un minuto dopo, con due punti di /status a un
+            # minuto l'uno dall'altro, ha risposto "Intensita' (ultimi 15 min): 3.0 pt". Due
+            # risposte sbagliate di fila - una che dice di non sapere, una che spaccia un
+            # minuto per un quarto d'ora - con i dati giusti gia' in memoria.
+            #
+            # I punti si uniscono ordinati per timestamp: i due storici campionano la stessa
+            # partita a ritmi diversi e insieme la coprono meglio di ognuno per conto suo.
+            history_bot = stato_partite.get(fid, {}).get("history") or []
+            history_unita = sorted(history_bot + history, key=lambda h: h["timestamp"])
+
+            delta_stats, is_real = _calcola_delta_15min_da_storico(history_unita, current_stats, minuto)
+            if is_real:
+                punteggio = calcola_indice_intensita(delta_stats)
+                motivazioni = descrivi_motivazioni_intensita(delta_stats)
+                d_tiri = delta_stats.get("Tiri totali", (0, 0))
+                # La finestra DICHIARATA e' quella davvero osservata, non "ultimi 15 min": il
+                # delta parte dal primo rilevamento del blocco di 15 minuti in corso, che all'8'
+                # puo' essere di due minuti prima (vedi punto_riferimento_delta_15min). Dire
+                # "ultimi 15 min" li' e' falso, e lo e' proprio quando il dato e' piu' fragile.
+                riferimento = punto_riferimento_delta_15min(history_unita, minuto)
+                minuto_da = riferimento.get("minuto") if riferimento else None
+                if minuto_da is None or minuto_da >= minuto:
+                    finestra = minuto_con_prefisso("entro il ", "entro l'", minuto)
+                else:
+                    finestra = (minuto_con_prefisso("dal ", "dall'", minuto_da)
+                                + " " + minuto_con_prefisso("al ", "all'", minuto))
+                intensita_text = (
+                    f"\n\nIntensità {finestra}: {punteggio:.1f} pt\n"
+                    f"Tiri nel periodo: {d_tiri[0]} casa - {d_tiri[1]} fuori | {motivazioni}"
+                )
+            else:
+                intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
+
+        # None = chiamata eventi fallita (vedi fetch_fixture_events). Chi ha chiesto /status
+        # deve saperlo: senza gli eventi, "nessun gol" non e' un'informazione ma un buco, e la
+        # riga "Ultimo gol" sparirebbe in silenzio da una partita che i gol li ha.
+        events = fetch_fixture_events(fid)
+        eventi_ok = events is not None
+        events = events or []
+        goals = extract_goals(events)
+        goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
+        # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
+        # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
+        # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
+        # Senza eventi non si puo' contare gli autogol, quindi il controllo si salta invece di
+        # dare un falso "statistiche in ritardo".
+        if eventi_ok:
+            _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
+                current_stats, score_h, score_a, events, home, away)
+            if _indietro_status:
+                stats_text += riga_ritardo_status.rstrip()
+        else:
+            stats_text += "\n⚠️ Marcatori non disponibili: la chiamata eventi non e' andata a buon fine."
+        last_text = ""
+        if goals:
+            last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
+
+        # DIRE COS'E' QUESTA PARTITA.
+        #
+        # /status mostra qualunque partita live, anche una che il bot non segue: e' una
+        # ricerca per nome, e la deroga e' voluta. Ma la risposta era identica nei due casi,
+        # e chi la legge non ha modo di sapere se quella partita entrera' mai in chat da sola.
+        # Vale soprattutto per le omonime femminili, che e' il motivo per cui la riga esiste.
+        motivo_non_seguita = motivo_partita_non_seguita(f)
+        nota_seguita = (f"\n⚠️ Il bot NON segue questa partita ({motivo_non_seguita}): "
+                        f"nessuna notifica automatica, questi dati arrivano solo da /status."
+                        if motivo_non_seguita else "")
+
+        msg_text = (f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}"
+                    f"{last_text}{nota_seguita}{stats_text}{intensita_text}")
+
+        # IL GRAFICO E' DI QUESTE DUE SQUADRE, NON DI DUE CHE SI CHIAMANO COSI'.
+        #
+        # Qui si cercava nello storico solo per NOME e su TUTTI i campionati insieme, con
+        # trova_squadra_in_storico(home). Il match sui nomi e' a sottostringa, quindi "Bayer
+        # Leverkusen" matcha anche "Bayer Leverkusen W", e a parita' di match vince la squadra
+        # con piu' partite caricate - un criterio che sulle omonime non sceglie quella giusta,
+        # sceglie quella la cui stagione e' piu' avanti.
+        #
+        # Il 05/09 in chat: /status Union berlin ha risposto con la scheda di Bayer Leverkusen
+        # vs Union Berlin di Bundesliga (maschile, 9', 1-0) e sopra il grafico di "Bayer
+        # Leverkusen W (in casa)" e "Union Berlin W (in trasferta)". Due squadre femminili,
+        # un'altra partita, un altro campionato. La radice sta piu' indietro: il 03/09 lo
+        # storico e' stato costruito quando risolvi_leghe_whitelist() risolveva ancora 234
+        # leghe (il log lo dice), cioe' prima che imparasse a filtrare come campionato_valido,
+        # e in quelle 234 sono entrate anche le femminili. Il resolver e' stato sistemato, ma
+        # il file sul disco quelle squadre le ha ancora.
+        #
+        # La partita live porta con se' league id e team id: sono la stessa chiave con cui lo
+        # storico e' indicizzato, quindi il lookup puo' essere ESATTO come gia' fa Fascia calda
+        # (squadra_in_storico_per_id). Se in quel campionato non c'e' storico, si resta senza
+        # grafico: e' la risposta giusta, meglio di un grafico di altre due squadre.
+        league_id_status = (f.get("league") or {}).get("id")
+        home_id_status = (f.get("teams", {}).get("home") or {}).get("id")
+        away_id_status = (f.get("teams", {}).get("away") or {}).get("id")
+        squadra_casa = (squadra_in_storico_per_id(league_id_status, home_id_status)
+                        if home_id_status is not None
+                        else trova_squadra_in_storico(home, league_id_status))
+        squadra_trasferta = (squadra_in_storico_per_id(league_id_status, away_id_status)
+                             if away_id_status is not None
+                             else trova_squadra_in_storico(away, league_id_status))
+        foto_path = None
+        if (squadra_casa and squadra_casa["casa"]["partite"] > 0
+                and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
+            foto_path = genera_grafico_minutaggi(
+                squadra_casa["nome"], squadra_casa["casa"],
+                squadra_trasferta["nome"], squadra_trasferta["trasferta"]
+            )
+        else:
+            # Il grafico spariva in silenzio, e un'assenza muta non si distingue da un guasto:
+            # la stessa risposta usciva per un campionato di cui lo storico non e' ancora
+            # stato scaricato, per una squadra appena promossa e per una partita in cui una
+            # delle due non ha ancora giocato in quel ruolo. Da fuori sono tre cose diverse,
+            # e solo una passa da sola col tempo.
+            msg_text += "\n\n" + spiega_grafico_minutaggi_assente(
+                league_id_status, home, squadra_casa, away, squadra_trasferta)
+
+        if foto_path and os.path.exists(foto_path):
+            try:
+                with open(foto_path, 'rb') as photo:
+                    requests.post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": msg_text},
+                        files={"photo": photo}, timeout=15)
+            except Exception as e:
+                log(f"Errore invio grafico /status: {e}")
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": msg_text}, timeout=5)
+            finally:
+                try:
+                    os.remove(foto_path)
+                except Exception:
+                    pass
+        else:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": msg_text}, timeout=5)
+    except Exception as e:
+        squadre_id = (
+            f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
+            f"{f.get('teams', {}).get('away', {}).get('name', '?')}"
+        )
+        log(f"Errore /status per {squadre_id}: {e}\n{traceback.format_exc()}")
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": f"Errore nel recupero di {squadre_id}. Le altre partite trovate proseguono."
+                }, timeout=5)
+        except Exception:
+            pass
+
 def cmd_status(chat_id, query):
     """/status <squadra>: info live sulla partita trovata, statistiche totali casa/trasferta,
     intensità del blocco di 15 minuti in corso — misurata sui rilevamenti che il bot ha già preso
@@ -6050,7 +6387,11 @@ def cmd_status(chat_id, query):
 
     Le partite trovate escono in ordine: prima quelle che il bot segue, poi le altre - e ognuna
     dice a quale campionato E PAESE appartiene, se il bot la segue o no e perché, e se il grafico
-    storico manca, cosa manca."""
+    storico manca, cosa manca.
+
+    Senza query (o quando la query non trova niente) si passa da cmd_status_menu: l'elenco a
+    bottoni delle partite live, che e' l'aiuto vero alla digitazione - il nome giusto non si puo'
+    indovinare se non si sa cosa c'e' in campo."""
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
@@ -6059,9 +6400,11 @@ def cmd_status(chat_id, query):
         if _nomi_squadra_matchano(query, home) or _nomi_squadra_matchano(query, away):
             trovate.append(f)
     if not trovate:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'"}, timeout=5)
+        # Il nome sbagliato e' il caso in cui l'aiuto serve di piu': invece di un vicolo
+        # cieco ("Nessuna partita live trovata") si offre l'elenco di quelle in corso, da cui
+        # scegliere col bottone. Costa una seconda chiamata live, ma solo quando la ricerca
+        # e' andata a vuoto - cioe' proprio quando la prima non e' servita a niente.
+        cmd_status_menu(chat_id, intro=f"Nessuna partita live trovata per '{query}'.")
         return
     # PRIMA LE PARTITE CHE IL BOT SEGUE.
     #
@@ -6073,216 +6416,7 @@ def cmd_status(chat_id, query):
     # dice cosa sono.
     trovate.sort(key=lambda f: 0 if partita_seguita(f) else 1)
     for f in trovate:
-        # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
-        # un fallimento su una (API 5xx, timeout del grafico, sendPhoto rifiutato) non
-        # deve piu' interrompere il ciclo prima che l'altra venga inviata. In caso di
-        # errore mando un avviso breve identificando la partita coinvolta, cosi' chi
-        # ha chiesto /status vede che una e' saltata invece di ricevere una risposta
-        # muta senza sapere perche' manca.
-        try:
-            fid = f["fixture"]["id"]
-            home = f["teams"]["home"]["name"]
-            away = f["teams"]["away"]["name"]
-            # Con il paese, come in ogni altro messaggio del bot (formatta_lega): "Serie A" da
-            # sola non dice se e' quella italiana o quella brasiliana, e nei log di questa
-            # settimana ci sono davvero Ligue 1 Francia/Algeria, Serie A Italia/Brasile e Primera
-            # Division Peru/Bolivia/Cile tutte live nello stesso pomeriggio.
-            league = formatta_lega(f.get("league", {}).get("name", ""),
-                                   (f.get("league", {}) or {}).get("country", ""))
-            minuto = f["fixture"]["status"].get("elapsed") or 0
-            score_h = f["goals"]["home"] or 0
-            score_a = f["goals"]["away"] or 0
-
-            stats = get_statistiche_partita(fid)
-            stats_text = ""
-            current_stats = None
-            if stats and len(stats) >= 2:
-                sh = stats[0].get("statistics", [])
-                sa = stats[1].get("statistics", [])
-                current_stats = estrai_current_stats(sh, sa)
-                tc, to = current_stats["Tiri totali"]
-                tp, tpo = current_stats["Tiri in porta"]
-                cc, co = current_stats["Corner"]
-                ta, tao = current_stats["Tiri in area"]
-                stats_text = f"\nStats totali: Tiri {tc}-{to} | Porta {tp}-{tpo} | Corner {cc}-{co} | Area {ta}-{tao}"
-                # Chiedere /status su una partita col feed bloccato dava i numeri vecchi senza dirlo:
-                # e' come il bot ha risposto "Tiri 3-0" su Venezia-Lecce mentre erano 7-1. Sola
-                # lettura (registra=False): consultare non deve spostare il conteggio del ciclo live.
-                congelato_status, minuti_fermo_status = aggiorna_feed_congelato(
-                    fid, stats, minuto, registra=False)
-                if congelato_status:
-                    stats_text += testo_feed_congelato(minuti_fermo_status, current_stats)
-
-            intensita_text = ""
-            if current_stats:
-                history = STATUS_HISTORY.get(fid, [])
-                history.append({"timestamp": time.time(), "minuto": minuto, "stats": current_stats})
-                history = [h for h in history if time.time() - h["timestamp"] <= 1200]
-                STATUS_HISTORY[fid] = history
-
-                # PRIMA lo storico del bot, POI quello di /status.
-                #
-                # STATUS_HISTORY esiste per le partite che il ciclo live non segue (una coppa fuori
-                # whitelist, una femminile cercata a mano): li' e' l'unica fonte possibile. Ma per
-                # una partita TRACCIATA era anche l'unica consultata, e vuol dire buttare via i
-                # rilevamenti che il bot sta gia' prendendo da solo ogni ~3 minuti per rispondere
-                # con quel poco che ha raccolto chi scrive /status in quel momento.
-                #
-                # Il 05/09 in chat, Bundesliga: /status alle 15:36 su Paderborn-Freiburg ha
-                # risposto "primo rilevamento per questa partita" mentre nei log il bot aveva gia'
-                # letto quella partita al 3' e al 6'; un minuto dopo, con due punti di /status a un
-                # minuto l'uno dall'altro, ha risposto "Intensita' (ultimi 15 min): 3.0 pt". Due
-                # risposte sbagliate di fila - una che dice di non sapere, una che spaccia un
-                # minuto per un quarto d'ora - con i dati giusti gia' in memoria.
-                #
-                # I punti si uniscono ordinati per timestamp: i due storici campionano la stessa
-                # partita a ritmi diversi e insieme la coprono meglio di ognuno per conto suo.
-                history_bot = stato_partite.get(fid, {}).get("history") or []
-                history_unita = sorted(history_bot + history, key=lambda h: h["timestamp"])
-
-                delta_stats, is_real = _calcola_delta_15min_da_storico(history_unita, current_stats, minuto)
-                if is_real:
-                    punteggio = calcola_indice_intensita(delta_stats)
-                    motivazioni = descrivi_motivazioni_intensita(delta_stats)
-                    d_tiri = delta_stats.get("Tiri totali", (0, 0))
-                    # La finestra DICHIARATA e' quella davvero osservata, non "ultimi 15 min": il
-                    # delta parte dal primo rilevamento del blocco di 15 minuti in corso, che all'8'
-                    # puo' essere di due minuti prima (vedi punto_riferimento_delta_15min). Dire
-                    # "ultimi 15 min" li' e' falso, e lo e' proprio quando il dato e' piu' fragile.
-                    riferimento = punto_riferimento_delta_15min(history_unita, minuto)
-                    minuto_da = riferimento.get("minuto") if riferimento else None
-                    if minuto_da is None or minuto_da >= minuto:
-                        finestra = minuto_con_prefisso("entro il ", "entro l'", minuto)
-                    else:
-                        finestra = (minuto_con_prefisso("dal ", "dall'", minuto_da)
-                                    + " " + minuto_con_prefisso("al ", "all'", minuto))
-                    intensita_text = (
-                        f"\n\nIntensità {finestra}: {punteggio:.1f} pt\n"
-                        f"Tiri nel periodo: {d_tiri[0]} casa - {d_tiri[1]} fuori | {motivazioni}"
-                    )
-                else:
-                    intensita_text = "\n\nIntensità: primo rilevamento per questa partita, richiama /status tra qualche minuto per un dato reale sul ritmo."
-
-            # None = chiamata eventi fallita (vedi fetch_fixture_events). Chi ha chiesto /status
-            # deve saperlo: senza gli eventi, "nessun gol" non e' un'informazione ma un buco, e la
-            # riga "Ultimo gol" sparirebbe in silenzio da una partita che i gol li ha.
-            events = fetch_fixture_events(fid)
-            eventi_ok = events is not None
-            events = events or []
-            goals = extract_goals(events)
-            goals = goals_coerenti_con_risultato(goals, home, away, score_h, score_a)
-            # Stesso avviso della notifica: se i gol superano i tiri in porta, i numeri mostrati sopra
-            # sono indietro sul risultato, e chiedere /status deve dirlo invece di darli per buoni.
-            # Qui gli eventi arrivano dopo stats_text, quindi la riga si aggiunge in coda.
-            # Senza eventi non si puo' contare gli autogol, quindi il controllo si salta invece di
-            # dare un falso "statistiche in ritardo".
-            if eventi_ok:
-                _indietro_status, riga_ritardo_status = statistiche_indietro_sul_punteggio(
-                    current_stats, score_h, score_a, events, home, away)
-                if _indietro_status:
-                    stats_text += riga_ritardo_status.rstrip()
-            else:
-                stats_text += "\n⚠️ Marcatori non disponibili: la chiamata eventi non e' andata a buon fine."
-            last_text = ""
-            if goals:
-                last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
-
-            # DIRE COS'E' QUESTA PARTITA.
-            #
-            # /status mostra qualunque partita live, anche una che il bot non segue: e' una
-            # ricerca per nome, e la deroga e' voluta. Ma la risposta era identica nei due casi,
-            # e chi la legge non ha modo di sapere se quella partita entrera' mai in chat da sola.
-            # Vale soprattutto per le omonime femminili, che e' il motivo per cui la riga esiste.
-            motivo_non_seguita = motivo_partita_non_seguita(f)
-            nota_seguita = (f"\n⚠️ Il bot NON segue questa partita ({motivo_non_seguita}): "
-                            f"nessuna notifica automatica, questi dati arrivano solo da /status."
-                            if motivo_non_seguita else "")
-
-            msg_text = (f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}"
-                        f"{last_text}{nota_seguita}{stats_text}{intensita_text}")
-
-            # IL GRAFICO E' DI QUESTE DUE SQUADRE, NON DI DUE CHE SI CHIAMANO COSI'.
-            #
-            # Qui si cercava nello storico solo per NOME e su TUTTI i campionati insieme, con
-            # trova_squadra_in_storico(home). Il match sui nomi e' a sottostringa, quindi "Bayer
-            # Leverkusen" matcha anche "Bayer Leverkusen W", e a parita' di match vince la squadra
-            # con piu' partite caricate - un criterio che sulle omonime non sceglie quella giusta,
-            # sceglie quella la cui stagione e' piu' avanti.
-            #
-            # Il 05/09 in chat: /status Union berlin ha risposto con la scheda di Bayer Leverkusen
-            # vs Union Berlin di Bundesliga (maschile, 9', 1-0) e sopra il grafico di "Bayer
-            # Leverkusen W (in casa)" e "Union Berlin W (in trasferta)". Due squadre femminili,
-            # un'altra partita, un altro campionato. La radice sta piu' indietro: il 03/09 lo
-            # storico e' stato costruito quando risolvi_leghe_whitelist() risolveva ancora 234
-            # leghe (il log lo dice), cioe' prima che imparasse a filtrare come campionato_valido,
-            # e in quelle 234 sono entrate anche le femminili. Il resolver e' stato sistemato, ma
-            # il file sul disco quelle squadre le ha ancora.
-            #
-            # La partita live porta con se' league id e team id: sono la stessa chiave con cui lo
-            # storico e' indicizzato, quindi il lookup puo' essere ESATTO come gia' fa Fascia calda
-            # (squadra_in_storico_per_id). Se in quel campionato non c'e' storico, si resta senza
-            # grafico: e' la risposta giusta, meglio di un grafico di altre due squadre.
-            league_id_status = (f.get("league") or {}).get("id")
-            home_id_status = (f.get("teams", {}).get("home") or {}).get("id")
-            away_id_status = (f.get("teams", {}).get("away") or {}).get("id")
-            squadra_casa = (squadra_in_storico_per_id(league_id_status, home_id_status)
-                            if home_id_status is not None
-                            else trova_squadra_in_storico(home, league_id_status))
-            squadra_trasferta = (squadra_in_storico_per_id(league_id_status, away_id_status)
-                                 if away_id_status is not None
-                                 else trova_squadra_in_storico(away, league_id_status))
-            foto_path = None
-            if (squadra_casa and squadra_casa["casa"]["partite"] > 0
-                    and squadra_trasferta and squadra_trasferta["trasferta"]["partite"] > 0):
-                foto_path = genera_grafico_minutaggi(
-                    squadra_casa["nome"], squadra_casa["casa"],
-                    squadra_trasferta["nome"], squadra_trasferta["trasferta"]
-                )
-            else:
-                # Il grafico spariva in silenzio, e un'assenza muta non si distingue da un guasto:
-                # la stessa risposta usciva per un campionato di cui lo storico non e' ancora
-                # stato scaricato, per una squadra appena promossa e per una partita in cui una
-                # delle due non ha ancora giocato in quel ruolo. Da fuori sono tre cose diverse,
-                # e solo una passa da sola col tempo.
-                msg_text += "\n\n" + spiega_grafico_minutaggi_assente(
-                    league_id_status, home, squadra_casa, away, squadra_trasferta)
-
-            if foto_path and os.path.exists(foto_path):
-                try:
-                    with open(foto_path, 'rb') as photo:
-                        requests.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                            data={"chat_id": chat_id, "caption": msg_text},
-                            files={"photo": photo}, timeout=15)
-                except Exception as e:
-                    log(f"Errore invio grafico /status: {e}")
-                    requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                        json={"chat_id": chat_id, "text": msg_text}, timeout=5)
-                finally:
-                    try:
-                        os.remove(foto_path)
-                    except Exception:
-                        pass
-            else:
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": msg_text}, timeout=5)
-        except Exception as e:
-            squadre_id = (
-                f"{f.get('teams', {}).get('home', {}).get('name', '?')} vs "
-                f"{f.get('teams', {}).get('away', {}).get('name', '?')}"
-            )
-            log(f"Errore /status per {squadre_id}: {e}\n{traceback.format_exc()}")
-            try:
-                requests.post(
-                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": f"Errore nel recupero di {squadre_id}. Le altre partite trovate proseguono."
-                    }, timeout=5)
-            except Exception:
-                pass
+        invia_scheda_status(chat_id, f)
 
 
 def spiega_momentum_insufficiente(history):
@@ -7068,7 +7202,8 @@ STRATEGIE = [
 def cmd_setup(chat_id):
     keyboard = {
         "inline_keyboard": [
-            [{"text": "📡 Live", "callback_data": "cmd:live"}],
+            [{"text": "📡 Live", "callback_data": "cmd:live"},
+             {"text": "🔎 Status partita", "callback_data": "cmd:status"}],
             [{"text": "⭐ Preferiti", "callback_data": "cmd:favorites"},
              {"text": "🗑 Svuota preferiti", "callback_data": "cmd:clearfavorites"}],
             [{"text": "🔇 Silenziate", "callback_data": "cmd:silenced"}],
