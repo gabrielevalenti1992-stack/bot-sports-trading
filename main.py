@@ -1179,9 +1179,22 @@ def squadra_giovanile(nome_squadra):
 # una coppa o un torneo possono chiamarsi in modo neutro e mettere in campo squadre femminili lo
 # stesso, e l'elenco delle lingue non sara' mai completo. Il nome della squadra invece porta un
 # marcatore stabile: API-Football aggiunge " W" in coda (Bayern Munich W, Barcelona W, Nurnberg W).
+# Voci troncate alla RADICE, e cercate come PREFISSO di parola (vedi squadra_femminile): con il
+# confine di parola anche in coda, "femenina" ed "femenino" andavano elencate una per una, e ogni
+# forma dimenticata era una squadra che passava. Erano dieci parole per quattro lingue, e ne
+# mancavano tredici su trentatre nomi reali di API-Football: "Real Betis Feminas", "Olympique
+# Lyonnais Feminin", "Montpellier Feminines", "Tigres UANL Femenil", "America Femenil",
+# "HB Koge Kvinde". Con le radici, una sola voce copre tutta la famiglia.
 PAROLE_ESCLUSE_SQUADRE_FEMMINILI = [
-    "women", "femminile", "femenino", "femenina", "feminino", "feminine",
-    "frauen", "vrouwen", "dames", "kvinner",
+    "women",      # women, women's
+    "femmin",     # femminile, femminili
+    "femen",      # femenina, femenino, femenil
+    "femin",      # feminina, feminino, feminine, feminines, feminin, feminas
+    "frauen", "vrouwen",
+    "kvinn",      # kvinner (no), kvinnor (se)
+    "kvinde",     # kvinde, kvindeliga (dk)
+    # "dame" NO come radice: "Notre Dame" esiste. Solo le forme che marcano davvero il femminile.
+    "dames", "damen", "damer",
 ]
 
 
@@ -1189,11 +1202,16 @@ def squadra_femminile(nome_squadra):
     """True se il nome e' quello di una squadra femminile.
 
     Il marcatore " W" si cerca solo in CODA e come parola a se': dentro il nome intercetterebbe
-    mezzo mondo, e in coda non esistono club maschili che finiscano con una W isolata."""
+    mezzo mondo, e in coda non esistono club maschili che finiscano con una W isolata.
+
+    Le parole si cercano come PREFISSO di parola (\bradice, senza confine in coda): "femin"
+    intercetta cosi' feminina, feminino, feminine e feminas con una voce sola. Il confine in testa
+    resta obbligatorio - senza, "femin" pescherebbe qualunque nome che contenga quelle lettere in
+    mezzo a una parola."""
     nome = _senza_accenti(nome_squadra or "").strip()
     if re.search(r"\bw$", nome) or nome.endswith("(w)"):
         return True
-    return any(re.search(rf"\b{re.escape(parola)}\b", nome)
+    return any(re.search(rf"\b{re.escape(parola)}", nome)
                for parola in PAROLE_ESCLUSE_SQUADRE_FEMMINILI)
 
 
@@ -1257,6 +1275,38 @@ def partita_tra_giovanili(fixture):
     squadre = fixture.get("teams", {}) or {}
     return any(squadra_giovanile((squadre.get(lato) or {}).get("name", ""))
                for lato in ("home", "away"))
+
+
+def partita_seguita(fixture):
+    """La definizione unica di "partita che il bot segue": whitelist E squadre non giovanili E
+    squadre non femminili - le stesse tre condizioni, nello stesso ordine, del ciclo principale.
+
+    Esisteva gia' scritta per esteso in due posti (ciclo live e piano giornata), ma i COMANDI ne
+    usavano mezza: /live, /intensita e /diagnostica filtravano solo con fixture_in_whitelist(),
+    quindi elencavano partite che il bot non segue. Nei log del 04/09 alle 19:27 il ciclo scriveva
+    "109 totali, 28 valide (11 escluse: squadre giovanili)": quelle undici passano la whitelist e
+    le ferma solo il filtro sulle squadre - erano invisibili al bot e visibili nei comandi, e
+    /live le annunciava pure come "partite live monitorate". /intensita, che su ognuna spende una
+    chiamata statistiche, ne pagava undici per niente.
+
+    /status resta fuori di proposito: li' si cerca una partita per nome, ed e' giusto che la si
+    trovi comunque (vedi la nota in partita_tra_giovanili). Non e' un elenco, e' una ricerca."""
+    return (fixture_in_whitelist(fixture)
+            and not partita_tra_giovanili(fixture)
+            and not partita_femminile(fixture))
+
+
+def motivo_partita_non_seguita(fixture):
+    """Perche' il bot non segue questa partita, in una frase breve; None se invece la segue.
+    Serve a /status, che la partita la mostra lo stesso ma deve dire cosa sta mostrando."""
+    if partita_femminile(fixture):
+        return "squadre femminili"
+    if partita_tra_giovanili(fixture):
+        return "squadre giovanili o riserve"
+    if not fixture_in_whitelist(fixture):
+        return "campionato fuori whitelist"
+    return None
+
 
 # Coppe nazionali (non UEFA) sempre escluse. Da quando campionato_valido() usa solo la whitelist
 # statica (niente più cache dinamica dell'API, vedi commento lì) questo elenco è ridondante in
@@ -2041,7 +2091,75 @@ def carica_storico_minutaggi():
 def salva_storico_minutaggi(dati):
     salva_json_atomico(STORICO_MINUTAGGI_FILE, dati)
 
+
+def ripulisci_storico_minutaggi(storico):
+    """Toglie dallo storico minutaggi le squadre che il bot NON segue: femminili e giovanili.
+
+    IL FILTRO E' STATO SISTEMATO, IL FILE NO.
+
+    Lo storico e' stato costruito il 03/09 alle 23:13, e alle 22:24 di quella stessa sera i log
+    dicono "Storico minutaggi: risolte 234 leghe whitelist con ID e stagione" - a fronte di una
+    whitelist di una ottantina di voci. Era la versione di risolvi_leghe_whitelist() che
+    confrontava i nomi a sottostringa senza guardare il paese, e da quel buco sono entrate anche
+    le femminili; in quella passata sono state processate 4721 partite. Il resolver oggi filtra
+    come campionato_valido() e le femminili non entrano piu', ma le squadre gia' scritte sul disco
+    nessuno le ha mai tolte: una correzione al codice non ripulisce da sola i dati che il codice
+    sbagliato aveva gia' raccolto.
+
+    Il danno non e' teorico. Il 05/09 in chat, "/status Union berlin" ha risposto con la scheda
+    della partita di Bundesliga maschile e sopra il grafico di "Bayer Leverkusen W (in casa)" e
+    "Union Berlin W (in trasferta)": due squadre femminili, un'altra partita, un altro campionato.
+    Lo stesso storico alimenta la strategia Fascia calda e il comando /analisi.
+
+    Si tolgono le stesse due categorie che il ciclo live esclude (vedi partita_femminile e
+    partita_tra_giovanili, applicate sempre in coppia): le SECONDE squadre no - "Real Sociedad II"
+    gioca in Segunda Division ed e' tracciata davvero, i suoi minutaggi servono.
+
+    Ritorna (nomi femminili tolti, nomi giovanili tolti, leghe rimaste vuote)."""
+    femminili, giovanili, leghe_svuotate = [], [], []
+    for league_key, lega_dati in list(storico.items()):
+        # Il file arriva dal disco e la pulizia gira all'AVVIO: una voce malformata (troncata da
+        # un riavvio a meta' scrittura, o scritta da una versione vecchia) non deve impedire al
+        # bot di partire. Si salta e basta.
+        if not isinstance(lega_dati, dict):
+            continue
+        squadre = lega_dati.get("squadre")
+        if not isinstance(squadre, dict):
+            continue
+        tolte_qui = 0
+        for team_key, voce in list(squadre.items()):
+            nome = (voce or {}).get("nome", "")
+            if squadra_femminile(nome):
+                femminili.append(nome)
+            elif squadra_giovanile(nome):
+                giovanili.append(nome)
+            else:
+                continue
+            del squadre[team_key]
+            tolte_qui += 1
+        # La lega si cancella solo se e' rimasta vuota DOPO aver tolto qualcosa: una lega gia'
+        # senza squadre e' una whitelist appena aggiunta e mai ancora scaricata, non un residuo.
+        if tolte_qui and not squadre:
+            del storico[league_key]
+            leghe_svuotate.append(league_key)
+    return femminili, giovanili, leghe_svuotate
+
+
 STORICO_MINUTAGGI = carica_storico_minutaggi()
+_storico_fem, _storico_giov, _storico_leghe_vuote = ripulisci_storico_minutaggi(STORICO_MINUTAGGI)
+if _storico_fem or _storico_giov:
+    salva_storico_minutaggi(STORICO_MINUTAGGI)
+    print(f"Storico minutaggi ripulito: {len(_storico_fem)} squadre femminili e "
+          f"{len(_storico_giov)} giovanili tolte"
+          + (f", {len(_storico_leghe_vuote)} leghe rimaste vuote e cancellate"
+             if _storico_leghe_vuote else "")
+          + f" ({len(STORICO_MINUTAGGI)} leghe restano)", flush=True)
+    for _nome in sorted(set(_storico_fem))[:20]:
+        print(f"    femminile tolta: {_nome}", flush=True)
+    for _nome in sorted(set(_storico_giov))[:20]:
+        print(f"    giovanile tolta: {_nome}", flush=True)
+else:
+    print(f"Storico minutaggi: {len(STORICO_MINUTAGGI)} leghe, niente da ripulire", flush=True)
 
 # =============================================================================
 # PIANO GIORNATA (snapshot giornaliero partite whitelist + finestre orarie attive)
@@ -4648,9 +4766,11 @@ def cmd_silenced(chat_id):
 
 def cmd_live(chat_id):
     partite_cmd_raw = get_partite_live()
+    # partita_seguita() e non il solo fixture_in_whitelist(): questo elenco dice "partite live
+    # monitorate", e una giovanile o una femminile monitorata non e'.
     partite_cmd = [
         f for f in partite_cmd_raw
-        if fixture_in_whitelist(f)
+        if partita_seguita(f)
     ]
     if not partite_cmd:
         requests.post(
@@ -5367,9 +5487,11 @@ def cmd_diagnostica(chat_id):
             json={"chat_id": chat_id, "text": "🔍 Diagnostica: nessuna partita live in questo momento secondo l'API."}, timeout=5)
         return
 
+    # Stesso filtro del ciclo live: la diagnostica deve guardare le partite che il bot segue
+    # davvero, altrimenti segnala "statistiche mancanti" su partite che non tracchera' mai.
     partite_valide = [
         f for f in partite_raw
-        if fixture_in_whitelist(f)
+        if partita_seguita(f)
     ]
     ora = time.time()
     righe = [
@@ -5894,7 +6016,10 @@ def cmd_status(chat_id, query):
     distribuzione storica gol per fascia di minuto delle due squadre, cercate per id.
 
     La finestra scritta accanto all'intensità è quella davvero osservata ("dal 3' all'8'"), non un
-    generico "ultimi 15 min": a inizio blocco il primo rilevamento è di pochi minuti prima."""
+    generico "ultimi 15 min": a inizio blocco il primo rilevamento è di pochi minuti prima.
+
+    Le partite trovate escono in ordine: prima quelle che il bot segue, poi le altre, e quelle
+    che non segue lo dicono."""
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
@@ -5907,6 +6032,15 @@ def cmd_status(chat_id, query):
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id, "text": f"Nessuna partita live trovata per '{query}'"}, timeout=5)
         return
+    # PRIMA LE PARTITE CHE IL BOT SEGUE.
+    #
+    # Una ricerca per nome trova anche l'omonima femminile o giovanile, ed e' giusto cosi' (vedi
+    # partita_seguita: /status e' una ricerca, non un elenco). Ma l'ordine in cui arrivano i
+    # messaggi non e' un dettaglio: il 05/09 "/status Union berlin" ha risposto con la partita di
+    # Bundesliga e sopra il grafico delle due squadre femminili omonime. La partita che il bot
+    # segue davvero e' quella che interessa: va per prima, le altre dopo e con l'etichetta che
+    # dice cosa sono.
+    trovate.sort(key=lambda f: 0 if partita_seguita(f) else 1)
     for f in trovate:
         # Isolamento errori per partita: se cerchi "man" e ci sono sia City che United,
         # un fallimento su una (API 5xx, timeout del grafico, sendPhoto rifiutato) non
@@ -6017,7 +6151,19 @@ def cmd_status(chat_id, query):
             if goals:
                 last_text = f"\nUltimo gol: {goals[-1]['minute']}' ({goals[-1]['player']})"
 
-            msg_text = f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}{last_text}{stats_text}{intensita_text}"
+            # DIRE COS'E' QUESTA PARTITA.
+            #
+            # /status mostra qualunque partita live, anche una che il bot non segue: e' una
+            # ricerca per nome, e la deroga e' voluta. Ma la risposta era identica nei due casi,
+            # e chi la legge non ha modo di sapere se quella partita entrera' mai in chat da sola.
+            # Vale soprattutto per le omonime femminili, che e' il motivo per cui la riga esiste.
+            motivo_non_seguita = motivo_partita_non_seguita(f)
+            nota_seguita = (f"\n⚠️ Il bot NON segue questa partita ({motivo_non_seguita}): "
+                            f"nessuna notifica automatica, questi dati arrivano solo da /status."
+                            if motivo_non_seguita else "")
+
+            msg_text = (f"{home} vs {away}\n{league}\n{minuto}' | {score_h}-{score_a}"
+                        f"{last_text}{nota_seguita}{stats_text}{intensita_text}")
 
             # IL GRAFICO E' DI QUESTE DUE SQUADRE, NON DI DUE CHE SI CHIAMANO COSI'.
             #
@@ -6538,9 +6684,12 @@ def cmd_intensita(chat_id):
     """Classifica le partite live (nei campionati con statistiche note) per indice di intensità,
     calcolato sul ritmo recente (ultimi 15 min) invece che sui totali cumulativi di partita."""
     partite_raw = get_partite_live()
+    # Qui il filtro pesa in chiamate: su ogni partita scandita /intensita spende una chiamata
+    # statistiche, e le giovanili quasi mai le hanno. Undici partite del genere per ciclo sono
+    # undici chiamate buttate, sulla stessa quota delle partite vere.
     partite_cmd = [
         f for f in partite_raw
-        if fixture_in_whitelist(f)
+        if partita_seguita(f)
     ]
     if not partite_cmd:
         requests.post(
@@ -7958,12 +8107,31 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
     if da_processare:
         log(f"Storico minutaggi: lega {league_id}, {len(da_processare)} nuove partite da processare (su {len(nuove)} non ancora fatte)")
 
+    saltate_filtro = 0
     for f in da_processare:
         fixture_id = f["fixture"]["id"]
         home_id = f["teams"]["home"]["id"]
         home_name = f["teams"]["home"]["name"]
         away_id = f["teams"]["away"]["id"]
         away_name = f["teams"]["away"]["name"]
+
+        # LO STESSO FILTRO DEL CICLO LIVE, QUI DOVE I DATI SI SCRIVONO.
+        #
+        # Il ciclo principale e il piano giornata scartano le partite femminili e giovanili (vedi
+        # partita_femminile / partita_tra_giovanili), ma questa funzione - che e' quella che
+        # RIEMPIE lo storico - non guardava le squadre affatto: prendeva tutte le partite della
+        # lega. Finche' il resolver lasciava passare leghe che non avrebbe dovuto, le femminili
+        # entravano da qui, e ripulisci_storico_minutaggi() le toglie ora dal file. Questo
+        # controllo e' l'altra meta': impedisce che ci tornino.
+        #
+        # Il controllo sta PRIMA di fetch_fixture_events(): una partita che non vogliamo non deve
+        # nemmeno costarci la chiamata agli eventi. Il fixture_id va comunque fra i processati,
+        # altrimenti ogni aggiornamento la riesamina da capo per sempre.
+        if (squadra_femminile(home_name) or squadra_femminile(away_name)
+                or squadra_giovanile(home_name) or squadra_giovanile(away_name)):
+            lega_dati["fixture_ids_processati"].append(fixture_id)
+            saltate_filtro += 1
+            continue
 
         # Gli eventi si chiedono PRIMA di toccare i contatori: se la chiamata fallisce
         # (rate-limit, timeout, rete) questa partita non va contata affatto. Prima gli eventi
@@ -8009,6 +8177,9 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
         lega_dati["fixture_ids_processati"].append(fixture_id)
         time.sleep(0.3)
 
+    if saltate_filtro:
+        log(f"Storico minutaggi: lega {league_id}, {saltate_filtro} partite saltate "
+            f"(squadre femminili o giovanili, come nel ciclo live)")
     lega_dati["ultimo_aggiornamento"] = time.time()
     STORICO_MINUTAGGI[league_key] = lega_dati
     salva_storico_minutaggi(STORICO_MINUTAGGI)
