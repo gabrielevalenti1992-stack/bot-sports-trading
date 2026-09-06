@@ -2320,20 +2320,17 @@ def ripulisci_storico_minutaggi(storico):
 
 
 STORICO_MINUTAGGI = carica_storico_minutaggi()
-_storico_fem, _storico_giov, _storico_leghe_vuote = ripulisci_storico_minutaggi(STORICO_MINUTAGGI)
-if _storico_fem or _storico_giov:
-    salva_storico_minutaggi(STORICO_MINUTAGGI)
-    print(f"Storico minutaggi ripulito: {len(_storico_fem)} squadre femminili e "
-          f"{len(_storico_giov)} giovanili tolte"
-          + (f", {len(_storico_leghe_vuote)} leghe rimaste vuote e cancellate"
-             if _storico_leghe_vuote else "")
-          + f" ({len(STORICO_MINUTAGGI)} leghe restano)", flush=True)
-    for _nome in sorted(set(_storico_fem))[:20]:
-        print(f"    femminile tolta: {_nome}", flush=True)
-    for _nome in sorted(set(_storico_giov))[:20]:
-        print(f"    giovanile tolta: {_nome}", flush=True)
-else:
-    print(f"Storico minutaggi: {len(STORICO_MINUTAGGI)} leghe, niente da ripulire", flush=True)
+# La PULIZIA vera e propria (ripulisci_storico_minutaggi) NON gira qui: chiama squadra_femminile()
+# e squadra_giovanile(), che dipendono entrambe da _senza_accenti(), definita solo piu' avanti nel
+# file. Una CHIAMATA a livello di modulo (a differenza di una def, che si limita a creare la
+# funzione) cerca subito il nome nel namespace globale - a questo punto del file _senza_accenti
+# non esiste ancora, e il risultato e' un NameError che impedisce al processo di avviarsi.
+#
+# Bug vero, visto in produzione il 06/09 alle 17:16 UTC, in crash-loop ad ogni riavvio: nessun
+# test l'aveva preso perche' ogni test parte da uno storico VUOTO (cartella dati appena creata),
+# e sul dizionario vuoto il ciclo dentro ripulisci_storico_minutaggi non esegue mai il corpo che
+# chiama squadra_femminile - il bug restava invisibile finche' sul disco non c'era gia' storico
+# vero, cosa che in produzione e' sempre. La chiamata sta ora subito dopo _senza_accenti, vedi li'.
 
 # =============================================================================
 # PIANO GIORNATA (snapshot giornaliero partite whitelist + finestre orarie attive)
@@ -3114,6 +3111,23 @@ def _senza_accenti(testo):
 # Chiavi normalizzate anch'esse: "segunda división" nella mappa sopra è accentata, e senza questo
 # la guardia sul paese per quella lega smetterebbe di trovarla appena il nome viene normalizzato.
 PAESE_ATTESO_LEGA_AMBIGUA_NORM = {_senza_accenti(k): v for k, v in PAESE_ATTESO_LEGA_AMBIGUA.items()}
+
+# Pulizia dello storico minutaggi appena caricato (vedi il commento vicino a
+# "STORICO_MINUTAGGI = carica_storico_minutaggi()": deve stare QUI, dopo _senza_accenti, non li'.
+_storico_fem, _storico_giov, _storico_leghe_vuote = ripulisci_storico_minutaggi(STORICO_MINUTAGGI)
+if _storico_fem or _storico_giov:
+    salva_storico_minutaggi(STORICO_MINUTAGGI)
+    print(f"Storico minutaggi ripulito: {len(_storico_fem)} squadre femminili e "
+          f"{len(_storico_giov)} giovanili tolte"
+          + (f", {len(_storico_leghe_vuote)} leghe rimaste vuote e cancellate"
+             if _storico_leghe_vuote else "")
+          + f" ({len(STORICO_MINUTAGGI)} leghe restano)", flush=True)
+    for _nome in sorted(set(_storico_fem))[:20]:
+        print(f"    femminile tolta: {_nome}", flush=True)
+    for _nome in sorted(set(_storico_giov))[:20]:
+        print(f"    giovanile tolta: {_nome}", flush=True)
+else:
+    print(f"Storico minutaggi: {len(STORICO_MINUTAGGI)} leghe, niente da ripulire", flush=True)
 
 
 def _lega_in_whitelist_statica(nome, league_country):
