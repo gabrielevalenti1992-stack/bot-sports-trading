@@ -6008,6 +6008,36 @@ def _nomi_squadra_matchano(query, nome_squadra):
     return False
 
 
+def spiega_grafico_minutaggi_assente(league_id, home, squadra_casa, away, squadra_trasferta):
+    """Perche' /status non allega il grafico dei minutaggi, in una riga.
+
+    Il grafico vuole quattro cose insieme: l'id del campionato, lo storico di quel campionato,
+    le due squadre dentro quello storico, e per ognuna almeno una partita giocata NEL RUOLO che
+    il grafico mostra (la casa in casa, l'ospite in trasferta). Se ne manca una il grafico non
+    si fa - e finora non si faceva e basta, senza dire quale."""
+    if league_id is None:
+        return ("Nessun grafico storico: l'API non ha mandato l'id del campionato per questa "
+                "partita, e senza quello lo storico non si puo' cercare senza rischiare di "
+                "pescare due squadre omonime di un altro campionato.")
+    if str(league_id) not in STORICO_MINUTAGGI:
+        return ("Nessun grafico storico: di questo campionato il bot non ha ancora scaricato lo "
+                "storico dei minutaggi. Si popola da solo con gli aggiornamenti automatici, "
+                "oppure subito con /aggiornastorico.")
+
+    mancanti = []
+    if not squadra_casa:
+        mancanti.append(f"{home} non e' ancora nello storico di questo campionato")
+    elif squadra_casa["casa"]["partite"] == 0:
+        mancanti.append(f"di {home} lo storico non ha ancora nessuna partita IN CASA")
+    if not squadra_trasferta:
+        mancanti.append(f"{away} non e' ancora nello storico di questo campionato")
+    elif squadra_trasferta["trasferta"]["partite"] == 0:
+        mancanti.append(f"di {away} lo storico non ha ancora nessuna partita IN TRASFERTA")
+    if mancanti:
+        return "Nessun grafico storico: " + "; ".join(mancanti) + "."
+    return "Nessun grafico storico per questa partita."
+
+
 def cmd_status(chat_id, query):
     """/status <squadra>: info live sulla partita trovata, statistiche totali casa/trasferta,
     intensità del blocco di 15 minuti in corso — misurata sui rilevamenti che il bot ha già preso
@@ -6018,8 +6048,9 @@ def cmd_status(chat_id, query):
     La finestra scritta accanto all'intensità è quella davvero osservata ("dal 3' all'8'"), non un
     generico "ultimi 15 min": a inizio blocco il primo rilevamento è di pochi minuti prima.
 
-    Le partite trovate escono in ordine: prima quelle che il bot segue, poi le altre, e quelle
-    che non segue lo dicono."""
+    Le partite trovate escono in ordine: prima quelle che il bot segue, poi le altre - e ognuna
+    dice a quale campionato E PAESE appartiene, se il bot la segue o no e perché, e se il grafico
+    storico manca, cosa manca."""
     partite_cmd = get_partite_live()
     trovate = []
     for f in partite_cmd:
@@ -6052,7 +6083,12 @@ def cmd_status(chat_id, query):
             fid = f["fixture"]["id"]
             home = f["teams"]["home"]["name"]
             away = f["teams"]["away"]["name"]
-            league = f.get("league", {}).get("name", "")
+            # Con il paese, come in ogni altro messaggio del bot (formatta_lega): "Serie A" da
+            # sola non dice se e' quella italiana o quella brasiliana, e nei log di questa
+            # settimana ci sono davvero Ligue 1 Francia/Algeria, Serie A Italia/Brasile e Primera
+            # Division Peru/Bolivia/Cile tutte live nello stesso pomeriggio.
+            league = formatta_lega(f.get("league", {}).get("name", ""),
+                                   (f.get("league", {}) or {}).get("country", ""))
             minuto = f["fixture"]["status"].get("elapsed") or 0
             score_h = f["goals"]["home"] or 0
             score_a = f["goals"]["away"] or 0
@@ -6202,6 +6238,14 @@ def cmd_status(chat_id, query):
                     squadra_casa["nome"], squadra_casa["casa"],
                     squadra_trasferta["nome"], squadra_trasferta["trasferta"]
                 )
+            else:
+                # Il grafico spariva in silenzio, e un'assenza muta non si distingue da un guasto:
+                # la stessa risposta usciva per un campionato di cui lo storico non e' ancora
+                # stato scaricato, per una squadra appena promossa e per una partita in cui una
+                # delle due non ha ancora giocato in quel ruolo. Da fuori sono tre cose diverse,
+                # e solo una passa da sola col tempo.
+                msg_text += "\n\n" + spiega_grafico_minutaggi_assente(
+                    league_id_status, home, squadra_casa, away, squadra_trasferta)
 
             if foto_path and os.path.exists(foto_path):
                 try:
