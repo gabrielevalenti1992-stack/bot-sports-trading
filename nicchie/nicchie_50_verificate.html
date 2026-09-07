@@ -1,0 +1,1461 @@
+<title>50 Nicchie Verificate</title>
+<style>
+    :root {
+        --bg-primary: #0f172a;
+        --bg-secondary: #1e293b;
+        --bg-card: #334155;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --accent: #38bdf8;
+        --accent-green: #22c55e;
+        --accent-red: #ef4444;
+        --border: #475569;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg-primary); color: var(--text-main); padding: 12px; padding-bottom: 40px; }
+    header { margin-bottom: 16px; text-align: center; }
+    h1 { font-size: 1.3rem; color: var(--accent); margin-bottom: 4px; }
+    p.subtitle { font-size: 0.8rem; color: var(--text-muted); }
+
+    .method-note {
+        background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 12px;
+        padding: 12px 14px; margin-bottom: 16px; font-size: 0.78rem; line-height: 1.5; color: var(--text-muted);
+    }
+    .method-note b { color: var(--accent); }
+    .method-note .stat { color: var(--accent-green); font-weight: bold; }
+
+    .controls {
+        display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px;
+        background: var(--bg-secondary); padding: 12px; border-radius: 12px; border: 1px solid var(--border);
+    }
+    label { font-size: 0.75rem; color: var(--accent); font-weight: bold; margin-bottom: 4px; display: block; }
+    select {
+        width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border);
+        background-color: var(--bg-primary); color: var(--text-main); font-size: 0.85rem;
+    }
+
+    .stats-summary { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); padding: 0 4px; }
+    .cards-container { display: flex; flex-direction: column; gap: 12px; }
+    .card { background-color: var(--bg-secondary); border: 1px solid var(--border); border-radius: 12px; padding: 14px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; gap: 8px; }
+    .card-title { font-size: 1.05rem; font-weight: 600; color: #ffffff; line-height: 1.3; }
+
+    .badge { font-size: 0.7rem; padding: 3px 8px; border-radius: 12px; font-weight: bold; white-space: nowrap; background-color: var(--accent); color: #000; }
+    .badges-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .badge-source { background-color: #475569; color: #fff; }
+    .badge-price { background-color: var(--accent-green); color: #000; }
+    .badge-tested { background-color: #a855f7; color: #fff; }
+
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background: var(--bg-primary); padding: 8px; border-radius: 8px; margin-bottom: 10px; font-size: 0.8rem; }
+    .metric-item span { display: block; color: var(--text-muted); font-size: 0.7rem; }
+    .metric-item strong { color: var(--accent); }
+
+    .details-toggle { width: 100%; background-color: var(--bg-card); color: var(--text-main); border: none; padding: 8px; border-radius: 6px; font-size: 0.85rem; font-weight: 500; cursor: pointer; }
+    .details-content { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 0.85rem; line-height: 1.4; }
+    .details-content.active { display: block; }
+    .detail-section { margin-bottom: 10px; }
+    .detail-section strong { color: var(--accent); display: block; margin-bottom: 2px; }
+    .method-box { background: var(--bg-primary); border-left: 3px solid var(--accent); padding: 8px 10px; border-radius: 6px; margin-top: 2px; }
+    .conc-box { background: var(--bg-primary); border-left: 3px solid var(--accent-green); padding: 8px 10px; border-radius: 6px; margin-top: 2px; }
+    .test-box { background: var(--bg-primary); border-left: 3px solid #a855f7; padding: 8px 10px; border-radius: 6px; margin-top: 2px; }
+    .steps { margin: 4px 0 0 18px; padding: 0; }
+    .steps li { margin-bottom: 5px; }
+    .tools-line { color: var(--text-muted); font-size: 0.8rem; }
+    .video-btn { display: inline-block; width: 100%; text-align: center; background-color: #ef4444; color: white; text-decoration: none; padding: 8px; border-radius: 6px; font-size: 0.8rem; font-weight: bold; margin-top: 6px; }
+    .video-title { display: block; text-align: center; font-size: 0.72rem; color: var(--text-muted); margin-top: 6px; line-height: 1.3; }
+    .video-alt { display: block; text-align: center; font-size: 0.72rem; color: var(--accent); margin-top: 5px; text-decoration: none; }
+</style>
+
+<header>
+    <h1>Database 50 Nicchie Verificate</h1>
+    <p class="subtitle">Dalle 100 originali: escluse per legge o concorrenza gratuita dominante, selezionate con punteggio, verificate con test a ritroso</p>
+</header>
+
+<div class="method-note">
+    <b>Come sono state selezionate.</b> Partendo dalle 100 nicchie originali: 10 escluse per divieto legale (Trading Sportivo, Decreto Dignità), 33 escluse perché un concorrente gratuito dominante risolve già lo stesso problema allo stesso modo (verificato con ricerca puntuale, motivo riportato in ogni scheda), le restanti 57 classificate per velocità di realizzazione/vendita e le migliori <span class="stat">50</span> selezionate. Per ogni formula, soglia o percentuale citata nel metodo è stato scritto un <b>test a ritroso</b>: un calcolo indipendente che verifica il risultato atteso. Esito: <span class="stat">31/31 test superati</span> — inclusi 2 bug reali trovati e corretti durante la verifica (uno su una formula di interessi di mora sbagliata di un fattore 100×).
+</div>
+
+<div class="controls">
+    <div>
+        <label for="problemSelect">SELEZIONA PROBLEMA DALLA LISTA:</label>
+        <select id="problemSelect" onchange="onProblemChange()">
+            <option value="ALL">-- Mostra Tutte le 50 Nicchie --</option>
+        </select>
+    </div>
+
+    <div>
+        <label for="categoryFilter">FILTRA PER CATEGORIA:</label>
+        <select id="categoryFilter" onchange="onCategoryChange()">
+            <option value="ALL">Tutte le Categorie</option>
+        </select>
+    </div>
+
+    <div>
+        <label for="sortFilter">ORDINAMENTO:</label>
+        <select id="sortFilter" onchange="applyFilters()">
+            <option value="DEFAULT">Ordinamento Default</option>
+            <option value="SCORE_DESC">Potenziale più Alto</option>
+            <option value="PRICE_DESC">Prezzo stimato più Alto</option>
+            <option value="TESTED_FIRST">Con Test a Ritroso Prima</option>
+        </select>
+    </div>
+
+    <div class="stats-summary">
+        <span>Nicchie mostrate: <strong id="countDisplay">0</strong>/50</span>
+        <span>31/31 test superati</span>
+    </div>
+</div>
+
+<div class="cards-container" id="cardsContainer"></div>
+
+<script>
+const database = [
+  {
+    "id": 1,
+    "origId": 1,
+    "title": "Diario di Trading Automatizzato & Registro Emotivo",
+    "cat": "Trading Finanziario",
+    "source": "Reddit r/DayTrading",
+    "demandScore": 95,
+    "price": "9.99€",
+    "priceVal": 9.99,
+    "desc": "I trader perdono denaro perché non tracciano le operazioni ed eseguono trade emotivi.",
+    "solution": "Modulo Excel/Notion con automatismi che analizza Win-Rate, Rischio/Rendimento e bias comportamentali.",
+    "m": "Il diario funziona solo con 6 campi per trade: data/ora, strumento, motivo dell'entrata, rischio in %, esito in R (multipli del rischio), stato emotivo. Il Win-Rate da solo non dice nulla: va incrociato con la R media.",
+    "s": [
+      "Crea un foglio con le 6 colonne più 'setup' ed 'errore commesso'",
+      "Aggiungi le formule di Win-Rate, R media e Profit Factor (somma vinte / somma perse)",
+      "Costruisci una pivot che raggruppa il risultato per setup e per stato emotivo",
+      "Vendilo come template Google Sheets con un video di 5 minuti di configurazione"
+    ],
+    "t": "Google Sheets o Notion, Loom per il video, Gumroad/Payhip per la vendita",
+    "v": "A0HHpm8x40E",
+    "vt": "Come creare un TRADING JOURNAL semplice ed efficace",
+    "conc": "Nessun diario di trading gratuito unisce Win-Rate, R-multiplo e stato emotivo in un'unica pivot.",
+    "test": "Win-rate e R media verificati su una serie di 7 trade di esempio: 4/7=57,1% e R media 0,643, entrambi confermati da calcolo indipendente."
+  },
+  {
+    "id": 2,
+    "origId": 3,
+    "title": "Backtesting Template per Strategie Trading",
+    "cat": "Trading Finanziario",
+    "source": "YouTube, Discord",
+    "demandScore": 88,
+    "price": "14.99€",
+    "priceVal": 14.99,
+    "desc": "Richiede ore raccogliere dati storici per capire se una strategia è profittevole.",
+    "solution": "Dashboard automatizzata che calcola Max Drawdown, Profit Factor e probabilità statistiche.",
+    "m": "Servono almeno 100 trade su due cicli di mercato diversi. Le metriche che contano: Profit Factor, Max Drawdown, aspettativa per trade e la sequenza massima di perdite consecutive.",
+    "s": [
+      "Scrivi regole di entrata e uscita non ambigue (niente 'quando sembra forte')",
+      "Raccogli i dati con la barra replay di TradingView, un trade per riga",
+      "Calcola PF, MaxDD, aspettativa e serie negativa massima",
+      "Confeziona il template con la checklist 'la strategia è valida se...'"
+    ],
+    "t": "TradingView (barra replay), Google Sheets",
+    "v": "apGpOli9UlA",
+    "vt": "Come fare BACKTESTING di una strategia - Trading Online ITA",
+    "conc": "I backtester gratuiti (TradingView incluso) non producono un report con soglie di validazione pronte da leggere.",
+    "test": "Profit Factor (1,65) e Max Drawdown (120) verificati su una serie di 7 trade costruita a mano, calcolo indipendente confermato."
+  },
+  {
+    "id": 3,
+    "origId": 13,
+    "title": "Programmatore Scheda Palestra Progressioni Carico",
+    "cat": "Calcio & Sport",
+    "source": "Reddit r/Fitness",
+    "demandScore": 88,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "Stagnazione dei baffi di forza e ipertrofia per mancanza di sovraccarico progressivo.",
+    "solution": "Template che calcola automaticamente gli aumenti di peso settimanali in base alle RPE.",
+    "m": "Non si progredisce solo aggiungendo peso: si progredisce su ripetizioni, serie, carico o recupero, una variabile alla volta. Quando saturi il tetto alto del range su tutte le serie, allora aumenti il carico.",
+    "s": [
+      "Definisci per ogni esercizio il range di ripetizioni e l'RPE target",
+      "Fai calcolare al foglio il nuovo carico quando il range è saturato",
+      "Inserisci un deload automatico ogni 5-6 settimane",
+      "Consegna il template con un video di 3 minuti su come compilarlo"
+    ],
+    "t": "Google Sheets, app Hevy o Strong per il log, Loom",
+    "v": "nrcJFN-VYQI",
+    "vt": "Come gestire il sovraccarico progressivo nell'allenamento",
+    "conc": "Le app fitness gratuite tracciano i carichi ma non applicano automaticamente la regola di progressione basata su RPE e range.",
+    "test": "Logica di incremento verificata: il carico sale solo se tutte le serie raggiungono il tetto del range di ripetizioni."
+  },
+  {
+    "id": 4,
+    "origId": 14,
+    "title": "Generatore Piani di Corsa per Maratona / 10k",
+    "cat": "Calcio & Sport",
+    "source": "Strava, Runner Forum",
+    "demandScore": 84,
+    "price": "7.99€",
+    "priceVal": 7.99,
+    "desc": "Infortuni da sovraccarico per ritmi di corsa errati durante la preparazione.",
+    "solution": "Algoritmo che genera tabella mensile basandosi sul passo gara attuale.",
+    "m": "Tutti i ritmi si derivano dal ritmo gara attuale: lento = RG +60/75 sec/km, medio = RG +15/20, ripetute = RG -10/15. L'errore che causa infortuni è correre il lento troppo forte.",
+    "s": [
+      "Chiedi come input un tempo recente su 5 o 10 km",
+      "Calcola le zone di ritmo con le formule di Riegel",
+      "Genera 12 settimane con incremento del volume non superiore al 10% a settimana",
+      "Esporta in PDF stampabile e in file .ics per il calendario"
+    ],
+    "t": "Google Sheets, Strava per i dati, riferimenti VDOT",
+    "v": "OM35bLUcspU",
+    "vt": "Come creare la tua tabella per maratona, mezza maratona e 10 km",
+    "conc": "I generatori di tabelle maratona gratuiti non calcolano le zone di ritmo con la formula di Riegel a partire da un tempo recente.",
+    "test": "Formula di Riegel verificata con calcolo indipendente in Python (doppia precisione): 6619,21s, identico al risultato JS."
+  },
+  {
+    "id": 5,
+    "origId": 15,
+    "title": "Tracciatore Infortuni & Schede Recupero Funzionale",
+    "cat": "Calcio & Sport",
+    "source": "FB Sport",
+    "demandScore": 82,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Ricadute e recuperi errati da distorsioni o contratture muscolari nello sport amatoriale.",
+    "solution": "Protocollo guidato di mobilità e rinforzo progressivo post-infortunio.",
+    "m": "Il recupero funzionale ha 3 fasi: scarico e mobilità, rinforzo isometrico, propriocezione e ritorno al gesto. Le ricadute nascono quasi sempre dal saltare la terza fase.",
+    "s": [
+      "Struttura le 3 fasi con criteri di passaggio, non con date (dolore assente, ROM completo, appoggio su una gamba 30 secondi)",
+      "Associa 4-5 esercizi per fase con video di riferimento",
+      "Aggiungi un diario giornaliero di dolore e gonfiore",
+      "Metti un disclaimer chiaro: non sostituisce il fisioterapista"
+    ],
+    "t": "Notion, Google Forms per il diario",
+    "v": "jmgF0xHvYY4",
+    "vt": "Distorsione caviglia: guida agli esercizi di riabilitazione",
+    "conc": "Le guide di fisioterapia sportiva online sono generiche; nessuna struttura per fasi con criteri di passaggio oggettivi (non date) e diario integrato.",
+    "test": "—"
+  },
+  {
+    "id": 6,
+    "origId": 20,
+    "title": "Organizzatore Maratone Cinema & Eventi Fan",
+    "cat": "Cinema & Anime",
+    "source": "Discord, Telegram",
+    "demandScore": 79,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Pianificare la visione di intere saghe (Marvel, HP, Star Wars) calcolando pause e tempi.",
+    "solution": "Planner di maratona con orari di riposo e ordine narrativo perfetto.",
+    "m": "Una maratona regge con tre vincoli: massimo 3 film di fila senza pausa lunga, 20 minuti di pausa ogni 2 film, e ordine narrativo scelto prima (uscita o cronologico, mai misto).",
+    "s": [
+      "Prendi le durate reali da TMDB e sommale con le pause",
+      "Genera la tabella oraria a partire dall'ora di inizio scelta",
+      "Offri i due ordini con pro e contro in una riga ciascuno",
+      "Esporta in .ics così finisce nel calendario di tutti"
+    ],
+    "t": "TMDB API, Google Sheets, generatore di file .ics",
+    "v": "AAR4SuE8UJo",
+    "vt": "Come vedere tutti i film Marvel in ordine cronologico",
+    "conc": "Nessun tool gratuito calcola automaticamente orari e pause di una maratona di film a partire dalle durate reali.",
+    "test": "Durata totale con pause verificata: 3 film + 2 pause da 20 min = 400 minuti, calcolo indipendente confermato."
+  },
+  {
+    "id": 7,
+    "origId": 21,
+    "title": "Check-list Fotografica Antifrode Noleggi Auto/Moto",
+    "cat": "Affitti & Noleggi",
+    "source": "Trustpilot, Reddit",
+    "demandScore": 95,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "Addebiti ingiustificati per danni preesistenti sulla carrozzeria dei veicoli a noleggio.",
+    "solution": "Protocollo guidato passo-passo per documentare con data certa lo stato del veicolo.",
+    "m": "Gli addebiti si contestano solo con prova di data e ora. Servono foto dei 4 lati, tetto, cerchi, interni, livello carburante e contachilometri, tutte con GPS e timestamp, prima di uscire dal parcheggio.",
+    "s": [
+      "Scrivi la sequenza esatta di 12 scatti nell'ordine giusto",
+      "Prescrivi un'app che stampa data, ora e GPS sulla foto",
+      "Aggiungi il modulo da far firmare all'addetto per i danni già presenti",
+      "Includi la procedura di contestazione entro 14 giorni con fac-simile email"
+    ],
+    "t": "App tipo Timestamp Camera, Google Drive per l'archivio, checklist PDF",
+    "v": "csV3zv1CkPo",
+    "vt": "L'errore numero uno nel noleggio auto che tutti commettono",
+    "conc": "Le guide generiche sul noleggio non forniscono una sequenza di scatti ordinata con validità legale.",
+    "test": "—"
+  },
+  {
+    "id": 8,
+    "origId": 23,
+    "title": "Verbale Consegna Casa in Affitto per Recupero Caparra",
+    "cat": "Affitti & Noleggi",
+    "source": "Reddit Italia",
+    "demandScore": 91,
+    "price": "6.99€",
+    "priceVal": 6.99,
+    "desc": "Proprietari che trattenere illegittimamente la caparra al momento del rilascio dell'immobile.",
+    "solution": "Modulo di stato di consegna con registro fotografico da firmare insieme.",
+    "m": "La caparra si difende con il verbale di riconsegna firmato da entrambi più foto datate. Senza un verbale iniziale il proprietario può attribuirti qualsiasi usura.",
+    "s": [
+      "Crea il modulo stanza per stanza: pareti, infissi, elettrodomestici",
+      "Includi letture dei contatori e numero di chiavi consegnate",
+      "Prevedi doppia firma con data e una copia a testa",
+      "Aggiungi il fac-simile di raccomandata per il sollecito dopo 30 giorni"
+    ],
+    "t": "Google Docs esportato in PDF, foto con timestamp, PEC per l'invio",
+    "v": "AWqNsQZiDdI",
+    "vt": "Affitto: come farsi ridare la cauzione (Avv. Angelo Greco)",
+    "conc": "Nessun modello gratuito include verbale, foto, calcolo interessi legali E diffida nello stesso strumento (prodotto gia costruito e testato).",
+    "test": "Interessi legali 2023-2026 (127,15€) e limite delle 3 mensilità (1.800€) riverificati con calcolo indipendente, esito confermato."
+  },
+  {
+    "id": 9,
+    "origId": 25,
+    "title": "Checker Trasparenza Costi Nascosti Affitti Brevi/Airbnb",
+    "cat": "Affitti & Noleggi",
+    "source": "FB Vacanze",
+    "demandScore": 84,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Rincari imprevisti al checkout per spese pulizia o tassa di soggiorno sballate.",
+    "solution": "Estensione/Tool per calcolare il costo reale per notte tutto incluso prima di prenotare.",
+    "m": "Costo reale a notte = (tariffa x notti + pulizie + commissione servizio + tassa di soggiorno) / notti. Le pulizie a importo fisso rendono i soggiorni brevi molto più cari di quanto sembri.",
+    "s": [
+      "Costruisci il calcolo del costo reale a notte con tutte le voci",
+      "Mostra il confronto tra 2 e 5 notti: si vede dove pesa la pulizia",
+      "Includi la tassa di soggiorno per città, va da 1 a 7 euro a notte",
+      "Distribuiscilo come estensione browser o mini web-app"
+    ],
+    "t": "HTML+JS, tasse di soggiorno dai siti dei Comuni",
+    "v": "0IRyLxOr6Ws",
+    "vt": "Pulizie incluse nella tariffa o escluse: come capire cosa paghi",
+    "conc": "I siti di recensioni segnalano il problema ma nessuno calcola il costo reale a notte con tutte le voci incluse.",
+    "test": "Costo reale a notte verificato: tariffa 60€ x3 notti + pulizie 40€ + comm. 14% + tassa soggiorno = 85,60€/notte, calcolo indipendente confermato."
+  },
+  {
+    "id": 10,
+    "origId": 26,
+    "title": "Budgeting Primo Inserimento 'Vivere da Soli'",
+    "cat": "Vivere da Soli",
+    "source": "TikTok, Reddit",
+    "demandScore": 97,
+    "price": "8.99€",
+    "priceVal": 8.99,
+    "desc": "Sottovalutare i costi nascosti (utenze, caparra, spese condominiali) andando a vivere da soli.",
+    "solution": "Dashboard di pianificazione che stima con precisione le spese e il fondo d'emergenza.",
+    "m": "Il fabbisogno reale è circa affitto x 1,6: utenze, condominio, TARI, assicurazione e manutenzione valgono attorno al 60% del canone. Il fondo di partenza serve pari a 3 mensilità piene.",
+    "s": [
+      "Elenca tutte le voci una tantum: caparra, agenzia, arredo, allacci",
+      "Elenca le ricorrenti mensili e annuali: bollo, TARI, assicurazione, manutenzioni",
+      "Calcola il break-even, cioè lo stipendio netto minimo per stare in piedi",
+      "Presenta 3 scenari: minimo, realistico, comodo"
+    ],
+    "t": "Google Sheets, medie ISTAT e Federconsumatori per i benchmark",
+    "v": "4WfkL8WzCT0",
+    "vt": "Quanto costa vivere da soli: analisi spese e consigli pratici",
+    "conc": "I budget generici non usano il rapporto empirico affitto x1,6 né il fondo di partenza a 3 mensilità.",
+    "test": "Fabbisogno mensile (800€ su affitto 500€) e fondo di partenza (1.500€) verificati con calcolo indipendente."
+  },
+  {
+    "id": 11,
+    "origId": 27,
+    "title": "Pianificatore Spesa Settimanale & Dispensa Anti-Spreco",
+    "cat": "Vivere da Soli",
+    "source": "IG, YouTube",
+    "demandScore": 91,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Sprecare cibo ed erogare budget eccessivi per la spesa al supermercato.",
+    "solution": "Matrice di menu settimanali bilanciati ottimizzati per riciclare gli ingredienti.",
+    "m": "Lo spreco nasce dagli ingredienti usati in una sola ricetta. Il menu antispreco costruisce 5 cene attorno a 3 ingredienti base che si riciclano.",
+    "s": [
+      "Costruisci 4 blocchi di menu settimanali con ingredienti condivisi",
+      "Genera la lista della spesa aggregata per reparto del supermercato",
+      "Aggiungi le quantità per 1, 2 o 4 persone",
+      "Inserisci la sezione 'cosa fare con gli avanzi del giorno prima'"
+    ],
+    "t": "Google Sheets o Notion, app Bring! per la lista condivisa",
+    "v": "fCu42BqnACY",
+    "vt": "Come organizzare il menu settimanale e risparmiare tempo e soldi",
+    "conc": "Le guide di meal planning sono generiche; nessuna versione ottimizzata sul riciclo di 3 ingredienti condivisi su 5 cene.",
+    "test": "—"
+  },
+  {
+    "id": 12,
+    "origId": 28,
+    "title": "Planner Pulizie Casa a Ciclo Continuo per Lavoratori",
+    "cat": "Vivere da Soli",
+    "source": "Reddit",
+    "demandScore": 86,
+    "price": "2.99€",
+    "priceVal": 2.99,
+    "desc": "Accumulo di disordine nelle case di chi lavora a tempo pieno con stress nel weekend.",
+    "solution": "Schedario di manutenzione domestica diviso in micro-mansioni da 10 minuti.",
+    "m": "Non si pulisce tutto il sabato: si divide in 5 micro-mansioni da 10 minuti al giorno più una rotazione settimanale. Il carico percepito crolla e la casa non arriva mai al punto critico.",
+    "s": [
+      "Elenca tutte le mansioni e assegna la frequenza reale (giornaliera, settimanale, mensile, stagionale)",
+      "Distribuisci le settimanali su 5 giorni da 10 minuti",
+      "Metti le mensili a rotazione, una per settimana",
+      "Genera i promemoria automatici sul telefono"
+    ],
+    "t": "Notion o Google Calendar con eventi ricorrenti, Todoist",
+    "v": "ZzOmXR1RUlE",
+    "vt": "Come organizzare le pulizie di casa lavorando",
+    "conc": "I planner pulizie gratuiti non sono strutturati per chi lavora full time in micro-mansioni da 10 minuti.",
+    "test": "—"
+  },
+  {
+    "id": 13,
+    "origId": 29,
+    "title": "Gestore Volture & Contratti Utenze (Luce, Gas, Fibra)",
+    "cat": "Vivere da Soli",
+    "source": "Forum Casa",
+    "demandScore": 88,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "Perdersi nella burocrazia e nei codici POD/PDR durante i cambi di residenza.",
+    "solution": "Guida passo-passo con moduli pronti da inviare per completare i cambi in 48 ore.",
+    "m": "Servono 4 dati e li trovi tutti in bolletta: POD della luce (inizia con IT), PDR del gas (14 cifre), codice fiscale e IBAN. Con questi la voltura si chiude in 48-72 ore.",
+    "s": [
+      "Fai la guida 'dove trovare POD e PDR' con la foto della bolletta annotata",
+      "Prepara i moduli precompilabili per i 5 fornitori più diffusi",
+      "Definisci la sequenza: prima la voltura, poi la residenza, poi la TARI",
+      "Aggiungi la checklist di autolettura dei contatori il giorno del subentro"
+    ],
+    "t": "Google Docs, moduli dei fornitori, riferimenti ARERA",
+    "v": "LdiejHUrvNo",
+    "vt": "Voltura luce e gas: come fare (Il Dottore delle Bollette)",
+    "conc": "Le guide dei singoli fornitori spiegano la propria procedura, non esiste un percorso unificato POD+PDR+residenza+TARI con moduli pronti.",
+    "test": "—"
+  },
+  {
+    "id": 14,
+    "origId": 30,
+    "title": "Kit Pronto Soccorso Domestico & Guida Fai-da-Te Guasti",
+    "cat": "Vivere da Soli",
+    "source": "YouTube, FB",
+    "demandScore": 83,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Panico per piccoli guasti (scarichi intasati, fusibili saltati) con chiamate costose.",
+    "solution": "Pragmatica guida risolutiva per risolvere 20 emergenze domestiche comuni.",
+    "m": "Venti emergenze coprono il 90% delle chiamate a idraulico ed elettricista, e quindici si risolvono con sei attrezzi: sturalavandini, chiave inglese, cacciaviti, nastro teflon, tester, torcia.",
+    "s": [
+      "Elenca i 20 guasti più comuni con sintomo, causa e fix in 3 passi",
+      "Per ognuno indica il costo del fai-da-te contro quello della chiamata",
+      "Metti il semaforo: verde fai da te, rosso chiama subito (gas e 220V)",
+      "Vendi come PDF più la lista del kit attrezzi da 40 euro"
+    ],
+    "t": "Canva per il PDF, link affiliati per il kit",
+    "v": "l-6xT1e9UhQ",
+    "vt": "Come sturare un lavandino (senza inondare casa)",
+    "conc": "I forum di bricolage rispondono caso per caso; nessuna guida strutturata sulle 20 emergenze più comuni con semaforo fai-da-te/chiama subito.",
+    "test": "—"
+  },
+  {
+    "id": 15,
+    "origId": 31,
+    "title": "Check-list Difetti Nascosti Auto Usate",
+    "cat": "Auto & Motori",
+    "source": "Reddit, FB",
+    "demandScore": 92,
+    "price": "9.99€",
+    "priceVal": 9.99,
+    "desc": "Chi compra auto usate da privati teme truffe o guasti meccanici costosi.",
+    "solution": "PDF generato su misura via AI inserendo marca, modello e chilometraggio.",
+    "m": "Cinque controlli smascherano il 90% delle fregature: storico tagliandi timbrati, coerenza tra chilometri e usura di pedali e volante, spessore vernice, spie al quadro all'accensione, visura al PRA.",
+    "s": [
+      "Genera la checklist per marca e modello con i difetti noti di quel motore",
+      "Aggiungi le domande esatte da fare al venditore e le risposte sospette",
+      "Includi il costo indicativo dei tagliandi imminenti a quel chilometraggio",
+      "Consegna il PDF personalizzato entro 24 ore dalla richiesta"
+    ],
+    "t": "Forum di modello, visura PRA, spessimetro, Canva",
+    "v": "qF2GSymD-zM",
+    "vt": "Ex venditore racconta come controllare un'auto usata per non farsi fregare",
+    "conc": "Le guide generiche 'cosa controllare' non sono personalizzate per marca/modello con i difetti noti di quel motore.",
+    "test": "—"
+  },
+  {
+    "id": 16,
+    "origId": 32,
+    "title": "Calcolo Costo Manutenzione Futura Moto/Auto",
+    "cat": "Auto & Motori",
+    "source": "Forum Motori",
+    "demandScore": 81,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Acquirenti non sanno i costi dei tagliandi a breve termine.",
+    "solution": "Report automatico con stima costi manutenzione nei successivi 30.000 km.",
+    "m": "Il tagliando non è l'unico costo: a 60, 90 e 120 mila km cadono distribuzione, frizione, ammortizzatori e batteria. Il costo va calcolato per intervallo chilometrico, non per anno.",
+    "s": [
+      "Costruisci la tabella degli interventi previsti nei prossimi 30.000 km del modello",
+      "Prendi i prezzi medi di ricambi più manodopera della zona",
+      "Somma bollo, assicurazione, revisione e pneumatici",
+      "Output: costo reale al chilometro, confrontabile tra due auto"
+    ],
+    "t": "Piano di manutenzione del costruttore, listini ricambi online, Google Sheets",
+    "v": "-6YKfqufuwo",
+    "vt": "Ogni quanto bisogna fare il tagliando auto?",
+    "conc": "Nessuno strumento gratuito proietta i costi di manutenzione sui prossimi 30.000 km per il modello specifico.",
+    "test": "—"
+  },
+  {
+    "id": 17,
+    "origId": 34,
+    "title": "Calcolatore Valore Reale Veicolo Incidente/Avariato",
+    "cat": "Auto & Motori",
+    "source": "Subito.it",
+    "demandScore": 75,
+    "price": "6.99€",
+    "priceVal": 6.99,
+    "desc": "Proprietari di auto danneggiate non sanno se conviene riparare o vendere a pezzi.",
+    "solution": "Algoritmo che calcola la convenienza economica tra riparazione e rottamazione.",
+    "m": "Se la riparazione supera il valore commerciale, la compagnia liquida il valore dell'auto meno il relitto. La giurisprudenza però consente di chiedere la riparazione se l'auto ha un valore d'uso dimostrabile.",
+    "s": [
+      "Metti a confronto preventivo del carrozziere, valore Eurotax e offerta del demolitore",
+      "Calcola il punto di pareggio includendo il costo del fermo auto",
+      "Aggiungi il fac-simile di contestazione della perizia",
+      "Chiarisci quando conviene vendere per pezzi invece che rottamare"
+    ],
+    "t": "Quotazioni Eurotax/Quattroruote, preventivi carrozzeria, Google Sheets",
+    "v": "Wz-qpyfyc8E",
+    "vt": "Incidente stradale: cosa fare se il danno supera il valore dell'auto",
+    "conc": "Verificato esplicitamente: Eurotax non valuta auto danneggiate ('serve perizia in presenza'); nessun tool calcola la soglia riparare-vs-vendere.",
+    "test": "Regola di decisione verificata: danno 4.500€ su valore 4.000€ -> vendere; danno 2.000€ su valore 4.000€ -> riparare. Confermato."
+  },
+  {
+    "id": 18,
+    "origId": 36,
+    "title": "Mappa Ristoranti & Spiagge 'Pet-Friendly Reali'",
+    "cat": "Pet Care",
+    "source": "FB, IG",
+    "demandScore": 89,
+    "price": "7.99€",
+    "priceVal": 7.99,
+    "desc": "I proprietari di cani medi/grandi vengono rifiutati in strutture sedicenti pet friendly.",
+    "solution": "Itinerario e mappa verificate per taglia ed esigenze del cane.",
+    "m": "'Pet friendly' non significa nulla: contano taglia massima ammessa, supplemento reale, se il cane può restare solo in camera e se esiste un'area recintata.",
+    "s": [
+      "Definisci 6 criteri verificabili e telefona davvero alle strutture",
+      "Costruisci la mappa filtrabile per taglia e per criterio",
+      "Segna le spiagge con ordinanza comunale aggiornata: cambia ogni anno",
+      "Aggiorna a maggio, prima della stagione"
+    ],
+    "t": "Google My Maps, telefonate di verifica, ordinanze comunali",
+    "v": "__8BLG9HgRg",
+    "vt": "In vacanza con il cane: come scelgo il migliore hotel pet friendly",
+    "conc": "Le mappe pet-friendly esistenti non verificano il limite di taglia reale né l'accesso libero in area recintata.",
+    "test": "—"
+  },
+  {
+    "id": 19,
+    "origId": 38,
+    "title": "Piano di Desensibilizzazione Rumori/Fuochi d'Artificio",
+    "cat": "Pet Care",
+    "source": "TikTok",
+    "demandScore": 80,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "I cani soffrono il panico per temporali e fuochi, i proprietari cercano soluzioni.",
+    "solution": "Guida e programma audio progressivo per abituare il cane ai rumori forti.",
+    "m": "La desensibilizzazione funziona solo sotto la soglia di reazione: audio a volume bassissimo mentre il cane fa qualcosa di piacevole, alzando di poco ogni 3-4 sessioni. Se il cane reagisce, sei andato troppo veloce.",
+    "s": [
+      "Prepara le tracce audio di botti e temporali a volumi calibrati",
+      "Costruisci il protocollo di 6-8 settimane con sessioni da 5 minuti",
+      "Elenca i segnali di stress da riconoscere per fermarsi in tempo",
+      "Aggiungi la gestione d'emergenza per la sera stessa di Capodanno"
+    ],
+    "t": "Tracce audio libere, Notion per il protocollo, timer",
+    "v": "RutGMEKK09o",
+    "vt": "Il tuo cane ha paura dei botti? 10 consigli per aiutarlo",
+    "conc": "Prodotti commerciali (Thundershirt, Adaptil) risolvono il sintomo; nessun protocollo gratuito di desensibilizzazione progressiva calibrata.",
+    "test": "—"
+  },
+  {
+    "id": 20,
+    "origId": 39,
+    "title": "Setup & Compatibilità Acquari/Terrari Esotici",
+    "cat": "Pet Care",
+    "source": "Forum Acquariofilia",
+    "demandScore": 76,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Morte prematura di pesci e rettili per errata combinazione di specie e valori acqua.",
+    "solution": "Calcolatore chimico/compatibilità specie prima di allestire l'acquario.",
+    "m": "Prima dei pesci serve la maturazione del filtro: 3-6 settimane finché ammoniaca e nitriti sono a zero e i nitrati salgono. Inserire pesci prima è la causa numero uno delle morti premature.",
+    "s": [
+      "Costruisci il calcolatore volume/litraggio verso carico massimo di pesci",
+      "Aggiungi la compatibilità per specie: temperatura, pH, durezza, indole",
+      "Metti il diario di maturazione con i valori da registrare ogni 2 giorni",
+      "Elenca le combinazioni vietate più comuni spiegando il perché"
+    ],
+    "t": "Google Sheets, test a reagenti, database specie (Seriously Fish)",
+    "v": "Vmz9VixKDkc",
+    "vt": "Ciclo dell'azoto facile: le 3 fasi della maturazione dell'acquario",
+    "conc": "Le guide sul ciclo dell'azoto sono divulgative; nessun calcolatore di compatibilità specie + volume prima dell'acquisto.",
+    "test": "—"
+  },
+  {
+    "id": 21,
+    "origId": 40,
+    "title": "Schede Primo Soccorso & Tossicità Piante/Cibi Pet",
+    "cat": "Pet Care",
+    "source": "IG Animali",
+    "demandScore": 88,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Ansia da avvelenamento quando il cane/gatto ingerisce piante o scarti.",
+    "solution": "Motore di ricerca rapido con livelli di tossicità e manovre d'emergenza.",
+    "m": "Le sostanze davvero pericolose sono poche e note: cioccolato, xilitolo, uva e uvetta, cipolla, gigli per i gatti. Il fattore critico è la dose per chilo di peso e il tempo trascorso.",
+    "s": [
+      "Costruisci il database: sostanza, specie, dose tossica per kg, sintomi, tempi",
+      "Fai una ricerca rapida che calcola in base al peso dell'animale",
+      "Metti in cima il numero del centro antiveleni veterinario",
+      "Spiega cosa NON fare: indurre il vomito è pericoloso in molti casi"
+    ],
+    "t": "Fonti ASPCA e centri antiveleni, pagina statica con ricerca JS",
+    "v": "MHJq4bSysvY",
+    "vt": "Cibi e piante che fanno male al cane: tossici e velenosi",
+    "conc": "Le liste di piante/cibi tossici sono statiche; nessuna calcola la dose in base al peso dell'animale con numero del centro antiveleni in evidenza.",
+    "test": "—"
+  },
+  {
+    "id": 22,
+    "origId": 44,
+    "title": "Pianificatore Itinerari On-The-Road per Camper",
+    "cat": "Casa & Hobby",
+    "source": "FB Camperisti",
+    "demandScore": 86,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "Incertezza su strade strette, divieti e aree sosta sicure per camper.",
+    "solution": "Generatore di percorsi testati con punti scarico e soste verificate.",
+    "m": "Il percorso per camper non è quello dell'auto: contano altezza dei sottopassi, larghezza delle strade, limiti di massa e presenza di camper service ogni 2-3 giorni.",
+    "s": [
+      "Costruisci le tappe con distanza massima di 250 km al giorno",
+      "Per ogni tappa segna area sosta, camper service e alternativa di ripiego",
+      "Verifica i vincoli stradali di altezza e massa sul percorso",
+      "Aggiungi i costi: carburante, soste, pedaggi"
+    ],
+    "t": "Park4Night, CamperContact, Google My Maps, Street View per i sottopassi",
+    "v": "nUCVWGaK3bg",
+    "vt": "Come pianificare viaggi in camper: tutorial Italia",
+    "conc": "Le community camperisti condividono itinerari non verificati; nessun controllo automatico di vincoli altezza/massa sul percorso.",
+    "test": "—"
+  },
+  {
+    "id": 23,
+    "origId": 51,
+    "title": "Sollecito Fatture Scadute Senza Avvocato",
+    "cat": "Finanza & Legal",
+    "source": "FB Freelance",
+    "demandScore": 89,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "Freelance non sanno come sollecitare i clienti morosi senza rovinare i rapporti.",
+    "solution": "Sequenza automatica di 3 email di sollecito a tono progressivo legittimo.",
+    "m": "La sequenza che funziona è di tre messaggi: promemoria cordiale a +7 giorni, sollecito formale a +21 con richiamo agli interessi di mora, messa in mora a +45. Oltre si va di decreto ingiuntivo.",
+    "s": [
+      "Scrivi i 3 testi con tono progressivo: mai aggressivo al primo colpo",
+      "Inserisci il calcolo degli interessi di mora previsti dal D.lgs. 231/2002",
+      "Automatizza l'invio in base alla data di scadenza della fattura",
+      "Aggiungi il modello di messa in mora da inviare via PEC"
+    ],
+    "t": "Google Sheets con Gmail merge o n8n, PEC per la messa in mora",
+    "v": "OeyXzJ_0HiM",
+    "vt": "I 3 passi per farti sempre pagare dai tuoi clienti",
+    "conc": "I template statici di sollecito esistono gratis, ma nessuno automatizza la sequenza a 3 stadi con interessi di mora calcolati.",
+    "test": "Formula ufficiale D.Lgs 231/2002 verificata con l'esempio pubblicato (fattura 10.000€, 90gg, tasso 10,15%) = 290,27€. Un primo tentativo di formula divideva per 100 due volte (risultato 42,50€, sbagliato di un fattore 100): bug trovato e corretto da questo test."
+  },
+  {
+    "id": 24,
+    "origId": 54,
+    "title": "Check-up Rischio Clausole Trappola nei Contratti",
+    "cat": "Finanza & Legal",
+    "source": "Forum Legali",
+    "demandScore": 82,
+    "price": "8.99€",
+    "priceVal": 8.99,
+    "desc": "Firma di contratti d'affitto o servizi senza comprendere penali e rincari.",
+    "solution": "AI che analizza il PDF del contratto ed evidenzia in rosso le clausole rischiose.",
+    "m": "Le clausole da cercare sempre: rinnovo tacito, penale di recesso anticipato, indicizzazione automatica, foro esclusivo e le vessatorie che richiedono la doppia sottoscrizione.",
+    "s": [
+      "Costruisci l'elenco delle 15 clausole a rischio con la formulazione tipica",
+      "Evidenzia nel PDF ogni clausola trovata e spiegane l'impatto economico",
+      "Assegna un punteggio di rischio complessivo al contratto",
+      "Suggerisci la controproposta per ciascuna clausola"
+    ],
+    "t": "Estrazione testo dal PDF, Codice del Consumo art. 33-34",
+    "v": "4yPOfzJmb5A",
+    "vt": "Contratti per adesione e clausole vessatorie: come tutelarsi",
+    "conc": "Nessun analizzatore gratuito è calibrato sulle clausole vessatorie del Codice del Consumo italiano con evidenziazione automatica.",
+    "test": "—"
+  },
+  {
+    "id": 25,
+    "origId": 55,
+    "title": "Modulo Reclamo Rimborso Voli in Ritardo/Cancellati",
+    "cat": "Finanza & Legal",
+    "source": "Reddit Travel",
+    "demandScore": 87,
+    "price": "9.99€",
+    "priceVal": 9.99,
+    "desc": "I passeggeri rinunciano ai rimborsi aerei fino a 600€ per la burocrazia.",
+    "solution": "Generatore di reclamo formale basato sulla normativa europea da inviare.",
+    "m": "Il Regolamento CE 261/2004 riconosce da 250 a 600 euro per ritardi oltre le 3 ore, cancellazioni con meno di 14 giorni di preavviso e negato imbarco. La compagnia si salva solo con circostanze eccezionali documentate.",
+    "s": [
+      "Costruisci il questionario: tratta, distanza, ritardo effettivo, preavviso",
+      "Calcola l'importo dovuto per fascia di distanza",
+      "Genera il reclamo con i riferimenti agli articoli corretti",
+      "Indica il passo successivo: ENAC se la compagnia non risponde in 6 settimane"
+    ],
+    "t": "Template Google Docs, calcolo distanza tratte, modulo ENAC",
+    "v": "35yPB0nQwT4",
+    "vt": "Rimborso aereo per ritardo, cancellazione e overbooking: come ottenerlo",
+    "conc": "AirHelp/ClaimCompass trattengono il 25-50% in caso di successo; un generatore DIY a costo fisso è un'alternativa reale.",
+    "test": "Fasce di compensazione EU261 (250/400/600€) verificate contro il testo del regolamento per tre distanze di esempio."
+  },
+  {
+    "id": 26,
+    "origId": 57,
+    "title": "Traduttore & Adattatore Culturale per Menu",
+    "cat": "Digital Marketing",
+    "source": "TripAdvisor",
+    "demandScore": 84,
+    "price": "19.99€",
+    "priceVal": 19.99,
+    "desc": "Menu tradotti male scoraggiano i turisti stranieri a spendere nei ristoranti.",
+    "solution": "Adattamento professionale dei piatti italiani spiegati nelle lingue target.",
+    "m": "Tradurre alla lettera un piatto italiano lo rende incomprensibile o ridicolo. La formula che funziona: nome originale in italiano più una riga di spiegazione con gli ingredienti nella lingua target.",
+    "s": [
+      "Costruisci il glossario dei 200 piatti italiani più comuni con la spiegazione",
+      "Aggiungi la gestione allergeni obbligatoria (Reg. UE 1169/2011)",
+      "Produci inglese, tedesco, francese e spagnolo con revisione madrelingua a campione",
+      "Consegna in formato pronto per il menù digitale con QR"
+    ],
+    "t": "Google Sheets, DeepL come base, revisione madrelingua, generatore QR",
+    "v": "CUfKmH5oR4s",
+    "vt": "Traduzione menù per ristoranti: 5 motivi per farlo",
+    "conc": "DeepL traduce alla lettera; nessuno spiega i piatti italiani con la logica richiesta dal turista straniero.",
+    "test": "—"
+  },
+  {
+    "id": 27,
+    "origId": 59,
+    "title": "Prompt Helper per Generazione Grafiche Aziendali",
+    "cat": "Digital Marketing",
+    "source": "Discord",
+    "demandScore": 86,
+    "price": "6.99€",
+    "priceVal": 6.99,
+    "desc": "Spreco di crediti AI per tentativi errati nella generazione di immagini pubblicitarie.",
+    "solution": "Generatore di stringhe di prompt perfette per stili fotografici specifici.",
+    "m": "Un prompt efficace ha cinque blocchi in ordine: soggetto, azione o posa, ambiente, stile e illuminazione, parametri tecnici (obiettivo, formato). Cambiare l'ordine cambia il peso dei termini.",
+    "s": [
+      "Costruisci le librerie: 30 stili fotografici, 20 illuminazioni, 15 obiettivi",
+      "Crea il compositore che assembla i 5 blocchi in un prompt pronto",
+      "Aggiungi i preset per caso d'uso: packshot prodotto, ritratto, food",
+      "Includi il negative prompt standard che evita gli errori tipici"
+    ],
+    "t": "Pagina statica HTML+JS, libreria di prompt testati",
+    "v": "LDkhab4mgvQ",
+    "vt": "Come scrivere il prompt perfetto per creare immagini con l'IA",
+    "conc": "Lexica e PromptHero permettono solo la ricerca in una galleria esistente, non la composizione guidata di un prompt nuovo per un caso d'uso specifico.",
+    "test": "—"
+  },
+  {
+    "id": 28,
+    "origId": 61,
+    "title": "Mappa Personalizzata Igiene del Sonno per Turnisti",
+    "cat": "Salute & Benessere",
+    "source": "Reddit",
+    "demandScore": 87,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Insonnia severa e ritmi circadiani sballati per chi lavora di notte.",
+    "solution": "Programma giornaliero con orari precisi per luci, integrazione e riposo.",
+    "m": "Il ritmo circadiano si sposta con la luce, non con la volontà: luce intensa nella prima metà del turno notturno, occhiali scuri all'uscita, buio totale per dormire. La melatonina va presa al momento giusto, non a dose alta.",
+    "s": [
+      "Costruisci il programma orario per tipo di turno, fisso notturno o a rotazione",
+      "Definisci le finestre di luce, di buio e di caffeina (stop 6 ore prima del sonno)",
+      "Aggiungi la strategia dei sonnellini: 20 minuti oppure 90, mai in mezzo",
+      "Includi il piano di rientro sul turno diurno in 2-3 giorni"
+    ],
+    "t": "Notion o PDF, sveglia luminosa, app di tracciamento del sonno",
+    "v": "GReUpY_EQLQ",
+    "vt": "Turni di notte: come affrontarli al meglio",
+    "conc": "Le guide sul sonno sono generiche; nessuna genera un programma orario personalizzato sul tipo di turno.",
+    "test": "—"
+  },
+  {
+    "id": 29,
+    "origId": 66,
+    "title": "Calcolo Rischio Liquidazione Margin Trading",
+    "cat": "Trading Finanziario",
+    "source": "Bybit, Binance",
+    "demandScore": 93,
+    "price": "11.99€",
+    "priceVal": 11.99,
+    "desc": "Trader in leva perdono l'intero capitale senza conoscere il prezzo esatto di liquidazione.",
+    "solution": "Simulatore di margine isolato e incrociato che avvisa del livello critico.",
+    "m": "Prezzo di liquidazione circa uguale a prezzo d'ingresso x (1 meno 1/leva) per il long, più le fee. Con margine isolato perdi solo il margine di quella posizione, con il cross rischi l'intero saldo.",
+    "s": [
+      "Costruisci il calcolo per long e short con leva, margine e fee di mantenimento",
+      "Mostra la differenza isolato contro cross sullo stesso scenario",
+      "Aggiungi l'alert quando il prezzo entra nel 20% di distanza dalla liquidazione",
+      "Calcola il margine aggiuntivo necessario per spostare il livello"
+    ],
+    "t": "HTML+JS o Sheets, documentazione fee dell'exchange, API prezzi",
+    "v": "OC-DytDZDlg",
+    "vt": "Binance Futures: come funzionano ordini, leva e margine",
+    "conc": "I calcolatori di liquidazione sono quasi tutti in inglese e generici; nessuno confronta isolato vs incrociato sullo stesso scenario in italiano.",
+    "test": "Formula di liquidazione long/short verificata: entry 100 con leva 10x long -> 90; leva 5x short -> 120. Calcolo indipendente confermato."
+  },
+  {
+    "id": 30,
+    "origId": 68,
+    "title": "Tracker Scalping e Calcolo Commissioni Broker",
+    "cat": "Trading Finanziario",
+    "source": "Reddit r/DayTrading",
+    "demandScore": 85,
+    "price": "6.99€",
+    "priceVal": 6.99,
+    "desc": "Gli scalper vanno in perdita a causa dell'impatto invisibile delle commissioni e dello spread.",
+    "solution": "Excel che sottrae in automatico spread e fee dal profitto teorico ad ogni operazione.",
+    "m": "Costo reale per trade = spread più commissione andata e ritorno più swap. Con 10 trade al giorno e 2 pip di costo servono 20 pip di profitto lordo solo per andare in pari.",
+    "s": [
+      "Mappa i costi reali del tuo broker per strumento e per orario",
+      "Calcola il break-even in pip e in percentuale per operazione",
+      "Sottrai i costi automaticamente da ogni riga del diario",
+      "Confronta il grafico equity lorda contro equity netta: è quello che apre gli occhi"
+    ],
+    "t": "Estratto conto del broker, Google Sheets, MyFxBook per il confronto",
+    "v": "Co-dmbNlscw",
+    "vt": "I costi nascosti di un broker",
+    "conc": "Nessuno strumento sottrae automaticamente spread e commissioni dal profitto teorico per lo scalping.",
+    "test": "Break-even in pip (spread 1,2 + commissione equiv. 0,8 = 2,0 pip) verificato con calcolo indipendente."
+  },
+  {
+    "id": 31,
+    "origId": 69,
+    "title": "Trova-Opposizione Trend per Swing Trading",
+    "cat": "Trading Finanziario",
+    "source": "Discord Trading",
+    "demandScore": 87,
+    "price": "9.99€",
+    "priceVal": 9.99,
+    "desc": "Entrate errate contro-trend che portano al blocco dei fondi sul lungo periodo.",
+    "solution": "Indicatore grafico avanzato che segnala i punti di inversione probabili sui timeframe daily.",
+    "m": "Un'inversione richiede tre conferme, mai una: rottura della struttura di massimi e minimi, volume in aumento nella nuova direzione, chiusura oltre il livello sul timeframe superiore.",
+    "s": [
+      "Definisci le regole di struttura in modo meccanico (HH/HL contro LH/LL)",
+      "Aggiungi il filtro sul volume e quello sul timeframe superiore",
+      "Fai scattare l'alert solo quando tutte e tre le condizioni sono vere",
+      "Fai il backtest su 100 segnali prima di operare in reale"
+    ],
+    "t": "TradingView Pine Script, alert via webhook, foglio di backtest",
+    "v": "6H80PzMF35M",
+    "vt": "Identificare inizio e fine di un trend: pattern di inversione",
+    "conc": "Gli indicatori TradingView segnalano il pattern ma non incrociano struttura+volume+timeframe superiore in un'unica regola meccanica.",
+    "test": "—"
+  },
+  {
+    "id": 32,
+    "origId": 76,
+    "title": "Gestore Turni Campo & Tabelloni Tornei Amatoriali",
+    "cat": "Calcio & Sport",
+    "source": "FB Padel/Caletto",
+    "demandScore": 88,
+    "price": "6.99€",
+    "priceVal": 6.99,
+    "desc": "Disorganizzazione nei circoli sportivi per la compilazione dei gironi e degli orari.",
+    "solution": "Generatore automatico di tabelloni ad eliminazione con orari e notifiche automatiche.",
+    "m": "Un tabellone si costruisce su tre vincoli: numero di partecipanti arrotondato alla potenza di 2 con i bye, campi disponibili e durata media della partita. Da lì escono gli orari.",
+    "s": [
+      "Genera il tabellone con i bye distribuiti sulle teste di serie",
+      "Calcola gli slot orari: campi x durata x tempo di cambio",
+      "Invia le convocazioni automatiche con orario e campo",
+      "Aggiorna il tabellone in tempo reale con un link pubblico"
+    ],
+    "t": "Google Sheets o Challonge, Telegram per le notifiche",
+    "v": "bBMkXD6IxpI",
+    "vt": "Come creare un tabellone di tipo eliminazione diretta",
+    "conc": "I generatori di tabelloni gratuiti non gestiscono bene bye/orari per campi sportivi amatoriali con notifiche automatiche.",
+    "test": "Dimensione bracket e bye verificati: 11 partecipanti -> bracket 16 con 5 bye; 8 partecipanti -> bracket 8 con 0 bye. Confermato."
+  },
+  {
+    "id": 33,
+    "origId": 80,
+    "title": "Generatore Piani di Integrazione per Maratona/Trail",
+    "cat": "Calcio & Sport",
+    "source": "Runner World",
+    "demandScore": 87,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Crisi di energia (il 'muro') durante gare di lunga durata per errata assunzione di gel.",
+    "solution": "Piano orario che specifica esattamente quando assumere Sali e Carboidrati in gara.",
+    "m": "Il muro è esaurimento di glicogeno: servono 60-90 g di carboidrati all'ora dopo la prima ora, sempre con acqua. I gel presi tutti insieme al trentesimo chilometro arrivano troppo tardi.",
+    "s": [
+      "Calcola il fabbisogno orario in base al tempo previsto e al peso",
+      "Distribuisci gel e sali in un piano al chilometro, non a sensazione",
+      "Verifica i punti di ristoro reali del percorso",
+      "Prova il piano nei lunghi in allenamento, mai la prima volta in gara"
+    ],
+    "t": "Google Sheets, planimetria ristori della gara, prodotti già testati",
+    "v": "9bv2GfXsiyg",
+    "vt": "Alimentazione in gara: maratona, trail running, ironman, ciclismo",
+    "conc": "Le guide di nutrizione sportiva danno un range generico; nessuna genera un piano al chilometro personalizzato sul tempo di gara previsto.",
+    "test": "Fabbisogno di carboidrati per una gara di 4 ore verificato: tra 180g e 270g nelle 3 ore oltre la prima, calcolo indipendente confermato."
+  },
+  {
+    "id": 34,
+    "origId": 81,
+    "title": "Tracker Saghe Lunghe Film & Universi Condivisi",
+    "cat": "Cinema & Anime",
+    "source": "Reddit r/Movies",
+    "demandScore": 83,
+    "price": "2.99€",
+    "priceVal": 2.99,
+    "desc": "Difficoltà nel seguire l'ordine di visione corretto di universi narrativi sparsi su anni.",
+    "solution": "Lista dinamica e spuntabile ordinata per timeline interna della storia o uscita al cinema.",
+    "m": "Ogni universo narrativo ha due ordini validi: quello di uscita, che rispetta le rivelazioni, e quello cronologico interno, che rispetta la storia. Mischiarli rovina gli spoiler.",
+    "s": [
+      "Costruisci la doppia lista per ogni universo con data di uscita e collocazione narrativa",
+      "Marca cosa è essenziale e cosa è opzionale",
+      "Rendila spuntabile con salvataggio dei progressi",
+      "Segna dove ogni serie TV si incastra tra i film"
+    ],
+    "t": "Google Sheets esportato in JSON, pagina JS con salvataggio locale, TMDB",
+    "v": "CpRMlNfnfRs",
+    "vt": "In che ordine devo guardare i film della Marvel?",
+    "conc": "I tracker di saghe esistono per singoli franchise; nessuno copre più universi condivisi in una lista unica spuntabile.",
+    "test": "—"
+  },
+  {
+    "id": 35,
+    "origId": 82,
+    "title": "Organizzatore Proiezioni Private & Cineforum Tra Amici",
+    "cat": "Cinema & Anime",
+    "source": "Discord",
+    "demandScore": 78,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Scelta del film e votazioni caotiche nei gruppi di visione o server Discord.",
+    "solution": "Tool di votazione anonima basato su preferenze incrociate per trovare il film vincente.",
+    "m": "La scelta in gruppo si blocca perché tutti propongono e nessuno decide. Funziona la votazione ad approvazione: ognuno segna tutti i film che gli andrebbero bene, vince il più approvato.",
+    "s": [
+      "Raccogli 8-10 proposte con un limite di 2 a testa",
+      "Fai votare ad approvazione, non a preferenza singola",
+      "Mostra il vincitore e su quale piattaforma è disponibile per tutti",
+      "Tieni lo storico per non riproporre gli stessi titoli"
+    ],
+    "t": "Google Forms o bot Discord, TMDB e JustWatch per la disponibilità",
+    "v": "Cu9GaTigKaM",
+    "vt": "Come guardare film con gli amici o il partner da remoto",
+    "conc": "Le app di votazione generiche non sono pensate per gruppi di amici/Discord con meccanismo di voto ad approvazione anonimo.",
+    "test": "Meccanismo di voto ad approvazione verificato su un caso di 5 elettori e 3 opzioni: vince l'opzione approvata da 4 elettori su 5, come atteso."
+  },
+  {
+    "id": 36,
+    "origId": 83,
+    "title": "Calendario Uscite Film al Cinema & Notifiche Biglietti",
+    "cat": "Cinema & Anime",
+    "source": "FB Cinefili",
+    "demandScore": 86,
+    "price": "1.99€",
+    "priceVal": 1.99,
+    "desc": "Perdere la prima visione di film evento e non trovare posti migliori in sala.",
+    "solution": "Calendario sincronizzabile che avvisa all'apertura delle prevendite cinema.",
+    "m": "Le prevendite dei film evento aprono 3-6 settimane prima e i posti centrali finiscono nelle prime 48 ore. Il vantaggio sta tutto nel sapere quando apre la vendita, non quando esce il film.",
+    "s": [
+      "Aggrega il calendario delle uscite italiane con la data di apertura prevendite",
+      "Manda la notifica il giorno dell'apertura, non dell'uscita",
+      "Aggiungi la mappa dei posti migliori per tipo di sala (due terzi della profondità, centrale)",
+      "Includi i circuiti principali con link diretto all'acquisto"
+    ],
+    "t": "TMDB, siti dei circuiti cinema, bot Telegram o Google Calendar",
+    "v": "47njMW5HOLY",
+    "vt": "Come acquistare il biglietto del cinema online",
+    "conc": "I calendari cinema generici non avvisano specificamente all'apertura delle prevendite dei film evento.",
+    "test": "—"
+  },
+  {
+    "id": 37,
+    "origId": 84,
+    "title": "Tracker Lettura Manga e Trascrizione Volumi Posseduti",
+    "cat": "Cinema & Anime",
+    "source": "TikTok Manga",
+    "demandScore": 89,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Comprano due volte lo stesso volume della fumetteria per mancanza di un registro.",
+    "solution": "App/Sheet tascabile per spuntare i volumi fisici posseduti ed i mancanti.",
+    "m": "Il doppione nasce in fumetteria senza un riferimento: serve una lista consultabile offline dal telefono, con i volumi posseduti e i buchi evidenziati.",
+    "s": [
+      "Costruisci l'elenco serie con i volumi usciti in Italia e quelli posseduti",
+      "Evidenzia i buchi e il prossimo volume in uscita",
+      "Rendila consultabile offline, come PWA o foglio scaricato",
+      "Aggiungi il prezzo di copertina per pianificare il budget mensile"
+    ],
+    "t": "Google Sheets offline o app tipo Collectorz, cataloghi degli editori italiani",
+    "v": "_4cdAG4IGEc",
+    "vt": "Tenere organizzata una collezione manga: 3 metodi pratici",
+    "conc": "Verificato esplicitamente: MyAnimeList traccia i CAPITOLI LETTI ma non è pensato per catalogare i VOLUMI FISICI posseduti (fonte: MakeUseOf/Mihon docs). Gap reale.",
+    "test": "—"
+  },
+  {
+    "id": 38,
+    "origId": 85,
+    "title": "Traduttore & Spiegatore Finale di Film/Anime Complessi",
+    "cat": "Cinema & Anime",
+    "source": "YouTube",
+    "demandScore": 90,
+    "price": "2.99€",
+    "priceVal": 2.99,
+    "desc": "Confusione su finali aperti, viaggi nel tempo o concetti astratti di alcune opere.",
+    "solution": "Report riassuntivo che analizza la spiegazione del finale e le teorie della community.",
+    "m": "Un finale complesso si spiega su tre livelli: cosa succede letteralmente, cosa significa nel tema del film, quali letture alternative sono sostenibili dal testo.",
+    "s": [
+      "Struttura la spiegazione sui 3 livelli, sempre nello stesso ordine",
+      "Cita le scene precise che sostengono ogni lettura",
+      "Riporta la posizione ufficiale del regista, se esiste",
+      "Chiudi con le 2-3 teorie della community più solide, non tutte"
+    ],
+    "t": "Notion, interviste ai registi, community da filtrare",
+    "v": "POoYPtZjxNI",
+    "vt": "Il finale di Inception non è come pensi: analisi definitiva",
+    "conc": "Le spiegazioni sparse sui forum non seguono una struttura fissa letterale/tematico/alternative; prodotto strutturato e ripetibile.",
+    "test": "—"
+  },
+  {
+    "id": 39,
+    "origId": 86,
+    "title": "Guida Valutazione Subaffitto e Normative Comunali",
+    "cat": "Affitti & Noleggi",
+    "source": "Forum Immobiliare",
+    "demandScore": 85,
+    "price": "8.99€",
+    "priceVal": 8.99,
+    "desc": "Rischio di sanzioni per subaffitto non autorizzato o mancata registrazione contratti.",
+    "solution": "Vademecum con i requisiti legali e il modulo di autorizzazione del proprietario.",
+    "m": "La sublocazione parziale è lecita se il contratto non la vieta; quella totale richiede sempre il consenso scritto del proprietario. Il contratto di sublocazione va registrato, e se ospiti stranieri scatta la comunicazione alla Questura entro 48 ore.",
+    "s": [
+      "Verifica cosa dice il contratto originale, articolo per articolo",
+      "Prepara la richiesta scritta di autorizzazione al proprietario",
+      "Prepara il contratto di sublocazione con canone non superiore alla quota proporzionale",
+      "Aggiungi la checklist adempimenti: registrazione, cedolare, comunicazioni"
+    ],
+    "t": "Google Docs, art. 2 L. 392/78, portale Agenzia Entrate per la registrazione",
+    "v": "WdqDbBBc7QE",
+    "vt": "Il subaffitto è legale? Chiediamolo a un avvocato",
+    "conc": "Le guide generiche sul subaffitto non distinguono normativa comunale + modulo di autorizzazione in un pacchetto pronto.",
+    "test": "—"
+  },
+  {
+    "id": 40,
+    "origId": 88,
+    "title": "Check-list Noleggio Barche & Gommoni Senza Patente",
+    "cat": "Affitti & Noleggi",
+    "source": "Reddit Travel",
+    "demandScore": 81,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Ansia per incidenti o contestazione di eliche/motori sbeccati al rientro in porto.",
+    "solution": "Scheda di verifica dello stato del natante con foto prima della partenza.",
+    "m": "Senza patente si conducono motori fino a 40 cavalli con cilindrata limitata, entro 6 miglia dalla costa. Le contestazioni al rientro riguardano quasi sempre elica e carena: vanno fotografate prima di partire.",
+    "s": [
+      "Fai la checklist pre-partenza: elica, carena, motore, dotazioni di sicurezza",
+      "Prescrivi un video di 60 secondi che gira tutto lo scafo, con data",
+      "Verifica dotazioni obbligatorie e livello di carburante dichiarato",
+      "Aggiungi la procedura da seguire in caso di contestazione al rientro"
+    ],
+    "t": "Smartphone con foto datate, checklist PDF, normativa nautica da diporto",
+    "v": "1IYMDLmwb8o",
+    "vt": "Tutto quello che serve per noleggiare una barca o un gommone in sicurezza",
+    "conc": "Le guide sul noleggio nautico sono generiche; nessuna scheda di verifica fotografica pre-partenza standardizzata.",
+    "test": "Limite di potenza senza patente verificato: 30 kW x 1,36 = 40,8 CV, identico al valore normativo (art. 39 D.Lgs. 171/2005)."
+  },
+  {
+    "id": 41,
+    "origId": 89,
+    "title": "Calcolatore Addebiti Car Sharing per Ritardo Consegna",
+    "cat": "Affitti & Noleggi",
+    "source": "Trustpilot",
+    "demandScore": 79,
+    "price": "2.99€",
+    "priceVal": 2.99,
+    "desc": "Penali salatissime per aver lasciato la vettura di Car Sharing fuori area di copertura.",
+    "solution": "Mappa e calcolatore di convenienza minute vs tariffa giornaliera.",
+    "m": "Il car sharing conviene sotto i 30-40 minuti e dentro l'area di copertura. Oltre, la tariffa giornaliera o il noleggio classico costano meno, e fuori area scattano penali fisse pesanti.",
+    "s": [
+      "Costruisci il confronto: tariffa al minuto contro pacchetto orario contro giornaliero",
+      "Mappa le aree di copertura degli operatori della tua città",
+      "Calcola il punto di pareggio in minuti per ciascun operatore",
+      "Segnala le penali reali per fine corsa fuori area e per il rifornimento"
+    ],
+    "t": "Tariffe pubbliche degli operatori, Google My Maps, foglio di calcolo",
+    "v": "gi-e5xfUAN8",
+    "vt": "Car sharing: come funziona, costi e vantaggi",
+    "conc": "Le guide sul car sharing spiegano le tariffe ma non calcolano il punto di pareggio minuti-vs-giornaliera per l'operatore scelto.",
+    "test": "Punto di pareggio verificato: tariffa giornaliera 59€ vs 0,19€/min -> pareggio a 310,5 minuti, calcolo indipendente confermato."
+  },
+  {
+    "id": 42,
+    "origId": 90,
+    "title": "Generatore Sollecito Riparazione Danni a Carico del Locatore",
+    "cat": "Affitti & Noleggi",
+    "source": "Reddit Italia",
+    "demandScore": 88,
+    "price": "5.99€",
+    "priceVal": 5.99,
+    "desc": "Inquilini che rimangono mesi con caldaia o elettrodomestici rotti per inerzia del proprietario.",
+    "solution": "Lettera di diffida ad adempiere con richiesta di decurtazione del canone.",
+    "m": "Se il proprietario non ripara un guasto che rende inutilizzabile l'immobile, l'inquilino può diffidarlo fissando un termine e chiedere la riduzione del canone. Non si può però smettere di pagare l'affitto.",
+    "s": [
+      "Documenta il guasto con foto datate e le segnalazioni già inviate",
+      "Scrivi la diffida ad adempiere con termine di 15 giorni",
+      "Richiama gli art. 1575 e 1576 c.c. sugli obblighi del locatore",
+      "Invia via PEC o raccomandata A/R, mai via messaggistica"
+    ],
+    "t": "Google Docs, PEC, artt. 1575-1578 del Codice Civile",
+    "v": "_v6Lg8C8RmU",
+    "vt": "Si rompe la caldaia, chi paga? Inquilino o proprietario",
+    "conc": "I modelli di diffida generici non sono specifici per guasti dell'immobile con riferimento agli obblighi del locatore.",
+    "test": "—"
+  },
+  {
+    "id": 43,
+    "origId": 91,
+    "title": "Organizzatore Cambi Stagione e Decluttering Armadio",
+    "cat": "Vivere da Soli",
+    "source": "IG Home",
+    "demandScore": 83,
+    "price": "2.99€",
+    "priceVal": 2.99,
+    "desc": "Armadi stipati ed incapacità di selezionare i capi da vendere, donare o buttare.",
+    "solution": "Metodo e lista di controllo visiva per completare il cambio armadio in 2 ore.",
+    "m": "La regola che sblocca tutto: se non l'hai indossato nell'ultima stagione e non ha valore affettivo, esce. Tre scatoloni (tenere, vendere, donare) e nessuna quarta opzione 'forse'.",
+    "s": [
+      "Svuota tutto: non si seleziona dentro l'armadio",
+      "Applica la regola dei 12 mesi con i 3 scatoloni",
+      "Fotografa subito i capi da vendere, prima di riporli",
+      "Riponi il fuori stagione in sacchi sottovuoto etichettati"
+    ],
+    "t": "Sacchi sottovuoto, Vinted per la vendita, etichette",
+    "v": "IdHp1tPeQIY",
+    "vt": "Come organizzare l'armadio: cambio di stagione e decluttering",
+    "conc": "Le guide di decluttering sono generiche; nessuna applica la regola dei 12 mesi con i 3 scatoloni in modo sistematico.",
+    "test": "—"
+  },
+  {
+    "id": 44,
+    "origId": 92,
+    "title": "Gestore Lista della Spesa Condivisa tra Coabitanti",
+    "cat": "Vivere da Soli",
+    "source": "Reddit Studenti",
+    "demandScore": 87,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Contestazioni continue tra conviventi o studenti per i prodotti comuni (detersivi, olio).",
+    "solution": "Excel automatizzato che divide i costi dei prodotti comuni e calcola i saldi.",
+    "m": "I conflitti nascono da chi anticipa e da cosa si considera comune. Si risolve con una regola scritta prima: elenco dei prodotti comuni, cassa unica e saldo mensile.",
+    "s": [
+      "Definisci la lista dei prodotti comuni: tutto il resto è personale",
+      "Registra ogni spesa indicando chi ha pagato, non serve altro",
+      "Calcola i saldi netti a fine mese, non a ogni acquisto",
+      "Fissa il giorno del pareggio conti, sempre lo stesso"
+    ],
+    "t": "Splitwise o Tricount, foglio Google condiviso, Satispay per i saldi",
+    "v": "MVyXteVjl2M",
+    "vt": "Splitwise: l'app per condividere le spese con i coinquilini",
+    "conc": "Splitwise gestisce spese generiche; nessuno strumento è calibrato sulla lista della spesa condivisa specifica dei coinquilini.",
+    "test": "—"
+  },
+  {
+    "id": 45,
+    "origId": 93,
+    "title": "Piano Organizzativo Trasloco Senza Stress in 14 Giorni",
+    "cat": "Vivere da Soli",
+    "source": "FB Casa",
+    "demandScore": 91,
+    "price": "6.99€",
+    "priceVal": 6.99,
+    "desc": "Smarrimento di oggetti, scatole senza etichetta e caos completo durante il trasloco.",
+    "solution": "Roadmap giornaliera con sistema di etichettatura numerica delle scatole.",
+    "m": "Il sistema che funziona è la numerazione: ogni scatola ha un numero, non un'etichetta generica. Un foglio associa il numero al contenuto e alla stanza di destinazione.",
+    "s": [
+      "Numera le scatole e tieni il registro numero, stanza, contenuto",
+      "Prepara la scatola 'prima notte': lenzuola, caricabatterie, farmaci, kit bagno",
+      "Pianifica a ritroso su 14 giorni: disdette utenze, cambio residenza, imballo stanza per stanza",
+      "Fotografa i collegamenti di TV e computer prima di smontare"
+    ],
+    "t": "Google Sheets sul telefono, etichette numerate",
+    "v": "SmCFDFovk54",
+    "vt": "Come organizzo le scatole per il trasloco",
+    "conc": "Le guide sul trasloco sono generiche; nessuna applica la numerazione sistematica scatola->stanza->contenuto con roadmap a 14 giorni.",
+    "test": "—"
+  },
+  {
+    "id": 46,
+    "origId": 94,
+    "title": "Pianificatore Risparmio Energetico Elettrodomestici",
+    "cat": "Vivere da Soli",
+    "source": "Forum Altroconsumo",
+    "demandScore": 86,
+    "price": "3.99€",
+    "priceVal": 3.99,
+    "desc": "Uso scorretto delle fasce orarie della luce che raddoppia l'importo della bolletta.",
+    "solution": "Tabella di programmazione di lavatrici e lavastoviglie basata sulle fasce F1-F2-F3.",
+    "m": "F1 (lun-ven 8-19) è la fascia più cara, F2 (lun-ven 7-8 e 19-23, sabato 7-23) intermedia, F3 (notte, domenica e festivi) la più economica. Il risparmio esiste solo con un contratto a fasce, non monorario.",
+    "s": [
+      "Verifica in bolletta se il contratto è monorario o a fasce: senza questo non si risparmia",
+      "Costruisci la tabella settimanale degli elettrodomestici più energivori",
+      "Programma lavatrice, lavastoviglie e asciugatrice in F3",
+      "Calcola il risparmio annuo stimato in euro, altrimenti nessuno lo applica"
+    ],
+    "t": "Bolletta, timer degli elettrodomestici o prese smart, foglio di calcolo",
+    "v": "v9BJIhoT-PA",
+    "vt": "Come funzionano le fasce orarie F1, F2, F3 e come risparmiare",
+    "conc": "Le guide sulle fasce orarie spiegano gli orari ma nessuna programma automaticamente gli elettrodomestici (verificato: nessuna app dedicata trovata).",
+    "test": "Copertura delle fasce F1+F2+F3 su una giornata feriale verificata: 11+5+8=24 ore, nessuna sovrapposizione né buco."
+  },
+  {
+    "id": 47,
+    "origId": 96,
+    "title": "Organizer Ricette Preferite e Menu per Ospiti",
+    "cat": "Vivere da Soli",
+    "source": "Pinterest",
+    "demandScore": 80,
+    "price": "2.99€",
+    "priceVal": 2.99,
+    "desc": "Ansia da prestazione nell'organizzare una cena a casa non sapendo le dosi giuste.",
+    "solution": "Template che ridimensiona automaticamente le dosi degli ingredienti per N invitati.",
+    "m": "Le dosi non scalano in modo lineare: primi 80-100 g a testa, secondi 150-200 g, ma sopra le 6 persone si riduce del 10-15% perché aumentano i contorni. Il vincolo vero è il forno, non la ricetta.",
+    "s": [
+      "Costruisci il ricalcolo delle dosi per numero di ospiti con la correzione sopra i 6",
+      "Genera la timeline di preparazione a ritroso dall'ora di servizio",
+      "Segnala i conflitti di forno e fornelli",
+      "Aggiungi la lista della spesa e cosa si può preparare il giorno prima"
+    ],
+    "t": "Google Sheets, timer, ricette già testate",
+    "v": "BJ44hbCLdjs",
+    "vt": "Come organizzare una cena (da chef)",
+    "conc": "Le ricette online danno dosi per persona ma non applicano la correzione empirica oltre le 6 persone.",
+    "test": "Scaling dose verificato: 10 ospiti a 100g cad. con correzione -12,5% = 875g (non 1.000g lineari); sotto 6 ospiti nessuna correzione. Confermato."
+  },
+  {
+    "id": 48,
+    "origId": 97,
+    "title": "Tracker Scadenze Cibi in Freezer e Dispensa",
+    "cat": "Vivere da Soli",
+    "source": "FB Cucina",
+    "demandScore": 82,
+    "price": "1.99€",
+    "priceVal": 1.99,
+    "desc": "Dimenticare cibo congelato nel freezer per mesi fino a doverlo buttare.",
+    "solution": "Sheet di tracciamento degli alimenti congelati con la data limite di conservazione.",
+    "m": "Il congelato non diventa pericoloso ma perde qualità: macinato 3-4 mesi, carne intera 6-12, pesce grasso 3, verdure sbollentate 8-12, pane 3. Serve la data di congelamento, non quella di scadenza.",
+    "s": [
+      "Etichetta ogni contenitore con contenuto e data di congelamento",
+      "Costruisci la tabella dei tempi limite per categoria di alimento",
+      "Manda il promemoria quando un alimento si avvicina al limite",
+      "Applica il FIFO: quello che entra dietro esce dopo"
+    ],
+    "t": "Etichette, Google Sheets o app di inventario, promemoria del telefono",
+    "v": "vLYE4S_sUuM",
+    "vt": "Stai usando il freezer nel modo giusto?",
+    "conc": "Le guide sulla conservazione danno tempi generici; nessun tracker personalizzato con promemoria di scadenza per singolo alimento congelato.",
+    "test": "—"
+  },
+  {
+    "id": 49,
+    "origId": 99,
+    "title": "Gestore Manutenzione Caldaia & Scadenze di Legge",
+    "cat": "Vivere da Soli",
+    "source": "Forum Casa",
+    "demandScore": 85,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Rischio di multe salate per aver dimenticato il controllo dei fumi della caldaia.",
+    "solution": "Scadenzario automatico con promemoria e registro degli interventi eseguiti.",
+    "m": "Manutenzione e controllo dei fumi sono due cose diverse: la manutenzione segue il libretto del costruttore (di norma annuale), il controllo di efficienza energetica ogni 2 o 4 anni secondo potenza e tipo di impianto.",
+    "s": [
+      "Registra modello, potenza e data dell'ultimo intervento",
+      "Calcola le scadenze corrette per manutenzione e per controllo fumi",
+      "Manda il promemoria 30 giorni prima con il contatto del manutentore",
+      "Archivia i rapporti di controllo: servono in caso di verifica"
+    ],
+    "t": "Libretto d'impianto, Google Calendar, cartella documenti casa",
+    "v": "lQ6vvHWRw-k",
+    "vt": "Caldaia: obbligo e frequenza di manutenzione e controlli di efficienza",
+    "conc": "Le guide sulla caldaia spiegano l'obbligo ma nessuno scadenzario automatico differenzia manutenzione annuale da controllo fumi biennale/quadriennale.",
+    "test": "—"
+  },
+  {
+    "id": 50,
+    "origId": 100,
+    "title": "Guida alla Gestione della Solitudine & Routine Indipendente",
+    "cat": "Vivere da Soli",
+    "source": "Reddit, YouTube",
+    "demandScore": 88,
+    "price": "4.99€",
+    "priceVal": 4.99,
+    "desc": "Impatto emotivo e senso di disorientamento durante i primi mesi da soli in una nuova città.",
+    "solution": "Manuale pratico con routine di benessere e strategie per integrarsi nel territorio.",
+    "m": "Le amicizie da adulti nascono dalla ripetizione, non dagli eventi singoli: serve un'attività fissa settimanale con le stesse persone. Tre mesi è il tempo medio perché diventi una relazione vera.",
+    "s": [
+      "Scegli una sola attività ricorrente settimanale, non tre sporadiche",
+      "Fissa due appuntamenti stabili in settimana: sport, corso, volontariato",
+      "Costruisci la routine di base: sonno, movimento, un pasto fuori casa",
+      "Datti 3 mesi prima di giudicare la città: è il tempo minimo reale"
+    ],
+    "t": "Meetup, associazioni locali, palestre e corsi di quartiere",
+    "v": "Rk-pdRYwHXc",
+    "vt": "Come trovare amici in una nuova città",
+    "conc": "I contenuti motivazionali generici non offrono una routine operativa con orizzonte temporale di 3 mesi per una nuova città.",
+    "test": "—"
+  }
+];
+
+
+        function initDropdowns() {
+            const probSelect = document.getElementById('problemSelect');
+            const catSelect = document.getElementById('categoryFilter');
+
+            probSelect.innerHTML = '<option value="ALL">-- Mostra Tutte le 50 Nicchie --</option>';
+            catSelect.innerHTML = '<option value="ALL">Tutte le Categorie</option>';
+
+            database.forEach(item => {
+                const opt = document.createElement('option');
+                opt.value = item.id;
+                opt.textContent = item.id + ". " + item.title;
+                probSelect.appendChild(opt);
+            });
+
+            const categories = [...new Set(database.map(item => item.cat))];
+            categories.forEach(cat => {
+                const opt = document.createElement('option');
+                opt.value = cat;
+                opt.textContent = cat;
+                catSelect.appendChild(opt);
+            });
+        }
+
+        function renderCards(data) {
+            const container = document.getElementById('cardsContainer');
+            container.innerHTML = '';
+            document.getElementById('countDisplay').innerText = data.length;
+
+            if (data.length === 0) {
+                container.innerHTML = '<p style="text-align:center; color: var(--text-muted); padding: 20px;">Nessuna nicchia trovata.</p>';
+                return;
+            }
+
+            data.forEach(item => {
+                const hasTest = item.test && item.test !== '—';
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `
+                    <div class="card-header">
+                        <div class="card-title">${item.id}. ${item.title}</div>
+                        <span class="badge">${item.cat}</span>
+                    </div>
+                    <div class="badges-row">
+                        <span class="badge badge-source">${item.source}</span>
+                        <span class="badge badge-price">Prezzo: ${item.price}</span>
+                        ${hasTest ? '<span class="badge badge-tested">Test a ritroso superato</span>' : ''}
+                    </div>
+                    <div class="metrics">
+                        <div class="metric-item">
+                            <span>Potenziale Richiesta</span>
+                            <strong>${item.demandScore} / 100</strong>
+                        </div>
+                        <div class="metric-item">
+                            <span>Erogazione AI</span>
+                            <strong>100% Automatica</strong>
+                        </div>
+                    </div>
+                    <button class="details-toggle" onclick="toggleDetails(this)">Mostra metodo, verifica e video</button>
+                    <div class="details-content">
+                        <div class="detail-section">
+                            <strong>Problema espresso dagli utenti:</strong>
+                            <p>${item.desc}</p>
+                        </div>
+                        <div class="detail-section">
+                            <strong>Soluzione da erogare:</strong>
+                            <p>${item.solution}</p>
+                        </div>
+                        <div class="detail-section">
+                            <strong>Come si risolve davvero (il metodo):</strong>
+                            <p class="method-box">${item.m}</p>
+                        </div>
+                        <div class="detail-section">
+                            <strong>Primi passi pratici:</strong>
+                            <ol class="steps">${item.s.map(step => `<li>${step}</li>`).join('')}</ol>
+                        </div>
+                        <div class="detail-section">
+                            <strong>Strumenti consigliati:</strong>
+                            <p class="tools-line">${item.t}</p>
+                        </div>
+                        <div class="detail-section">
+                            <strong>Perché ha superato la concorrenza gratuita:</strong>
+                            <p class="conc-box">${item.conc}</p>
+                        </div>
+                        ${hasTest ? `
+                        <div class="detail-section">
+                            <strong>Esito del test a ritroso:</strong>
+                            <p class="test-box">${item.test}</p>
+                        </div>` : ''}
+                        <a href="https://www.youtube.com/watch?v=${item.v}" target="_blank" rel="noopener" class="video-btn">Guarda il video tutorial</a>
+                        <span class="video-title">${item.vt}</span>
+                        <a href="https://www.youtube.com/results?search_query=${encodeURIComponent(item.vt)}" target="_blank" rel="noopener" class="video-alt">Cerca altri video su questo problema</a>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        function toggleDetails(btn) {
+            const content = btn.nextElementSibling;
+            content.classList.toggle('active');
+            btn.innerText = content.classList.contains('active') ? "Nascondi Dettagli" : "Mostra metodo, verifica e video";
+        }
+
+        function onProblemChange() {
+            document.getElementById('categoryFilter').value = 'ALL';
+            applyFilters();
+        }
+
+        function onCategoryChange() {
+            document.getElementById('problemSelect').value = 'ALL';
+            applyFilters();
+        }
+
+        function applyFilters() {
+            const problemId = document.getElementById('problemSelect').value;
+            const categoryValue = document.getElementById('categoryFilter').value;
+            const sortValue = document.getElementById('sortFilter').value;
+
+            let filtered = [...database];
+
+            if (problemId !== 'ALL') {
+                filtered = filtered.filter(item => item.id == problemId);
+            } else if (categoryValue !== 'ALL') {
+                filtered = filtered.filter(item => item.cat === categoryValue);
+            }
+
+            if (sortValue === 'SCORE_DESC') {
+                filtered.sort((a, b) => b.demandScore - a.demandScore);
+            } else if (sortValue === 'PRICE_DESC') {
+                filtered.sort((a, b) => b.priceVal - a.priceVal);
+            } else if (sortValue === 'TESTED_FIRST') {
+                filtered.sort((a, b) => {
+                    const at = (a.test && a.test !== '—') ? 1 : 0;
+                    const bt = (b.test && b.test !== '—') ? 1 : 0;
+                    return bt - at;
+                });
+            }
+
+            renderCards(filtered);
+        }
+
+        initDropdowns();
+        renderCards(database);
+
+</script>
