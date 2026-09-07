@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kit Caparra Protetta</title>
+<style>
+:root{
+  --bg:#0f172a; --bg2:#1e293b; --card:#334155; --tx:#f8fafc; --mut:#94a3b8;
+  --acc:#38bdf8; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --bd:#475569;
+}
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+body{background:var(--bg);color:var(--tx);padding:12px 12px 48px;font-size:15px;line-height:1.45}
+header{text-align:center;margin-bottom:14px}
+h1{font-size:1.25rem;color:var(--acc)}
+.sub{font-size:.78rem;color:var(--mut);margin-top:3px}
+nav{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;margin-bottom:14px;-webkit-overflow-scrolling:touch}
+nav button{white-space:nowrap;background:var(--bg2);color:var(--mut);border:1px solid var(--bd);
+  padding:8px 12px;border-radius:20px;font-size:.8rem;cursor:pointer}
+nav button.on{background:var(--acc);color:#04283a;border-color:var(--acc);font-weight:700}
+section{display:none}
+section.on{display:block}
+.box{background:var(--bg2);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
+h2{font-size:1rem;color:var(--acc);margin-bottom:8px}
+h3{font-size:.9rem;margin:12px 0 6px}
+label{display:block;font-size:.72rem;color:var(--acc);font-weight:700;margin:8px 0 3px;text-transform:uppercase;letter-spacing:.03em}
+input,select,textarea{width:100%;padding:9px;border-radius:8px;border:1px solid var(--bd);
+  background:var(--bg);color:var(--tx);font-size:.9rem}
+textarea{min-height:80px;resize:vertical}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+p.note{font-size:.8rem;color:var(--mut);margin-top:6px}
+.btn{width:100%;padding:11px;border:none;border-radius:8px;background:var(--acc);color:#04283a;
+  font-weight:700;font-size:.9rem;cursor:pointer;margin-top:10px}
+.btn.sec{background:var(--card);color:var(--tx)}
+.room{border:1px solid var(--bd);border-radius:10px;padding:10px;margin-bottom:8px;background:var(--bg)}
+.room-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.room-head strong{font-size:.92rem}
+.rate{display:flex;gap:5px}
+.rate button{flex:1;padding:6px 0;font-size:.7rem;border-radius:6px;border:1px solid var(--bd);
+  background:var(--bg2);color:var(--mut);cursor:pointer}
+.rate button.on{font-weight:700;color:#04283a}
+.rate button.on[data-v="ok"]{background:var(--ok);border-color:var(--ok)}
+.rate button.on[data-v="usura"]{background:var(--warn);border-color:var(--warn)}
+.rate button.on[data-v="danno"]{background:var(--bad);border-color:var(--bad);color:#fff}
+ol.shots{margin:6px 0 0 20px}
+ol.shots li{margin-bottom:6px;font-size:.86rem}
+ol.shots li.done{color:var(--mut);text-decoration:line-through}
+.chk{display:flex;gap:8px;align-items:flex-start;margin-bottom:7px;font-size:.86rem}
+.chk input{width:18px;height:18px;flex:0 0 18px;margin-top:2px}
+.out{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:12px;
+  font-size:.82rem;white-space:pre-wrap;margin-top:10px;line-height:1.5}
+.big{font-size:1.5rem;color:var(--ok);font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:8px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--bd)}
+th{color:var(--acc);font-size:.7rem;text-transform:uppercase}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.pill{display:inline-block;font-size:.68rem;padding:2px 8px;border-radius:10px;font-weight:700}
+.pill.ok{background:var(--ok);color:#04283a}
+.pill.bad{background:var(--bad);color:#fff}
+.law{border-left:3px solid var(--acc);background:var(--bg);padding:8px 10px;border-radius:6px;
+  font-size:.82rem;margin:8px 0}
+.law b{color:var(--acc)}
+.disc{font-size:.72rem;color:var(--mut);border-top:1px solid var(--bd);padding-top:10px;margin-top:14px}
+@media print{
+  body{background:#fff;color:#000;font-size:11pt;padding:0}
+  nav,.btn,.rate button:not(.on),.noprint{display:none!important}
+  section{display:block!important;page-break-after:always}
+  .box,.room,.out,.law{background:#fff;border:1px solid #999;color:#000}
+  h1,h2,label,.law b{color:#000}
+  input,select,textarea{background:#fff;color:#000;border:1px solid #999}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Kit Caparra Protetta</h1>
+  <p class="sub">Verbale, prove fotografiche, interessi di legge e diffida — tutto in un file, funziona dal telefono e offline</p>
+</header>
+
+<nav>
+  <button class="on" data-go="s1">1. Contratto</button>
+  <button data-go="s2">2. Verbale stanze</button>
+  <button data-go="s3">3. Foto</button>
+  <button data-go="s4">4. Interessi</button>
+  <button data-go="s5">5. Diffida</button>
+  <button data-go="s6">6. Cosa possono trattenere</button>
+</nav>
+
+<!-- 1 -->
+<section id="s1" class="on">
+  <div class="box">
+    <h2>Dati del contratto</h2>
+    <label>Inquilino (nome e cognome)</label><input id="f_inq" placeholder="Mario Rossi">
+    <label>Codice fiscale inquilino</label><input id="f_cf" placeholder="RSSMRA90A01H501U">
+    <label>Proprietario / locatore</label><input id="f_loc" placeholder="Giuseppe Bianchi">
+    <label>Indirizzo dell'immobile</label><input id="f_ind" placeholder="Via Roma 10, Milano">
+    <div class="grid2">
+      <div><label>Canone mensile (€)</label><input id="f_can" type="number" value="600"></div>
+      <div><label>Deposito versato (€)</label><input id="f_dep" type="number" value="1200"></div>
+    </div>
+    <div class="grid2">
+      <div><label>Inizio locazione</label><input id="f_in" type="date"></div>
+      <div><label>Riconsegna</label><input id="f_out" type="date"></div>
+    </div>
+    <label>Letture contatori alla riconsegna</label>
+    <input id="f_cont" placeholder="Luce 12345 — Gas 6789 — Acqua 234">
+    <div class="grid2">
+      <div><label>Chiavi consegnate</label><input id="f_chiavi" type="number" value="3"></div>
+      <div><label>Chiavi restituite</label><input id="f_chiavir" type="number" value="3"></div>
+    </div>
+    <div id="alert_dep"></div>
+    <button class="btn" onclick="salva()">Salva sul dispositivo</button>
+    <p class="note">I dati restano solo nel tuo telefono. Nessun invio in rete.</p>
+  </div>
+</section>
+
+<!-- 2 -->
+<section id="s2">
+  <div class="box">
+    <h2>Verbale stato dei luoghi</h2>
+    <p class="note">Compilalo <b>due volte</b>: il giorno dell'ingresso e il giorno della riconsegna. Il confronto tra i due è la tua prova.</p>
+    <label>Momento della rilevazione</label>
+    <select id="f_fase"><option value="Ingresso">Consegna (ingresso)</option><option value="Riconsegna">Riconsegna (uscita)</option></select>
+    <div id="rooms"></div>
+    <label>Note e riserve</label>
+    <textarea id="f_note" placeholder="Es. macchia preesistente sul parquet in salotto, già presente alla consegna."></textarea>
+    <div class="law"><b>Firma sempre in due.</b> Un verbale non firmato dal locatore vale molto meno. Se rifiuta di firmare, invia il verbale con le foto via PEC o raccomandata lo stesso giorno: la data certa resta.</div>
+    <button class="btn" onclick="window.print()">Stampa / salva in PDF per la firma</button>
+  </div>
+</section>
+
+<!-- 3 -->
+<section id="s3">
+  <div class="box">
+    <h2>Protocollo fotografico</h2>
+    <p class="note">L'ordine conta: serve a dimostrare che le foto sono dello stesso sopralluogo. Scattale tutte di seguito, senza interruzioni.</p>
+    <ol class="shots" id="shots"></ol>
+    <div class="law"><b>Data certa.</b> Le foto del telefono si possono alterare. Per renderle opponibili, invia l'album a te stesso via PEC lo stesso giorno, oppure caricalo su un cloud che registra la data di caricamento e conserva la ricevuta.</div>
+    <button class="btn sec" onclick="resetShots()">Azzera spunte</button>
+  </div>
+</section>
+
+<!-- 4 -->
+<section id="s4">
+  <div class="box">
+    <h2>Interessi legali sul deposito</h2>
+    <p class="note">L'art. 11 della L. 392/1978 impone al locatore di corrispondere gli interessi legali sul deposito. È una norma imperativa: non si può derogare nemmeno con una clausola del contratto.</p>
+    <div class="grid2">
+      <div><label>Deposito (€)</label><input id="i_dep" type="number" value="1200" oninput="calcInt()"></div>
+      <div><label>Dal</label><input id="i_da" type="date" oninput="calcInt()"></div>
+    </div>
+    <label>Al</label><input id="i_a" type="date" oninput="calcInt()">
+    <div id="int_out"></div>
+    <p class="note">Tassi legali da decreto MEF. 2026: 1,60% · 2025: 2,00% · 2024: 2,50% · 2023: 5,00% · 2022: 1,25% · 2021: 0,01% · 2020: 0,05% · 2019: 0,80%.</p>
+  </div>
+</section>
+
+<!-- 5 -->
+<section id="s5">
+  <div class="box">
+    <h2>Lettera di diffida</h2>
+    <label>Giorni concessi per la restituzione</label><input id="d_gg" type="number" value="15" oninput="genLettera()">
+    <label>Importo trattenuto senza giustificazione (€)</label><input id="d_imp" type="number" value="1200" oninput="genLettera()">
+    <label>Motivazione addotta dal locatore (se c'è)</label>
+    <input id="d_mot" placeholder="Es. tinteggiatura pareti" oninput="genLettera()">
+    <div class="out" id="lettera"></div>
+    <button class="btn" onclick="copiaLettera()">Copia il testo</button>
+    <button class="btn sec" onclick="window.print()">Stampa / salva in PDF</button>
+    <div class="law"><b>Come si invia.</b> PEC se ce l'hai, altrimenti raccomandata A/R. Mai WhatsApp o email semplice: senza prova di consegna la diffida non fa decorrere il termine.</div>
+  </div>
+</section>
+
+<!-- 6 -->
+<section id="s6">
+  <div class="box">
+    <h2>Cosa possono trattenerti e cosa no</h2>
+    <div class="law">
+      <b>La regola.</b> L'inquilino risponde solo dei danni che <u>superano il normale deterioramento d'uso</u>.
+      L'onere della prova è del locatore: deve dimostrare quale danno c'è, che dipende da te e quanto costa ripararlo
+      (Cassazione n. 8526/2020: senza un danno patrimoniale concreto e provato non c'è nulla da risarcire).
+    </div>
+    <h3>Non è trattenibile <span class="pill ok">normale usura</span></h3>
+    <div id="lista_ok"></div>
+    <h3>È trattenibile <span class="pill bad">danno</span></h3>
+    <div id="lista_no"></div>
+    <div class="law">
+      <b>Limite di legge.</b> Il deposito non può superare tre mensilità di canone (art. 11 L. 392/1978).
+      Se hai versato di più, l'eccedenza va restituita comunque.
+    </div>
+    <div class="law">
+      <b>Il deposito non è l'ultima mensilità.</b> Usarlo per non pagare l'ultimo mese è una prassi diffusa
+      ma scorretta: espone a decreto ingiuntivo. Paga il canone e chiedi il deposito.
+    </div>
+    <div class="law">
+      <b>Hai 10 anni.</b> Il diritto alla restituzione si prescrive in dieci anni. Nessuna fretta,
+      ma prima agisci più facile è reperire le prove.
+    </div>
+  </div>
+  <p class="disc">Questo kit è materiale informativo e modulistica, non consulenza legale. Per controversie di valore
+  rilevante o già in causa, rivolgiti a un avvocato o a un'associazione inquilini.</p>
+</section>
+
+<script>
+// ---------- navigazione ----------
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
+  document.querySelectorAll('section').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  document.getElementById(b.dataset.go).classList.add('on');
+  window.scrollTo(0, 0);
+});
+
+// ---------- stanze del verbale ----------
+const STANZE = [
+  ['Ingresso e corridoio', 'porta blindata, serratura, campanello, citofono'],
+  ['Soggiorno', 'pareti, soffitto, pavimento, infissi, tapparelle, prese'],
+  ['Cucina', 'piano cottura, forno, frigo, cappa, sifoni, silicone, piastrelle'],
+  ['Camera 1', 'pareti, pavimento, armadio, finestra, tapparella'],
+  ['Camera 2', 'pareti, pavimento, armadio, finestra, tapparella'],
+  ['Bagno', 'sanitari, rubinetteria, box doccia, scarichi, muffa, fughe'],
+  ['Balcone o terrazzo', 'pavimento, ringhiera, scarico, zanzariere'],
+  ['Impianti', 'caldaia, termosifoni, quadro elettrico, condizionatori'],
+  ['Arredi e elettrodomestici', 'elenco e stato di ciascun pezzo']
+];
+const VOTI = [['ok', 'Integro'], ['usura', 'Usura normale'], ['danno', 'Danno']];
+
+const cont = document.getElementById('rooms');
+STANZE.forEach((r, i) => {
+  const d = document.createElement('div');
+  d.className = 'room';
+  d.innerHTML = `<div class="room-head"><strong>${r[0]}</strong></div>
+    <div class="rate" data-i="${i}">${VOTI.map(v =>
+      `<button data-v="${v[0]}" onclick="voto(${i},'${v[0]}')">${v[1]}</button>`).join('')}</div>
+    <p class="note">Controlla: ${r[1]}</p>
+    <input id="r${i}" placeholder="Dettaglio (es. graffio 5 cm anta destra armadio)">`;
+  cont.appendChild(d);
+});
+const voti = {};
+function voto(i, v) {
+  voti[i] = v;
+  document.querySelectorAll(`.rate[data-i="${i}"] button`).forEach(b =>
+    b.classList.toggle('on', b.dataset.v === v));
+  salva();
+}
+
+// ---------- protocollo fotografico ----------
+const SHOTS = [
+  'Targa civico + portone, per collocare l\'immobile',
+  'Porta d\'ingresso chiusa, poi aperta',
+  'Panoramica di ogni stanza dai quattro angoli',
+  'Pavimento di ogni stanza, ripreso in campo lungo',
+  'Ogni parete per intero, poi primo piano di ogni segno',
+  'Infissi: telaio, vetro, maniglia, tapparella abbassata e alzata',
+  'Bagno: sanitari, box doccia, fughe, silicone, scarichi',
+  'Cucina: piano cottura acceso, forno interno, frigo interno, cappa',
+  'Caldaia: targhetta con matricola e display acceso',
+  'Quadro elettrico aperto',
+  'Ogni elettrodomestico in funzione (30 secondi di video)',
+  'Contatori: luce, gas, acqua, con numeri leggibili',
+  'Mazzo di chiavi disteso e contato',
+  'Video unico di 2 minuti che attraversa tutta la casa senza tagli'
+];
+const so = document.getElementById('shots');
+SHOTS.forEach((s, i) => {
+  const li = document.createElement('li');
+  li.textContent = s;
+  li.onclick = () => { li.classList.toggle('done'); salva(); };
+  li.id = 'sh' + i;
+  so.appendChild(li);
+});
+function resetShots() { document.querySelectorAll('#shots li').forEach(l => l.classList.remove('done')); salva(); }
+
+// ---------- usura vs danno ----------
+const OK = ['Segni lasciati da mobili e quadri', 'Fori per tende, mensole e pensili',
+  'Pareti ingiallite o da ritinteggiare per il tempo trascorso', 'Micrograffi sul parquet da normale calpestio',
+  'Guarnizioni e silicone deteriorati dall\'uso', 'Sbiadimento di tende e tessuti per la luce',
+  'Usura della rubinetteria e dei meccanismi'];
+const NO = ['Buchi nei muri non richiusi e non concordati', 'Piastrelle o sanitari rotti o scheggiati',
+  'Bruciature su piani, pavimenti o mobili', 'Muffa da mancata aerazione documentata',
+  'Elettrodomestici rotti per uso improprio', 'Serrature forzate o chiavi non restituite',
+  'Modifiche non autorizzate all\'immobile', 'Pulizia mai fatta con sporco incrostato'];
+const mk = (arr, cls) => arr.map(t => `<div class="chk"><span class="pill ${cls}">${cls === 'ok' ? 'no' : 'sì'}</span><span>${t}</span></div>`).join('');
+document.getElementById('lista_ok').innerHTML = mk(OK, 'ok');
+document.getElementById('lista_no').innerHTML = mk(NO, 'bad');
+
+// ---------- interessi legali ----------
+const TASSI = { 2015: .5, 2016: .2, 2017: .1, 2018: .3, 2019: .8, 2020: .05, 2021: .01,
+                2022: 1.25, 2023: 5, 2024: 2.5, 2025: 2, 2026: 1.6 };
+const TASSO_CORRENTE = 1.6; // usato per gli anni non ancora fissati con decreto
+
+function calcInt() {
+  const dep = parseFloat(document.getElementById('i_dep').value) || 0;
+  const da = document.getElementById('i_da').value, a = document.getElementById('i_a').value;
+  const box = document.getElementById('int_out');
+  if (!dep || !da || !a) { box.innerHTML = '<p class="note">Inserisci deposito e date.</p>'; return; }
+  const d1 = new Date(da), d2 = new Date(a);
+  if (d2 <= d1) { box.innerHTML = '<p class="note">La data finale deve essere successiva.</p>'; return; }
+  let tot = 0, righe = '';
+  for (let y = d1.getFullYear(); y <= d2.getFullYear(); y++) {
+    const ini = new Date(Math.max(d1, new Date(y, 0, 1)));
+    const fin = new Date(Math.min(d2, new Date(y, 11, 31)));
+    if (fin < ini) continue;
+    const gg = Math.round((fin - ini) / 864e5) + 1;
+    const gAnno = ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0) ? 366 : 365;
+    const t = TASSI[y] ?? TASSO_CORRENTE;
+    const q = dep * (t / 100) * (gg / gAnno);
+    tot += q;
+    righe += `<tr><td>${y}</td><td class="num">${t.toFixed(2)}%</td><td class="num">${gg}</td><td class="num">${q.toFixed(2)} €</td></tr>`;
+  }
+  box.innerHTML = `<table><tr><th>Anno</th><th style="text-align:right">Tasso</th>
+    <th style="text-align:right">Giorni</th><th style="text-align:right">Interessi</th></tr>${righe}</table>
+    <p style="margin-top:10px">Interessi maturati: <span class="big">${tot.toFixed(2)} €</span></p>
+    <p class="note">Totale da richiedere: <b>${(dep + tot).toFixed(2)} €</b> (deposito + interessi).</p>`;
+  window._interessi = tot;
+  genLettera();
+}
+
+// ---------- limite tre mensilità ----------
+function checkDeposito() {
+  const can = parseFloat(document.getElementById('f_can').value) || 0;
+  const dep = parseFloat(document.getElementById('f_dep').value) || 0;
+  const el = document.getElementById('alert_dep');
+  if (!can || !dep) { el.innerHTML = ''; return; }
+  if (dep > can * 3) {
+    el.innerHTML = `<div class="law" style="border-color:var(--bad)"><b>Deposito oltre il limite di legge.</b>
+      Tre mensilità sono ${(can * 3).toFixed(2)} €, tu hai versato ${dep.toFixed(2)} €.
+      L'eccedenza di <b>${(dep - can * 3).toFixed(2)} €</b> va restituita in ogni caso (art. 11 L. 392/1978).</div>`;
+  } else {
+    el.innerHTML = `<div class="law"><b>Deposito nei limiti.</b> Il massimo consentito è ${(can * 3).toFixed(2)} € (tre mensilità).</div>`;
+  }
+}
+
+// ---------- lettera di diffida ----------
+function genLettera() {
+  const g = id => (document.getElementById(id).value || '').trim();
+  const gg = g('d_gg') || '15';
+  const imp = parseFloat(g('d_imp')) || 0;
+  const mot = g('d_mot');
+  const inte = window._interessi ? window._interessi.toFixed(2) : null;
+  const oggi = new Date().toLocaleDateString('it-IT');
+  const dataOut = g('f_out') ? new Date(g('f_out')).toLocaleDateString('it-IT') : '____________';
+
+  const contest = mot
+    ? `Prendo atto che la trattenuta viene motivata con "${mot}". Contesto tale motivazione: ai sensi dell'art. 1590 c.c. il conduttore risponde soltanto dei deterioramenti che eccedono il normale uso della cosa locata, e la Corte di Cassazione (sent. n. 8526/2020) ha chiarito che il locatore deve provare l'esistenza di un danno patrimoniale concreto, la sua riconducibilità al conduttore e il relativo costo di ripristino. Nessuna di tali prove mi è stata fornita.`
+    : `Nessuna motivazione mi è stata comunicata, né mi è stata contestata alcuna voce di danno al momento della riconsegna.`;
+
+  const interessi = inte
+    ? `\n\nAlla somma capitale vanno aggiunti gli interessi legali maturati, pari a euro ${inte}, dovuti ai sensi dell'art. 11 della legge n. 392/1978, norma di natura imperativa e come tale non derogabile.`
+    : '';
+
+  document.getElementById('lettera').textContent =
+`Raccomandata A/R  —  oppure  PEC
+
+${g('f_inq') || '[Nome inquilino]'}
+Codice fiscale ${g('f_cf') || '[CF]'}
+
+Egr. Sig. ${g('f_loc') || '[Nome locatore]'}
+
+Luogo e data: ____________, ${oggi}
+
+OGGETTO: diffida ad adempiere — restituzione del deposito cauzionale
+relativo all'immobile sito in ${g('f_ind') || '[indirizzo]'}
+
+Il sottoscritto, già conduttore dell'immobile in oggetto, ha riconsegnato l'unità immobiliare in data ${dataOut}, versando all'atto della stipula un deposito cauzionale di euro ${imp.toFixed(2)}.
+
+A oggi tale somma non mi è stata restituita. ${contest}${interessi}
+
+Ricordo che il deposito cauzionale assolve una funzione di garanzia e va restituito al termine della locazione per la parte eccedente eventuali crediti del locatore, che devono però essere provati e quantificati.
+
+Con la presente DIFFIDO formalmente la S.V. a corrispondermi la somma complessiva dovuta entro e non oltre ${gg} giorni dal ricevimento della presente, mediante bonifico sul seguente IBAN:
+
+IBAN ____________________________________
+
+Decorso inutilmente tale termine, mi vedrò costretto ad adire le competenti sedi giudiziarie per il recupero coattivo del credito, con richiesta di decreto ingiuntivo ai sensi degli artt. 633 e ss. c.p.c., con aggravio a Suo carico di interessi, spese legali e di procedura.
+
+La presente vale quale costituzione in mora ai sensi e per gli effetti dell'art. 1219 c.c. e quale atto interruttivo della prescrizione.
+
+Distinti saluti.
+
+_______________________
+${g('f_inq') || '[Nome inquilino]'}
+
+Allegati: verbale di riconsegna, documentazione fotografica, ricevuta di versamento del deposito.`;
+}
+
+function copiaLettera() {
+  navigator.clipboard.writeText(document.getElementById('lettera').textContent)
+    .then(() => alert('Testo copiato.'))
+    .catch(() => alert('Copia non riuscita: seleziona il testo manualmente.'));
+}
+
+// ---------- persistenza locale ----------
+const CAMPI = ['f_inq','f_cf','f_loc','f_ind','f_can','f_dep','f_in','f_out','f_cont','f_chiavi',
+  'f_chiavir','f_fase','f_note','i_dep','i_da','i_a','d_gg','d_imp','d_mot',
+  ...STANZE.map((_, i) => 'r' + i)];
+
+function salva() {
+  try {
+    const st = { voti, campi: {}, shots: [...document.querySelectorAll('#shots li')].map(l => l.classList.contains('done')) };
+    CAMPI.forEach(c => { const e = document.getElementById(c); if (e) st.campi[c] = e.value; });
+    localStorage.setItem('kitCaparra', JSON.stringify(st));
+  } catch (e) { /* modalità privata o storage bloccato: si prosegue senza salvare */ }
+  checkDeposito();
+}
+
+function carica() {
+  try {
+    const st = JSON.parse(localStorage.getItem('kitCaparra') || 'null');
+    if (!st) return;
+    Object.entries(st.campi || {}).forEach(([k, v]) => { const e = document.getElementById(k); if (e && v) e.value = v; });
+    Object.entries(st.voti || {}).forEach(([i, v]) => voto(+i, v));
+    (st.shots || []).forEach((d, i) => { if (d) document.getElementById('sh' + i)?.classList.add('done'); });
+  } catch (e) { /* dati corrotti o storage non accessibile: si parte puliti */ }
+}
+
+document.addEventListener('input', e => { if (e.target.matches('input,select,textarea')) salva(); });
+
+carica();
+checkDeposito();
+calcInt();
+genLettera();
+</script>
+</body>
+</html>
