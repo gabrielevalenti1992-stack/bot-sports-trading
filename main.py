@@ -1195,7 +1195,17 @@ PAROLE_ESCLUSE_SQUADRE_FEMMINILI = [
     "kvinn",      # kvinner (no), kvinnor (se)
     "kvinde",     # kvinde, kvindeliga (dk)
     # "dame" NO come radice: "Notre Dame" esiste. Solo le forme che marcano davvero il femminile.
-    "dames", "damen", "damer",
+    #
+    # E nemmeno "damer", tolta dopo averla vista sbagliare in produzione: nel log dell'avvio del
+    # 06/09 alle 22:55:34, fra le squadre tolte dallo storico c'era "Al Saham Ad Damer" - un club
+    # SUDANESE di Ad-Damer (Ad Damir), citta' sul Nilo, niente a che vedere col femminile. La
+    # radice veniva dallo svedese ("damer" = signore), ma le squadre femminili svedesi su
+    # API-Football si chiamano "... DFF" o "... Dam" (Hammarby DFF, FC Rosengard), non "Damer":
+    # copriva un caso che non esiste e ne rompeva uno che esiste. Il danno non era solo sulla
+    # pulizia una tantum - lo stesso filtro gira in scrittura dentro
+    # aggiorna_storico_minutaggi_lega(), quindi un club con "Damer" nel nome in un campionato
+    # whitelist non sarebbe MAI piu' stato raccolto.
+    "dames", "damen",
 ]
 
 
