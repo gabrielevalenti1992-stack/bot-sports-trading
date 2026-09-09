@@ -8124,6 +8124,46 @@ def _anomalie_nuove(fixture_id, trovate, registra=True):
     return nuove
 
 
+def testo_copertura_statistiche_assente(home, away, minuto):
+    return (f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica "
+            f"statistiche per questa partita (al {minuto}') - resta seguita, "
+            f"ma non manda notifiche, gol compresi")
+
+
+def segnala_copertura_statistiche_assente(fixture_id, home, away, minuto, notifiche_attive=True):
+    """Manda l'avviso COPERTURA STATISTICHE dal ciclo principale, appena l'evidenza e' completa,
+    invece di aspettare la prossima passata della diagnostica.
+
+    La diagnostica campiona ogni INTERVALLO_DIAGNOSTICA_AUTOMATICA (30 minuti) e pretende
+    minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE NEL MOMENTO del campionamento. Ma dal 60' alla
+    fine passano circa 30 minuti reali: la finestra buona e' larga quanto l'intervallo, quindi una
+    partita puo' attraversarla per intero fra due passate e non essere segnalata mai. Successo in
+    produzione su 2 delle 3 partite scoperte in due giorni: ABB-San Antonio Bulo Bulo (08/09,
+    campionata al 12', 43', 57' e poi finita - con un gol al 61' zittito senza dirlo a nessuno) e
+    FK Vozdovac-TSC Backa Topola (07/09, campionata al 37' e 51'). L'unica segnalata, Drenica
+    Skenderaj-Prishtina, lo e' stata solo perche' una passata e' capitata al 75'.
+
+    L'evidenza (stats_vuote_consecutive >= SOGLIA_SENZA_STATISTICHE oltre il 60') il ciclo
+    principale ce l'ha ad ogni giro, quindi la segnalazione parte da li'. Il dedup resta quello
+    della diagnostica, cosi' i due percorsi non si sovrappongono: la categoria viene aggiunta a
+    quelle gia' note per la partita (senza sovrascriverle) e la passata successiva la vede come
+    gia' mandata. Con le notifiche spente non si marca nulla, come fa _anomalie_nuove(): l'avviso
+    resta in coda e parte al primo controllo dentro l'orario attivo."""
+    testo = testo_copertura_statistiche_assente(home, away, minuto)
+    log("    📉 " + testo)
+    if not notifiche_attive:
+        return
+    gia_note = ANOMALIE_DIAGNOSTICA_NOTIFICATE.get(fixture_id, set())
+    if "COPERTURA STATISTICHE" in gia_note:
+        return
+    ANOMALIE_DIAGNOSTICA_NOTIFICATE[fixture_id] = gia_note | {"COPERTURA STATISTICHE"}
+    salva_anomalie_diagnostica_notificate(ANOMALIE_DIAGNOSTICA_NOTIFICATE)
+    invia_messaggio_telegram(
+        "🔍 Diagnostica automatica - trovate anomalie nella pipeline dati:\n\n"
+        f"- {testo}"
+        "\n\nSpiegazione dei passaggi: /legenda")
+
+
 # Quante chiamate devono fallire in mezz'ora perche' sia un'anomalia e non sfortuna. Nei due giorni
 # analizzati i fallimenti sono stati dieci in tutto, mai piu' di due nella stessa mezz'ora tranne il
 # 25/08 fra le 23:42 e le 23:45: sotto i tre si resta nel rumore di fondo dell'API.
@@ -8320,10 +8360,7 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 # Il "cosa vuol dire" sta nella legenda (/legenda), non qui: ripetuto per ogni
                 # partita segnalata erano 149 caratteri a testa, e in una diagnostica da 17 righe
                 # facevano da soli piu' di 2500 caratteri di testo identico.
-                testo_anomalia = (
-                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica "
-                    f"statistiche per questa partita (al {minuto_api}') - resta seguita, "
-                    f"ma non manda notifiche, gol compresi")
+                testo_anomalia = testo_copertura_statistiche_assente(home, away, minuto_api)
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
@@ -8762,42 +8799,87 @@ def trova_squadra_in_storico(nome_query, league_id=None):
 
 
 def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasferta):
-    """Grafico con 2 pannelli: distribuzione gol fatti/subiti per fascia di 15 minuti,
-    squadra di casa nelle sue partite in casa, squadra ospite nelle sue partite in trasferta."""
+    """Grafico con 2 pannelli, uno per CHI SEGNA, con le due squadre incrociate.
+
+    Il gol della casa in una fascia dipende da due cose: quanto la casa segna in casa e quanto
+    l'ospite subisce in trasferta. Prima stavano in pannelli diversi (uno per squadra, con dentro
+    sia i gol fatti che quelli subiti), quindi le due meta' dello stesso segnale andavano
+    ricomposte a mente. Ora il primo pannello le mette insieme, e il secondo fa lo specchio per il
+    gol dell'ospite.
+
+    Dentro ogni pannello le fasce stanno sull'asse orizzontale e ogni fascia e' una colonna sola:
+    verde che sale per i gol fatti, rosso che scende per quelli subiti, dalla stessa linea dello
+    zero. La scala sopra e sotto e' simmetrica anche quando lascia spazio vuoto da un lato: serve
+    perche' un "2" sotto sia lungo quanto un "2" sopra, altrimenti il confronto fra le due meta'
+    - che e' tutto il punto del grafico - sarebbe falsato.
+
+    Ogni barra porta il proprio numero (niente etichetta sulle fasce a zero gol, gia' evidenti
+    dall'assenza della barra): senza, il valore andava stimato a occhio dall'altezza."""
     fig = None  # chiusa in finally, vedi commento in genera_grafico_barre
     try:
-        fig, axes = plt.subplots(2, 1, figsize=(6.5, 6.5), dpi=150)
+        fig, axes = plt.subplots(2, 1, figsize=(6.5, 7.0), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
 
         color_fatti = '#22c55e'
         color_subiti = '#ef4444'
         color_text = '#e5e5e5'
         color_muted = '#888888'
+        color_grid = '#2f2f2f'
+
+        def serie(dati, chiave):
+            return [dati[chiave].get(b, 0) for b in FASCE_MINUTO]
+
+        partite_casa = dati_casa.get("partite", 0)
+        partite_tras = dati_trasferta.get("partite", 0)
 
         pannelli = [
-            (axes[0], f"{nome_casa} (in casa)", dati_casa),
-            (axes[1], f"{nome_trasferta} (in trasferta)", dati_trasferta),
+            (axes[0], f"Gol della CASA - {nome_casa}",
+             f"{nome_casa} segna in casa ({partite_casa} partite)", serie(dati_casa, "fatti"),
+             f"{nome_trasferta} subisce in trasferta ({partite_tras} partite)",
+             serie(dati_trasferta, "subiti")),
+            (axes[1], f"Gol dell'OSPITE - {nome_trasferta}",
+             f"{nome_trasferta} segna in trasferta ({partite_tras} partite)",
+             serie(dati_trasferta, "fatti"),
+             f"{nome_casa} subisce in casa ({partite_casa} partite)", serie(dati_casa, "subiti")),
         ]
 
         x = np.arange(len(FASCE_MINUTO))
-        larghezza = 0.35
+        larghezza = 0.52
 
-        for ax, titolo, dati in pannelli:
+        for ax, titolo, etichetta_su, valori_su, etichetta_giu, valori_giu in pannelli:
             ax.set_facecolor('#1e1e1e')
-            fatti = [dati["fatti"].get(b, 0) for b in FASCE_MINUTO]
-            subiti = [dati["subiti"].get(b, 0) for b in FASCE_MINUTO]
+            ax.bar(x, valori_su, larghezza, color=color_fatti, edgecolor='#1e1e1e',
+                   linewidth=1.5, zorder=3, label=etichetta_su)
+            ax.bar(x, [-v for v in valori_giu], larghezza, color=color_subiti,
+                   edgecolor='#1e1e1e', linewidth=1.5, zorder=3, label=etichetta_giu)
 
-            ax.bar(x - larghezza / 2, fatti, larghezza, color=color_fatti, label="Gol fatti")
-            ax.bar(x + larghezza / 2, subiti, larghezza, color=color_subiti, label="Gol subiti")
+            for xi, v in zip(x, valori_su):
+                if v > 0:
+                    ax.text(xi, v + 0.13, str(v), ha='center', va='bottom', fontsize=10.5,
+                            color=color_text, fontweight='bold')
+            for xi, v in zip(x, valori_giu):
+                if v > 0:
+                    ax.text(xi, -v - 0.13, str(v), ha='center', va='top', fontsize=10.5,
+                            color=color_text, fontweight='bold')
 
+            limite = max(valori_su + valori_giu + [0]) + 1.1
+            ax.axhline(0, color=color_muted, linewidth=1, zorder=4)
+            ax.set_ylim(-limite, limite)
+            ax.set_xlim(-0.7, len(FASCE_MINUTO) - 0.3)
             ax.set_xticks(x)
-            ax.set_xticklabels([f"{b}'" for b in FASCE_MINUTO], fontsize=8, color=color_text)
-            ax.tick_params(axis='y', colors=color_muted, labelsize=8)
-            partite = dati.get("partite", 0)
-            ax.set_title(f"{titolo} - {partite} partite", fontsize=10, color=color_text, loc='left')
+            ax.set_xticklabels([f"{b}'" for b in FASCE_MINUTO], fontsize=8.5, color=color_text)
+            ax.tick_params(axis='x', length=0, pad=6)
+            ax.set_yticks([])
+            ax.grid(axis='y', color=color_grid, linewidth=0.7, zorder=0)
+            ax.set_axisbelow(True)
+            ax.set_title(titolo, fontsize=10.5, color=color_text, loc='left', pad=30)
             for spine in ax.spines.values():
                 spine.set_visible(False)
-            ax.legend(fontsize=8, labelcolor=color_text, frameon=False, loc='upper right')
+            # Legenda per pannello, sopra le barre e fuori dall'area di disegno: le due voci
+            # cambiano da un pannello all'altro (sono squadre diverse), quindi non si puo'
+            # accorpare in una sola di figura.
+            ax.legend(fontsize=7.5, labelcolor=color_text, frameon=False, loc='upper left',
+                      bbox_to_anchor=(0, 1.15), ncol=2, handlelength=1.1, columnspacing=1.4)
 
         plt.tight_layout()
         foto_path = os.path.join(os.path.dirname(__file__), f'minutaggi_{int(time.time())}.png')
@@ -8849,7 +8931,8 @@ def cmd_analisi(chat_id, testo_richiesta):
     messaggio = (
         f"{squadra_casa['nome']} vs {squadra_trasferta['nome']}\n"
         f"Distribuzione storica gol per fascia di minuto (stagione corrente)\n"
-        f"Verde = gol fatti, Rosso = gol subiti"
+        f"Ogni pannello e' una squadra che segna, con l'avversario che subisce sotto: "
+        f"piu' sono grosse entrambe le meta', piu' quella fascia e' da gol."
     )
 
     try:
@@ -10212,6 +10295,12 @@ def processa_partita(fixture, notifiche_attive=True):
                     else:
                         stato_partite[fixture_id]["verdetto_lega_registrato"] = True
                         registra_esito_statistiche(league_country, league_name, False)
+                        # Stessa evidenza, due destinatari: la lega finisce nello storico degli
+                        # esiti, la PARTITA va detta a chi legge la chat - e va detta adesso, non
+                        # alla prossima passata della diagnostica, che puo' non arrivare mai
+                        # prima del fischio finale (vedi segnala_copertura_statistiche_assente).
+                        segnala_copertura_statistiche_assente(
+                            fixture_id, home, away, minuto, notifiche_attive)
 
         if status_short in STATI_PARTITA_CONCLUSA:
             stato = stato_partite.get(fixture_id, {})
