@@ -8856,9 +8856,17 @@ def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasfert
             ax.set_title(f"{titolo} - {partite} partite", fontsize=10, color=color_text, loc='left')
             for spine in ax.spines.values():
                 spine.set_visible(False)
-            ax.legend(fontsize=8, labelcolor=color_text, frameon=False, loc='upper right')
 
-        plt.tight_layout()
+        # Legenda fuori dai pannelli, in alto, una sola per figura invece di una identica per
+        # pannello. Dentro il pannello stava in 'upper right', cioe' esattamente dove arrivano le
+        # barre piu' alte quando la fascia di punta e' una delle ultime: con lo storico di fine
+        # stagione (numeri a due cifre sul 76-90', la fascia in cui si segna di piu') le etichette
+        # finivano sotto il riquadro della legenda e non si leggevano.
+        handles, etichette = axes[0].get_legend_handles_labels()
+        fig.legend(handles, etichette, fontsize=8, labelcolor=color_text, frameon=False,
+                   loc='upper right', ncol=2, bbox_to_anchor=(1.0, 1.0))
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
         foto_path = os.path.join(os.path.dirname(__file__), f'minutaggi_{int(time.time())}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight', facecolor='#1e1e1e', edgecolor='none', pad_inches=0.15)
         return foto_path
