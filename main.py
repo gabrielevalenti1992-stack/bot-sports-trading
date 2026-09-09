@@ -8124,6 +8124,46 @@ def _anomalie_nuove(fixture_id, trovate, registra=True):
     return nuove
 
 
+def testo_copertura_statistiche_assente(home, away, minuto):
+    return (f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica "
+            f"statistiche per questa partita (al {minuto}') - resta seguita, "
+            f"ma non manda notifiche, gol compresi")
+
+
+def segnala_copertura_statistiche_assente(fixture_id, home, away, minuto, notifiche_attive=True):
+    """Manda l'avviso COPERTURA STATISTICHE dal ciclo principale, appena l'evidenza e' completa,
+    invece di aspettare la prossima passata della diagnostica.
+
+    La diagnostica campiona ogni INTERVALLO_DIAGNOSTICA_AUTOMATICA (30 minuti) e pretende
+    minuto >= MINUTO_MINIMO_VERDETTO_STATISTICHE NEL MOMENTO del campionamento. Ma dal 60' alla
+    fine passano circa 30 minuti reali: la finestra buona e' larga quanto l'intervallo, quindi una
+    partita puo' attraversarla per intero fra due passate e non essere segnalata mai. Successo in
+    produzione su 2 delle 3 partite scoperte in due giorni: ABB-San Antonio Bulo Bulo (08/09,
+    campionata al 12', 43', 57' e poi finita - con un gol al 61' zittito senza dirlo a nessuno) e
+    FK Vozdovac-TSC Backa Topola (07/09, campionata al 37' e 51'). L'unica segnalata, Drenica
+    Skenderaj-Prishtina, lo e' stata solo perche' una passata e' capitata al 75'.
+
+    L'evidenza (stats_vuote_consecutive >= SOGLIA_SENZA_STATISTICHE oltre il 60') il ciclo
+    principale ce l'ha ad ogni giro, quindi la segnalazione parte da li'. Il dedup resta quello
+    della diagnostica, cosi' i due percorsi non si sovrappongono: la categoria viene aggiunta a
+    quelle gia' note per la partita (senza sovrascriverle) e la passata successiva la vede come
+    gia' mandata. Con le notifiche spente non si marca nulla, come fa _anomalie_nuove(): l'avviso
+    resta in coda e parte al primo controllo dentro l'orario attivo."""
+    testo = testo_copertura_statistiche_assente(home, away, minuto)
+    log("    📉 " + testo)
+    if not notifiche_attive:
+        return
+    gia_note = ANOMALIE_DIAGNOSTICA_NOTIFICATE.get(fixture_id, set())
+    if "COPERTURA STATISTICHE" in gia_note:
+        return
+    ANOMALIE_DIAGNOSTICA_NOTIFICATE[fixture_id] = gia_note | {"COPERTURA STATISTICHE"}
+    salva_anomalie_diagnostica_notificate(ANOMALIE_DIAGNOSTICA_NOTIFICATE)
+    invia_messaggio_telegram(
+        "🔍 Diagnostica automatica - trovate anomalie nella pipeline dati:\n\n"
+        f"- {testo}"
+        "\n\nSpiegazione dei passaggi: /legenda")
+
+
 # Quante chiamate devono fallire in mezz'ora perche' sia un'anomalia e non sfortuna. Nei due giorni
 # analizzati i fallimenti sono stati dieci in tutto, mai piu' di due nella stessa mezz'ora tranne il
 # 25/08 fra le 23:42 e le 23:45: sotto i tre si resta nel rumore di fondo dell'API.
@@ -8320,10 +8360,7 @@ def esegui_diagnostica_automatica(partite_valide, notifiche_attive=True):
                 # Il "cosa vuol dire" sta nella legenda (/legenda), non qui: ripetuto per ogni
                 # partita segnalata erano 149 caratteri a testa, e in una diagnostica da 17 righe
                 # facevano da soli piu' di 2500 caratteri di testo identico.
-                testo_anomalia = (
-                    f"COPERTURA STATISTICHE - {home}-{away}: l'API risponde ma non pubblica "
-                    f"statistiche per questa partita (al {minuto_api}') - resta seguita, "
-                    f"ma non manda notifiche, gol compresi")
+                testo_anomalia = testo_copertura_statistiche_assente(home, away, minuto_api)
             else:
                 dettaglio = "chiamata alle statistiche fallita (rate-limit/timeout/rete)" if esito_stats == "errore" \
                     else "nessuna risposta utile alle statistiche"
@@ -10212,6 +10249,12 @@ def processa_partita(fixture, notifiche_attive=True):
                     else:
                         stato_partite[fixture_id]["verdetto_lega_registrato"] = True
                         registra_esito_statistiche(league_country, league_name, False)
+                        # Stessa evidenza, due destinatari: la lega finisce nello storico degli
+                        # esiti, la PARTITA va detta a chi legge la chat - e va detta adesso, non
+                        # alla prossima passata della diagnostica, che puo' non arrivare mai
+                        # prima del fischio finale (vedi segnala_copertura_statistiche_assente).
+                        segnala_copertura_statistiche_assente(
+                            fixture_id, home, away, minuto, notifiche_attive)
 
         if status_short in STATI_PARTITA_CONCLUSA:
             stato = stato_partite.get(fixture_id, {})
