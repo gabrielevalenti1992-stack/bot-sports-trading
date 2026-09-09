@@ -15,7 +15,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.ticker import MaxNLocator
 import numpy as np
 import os
 import threading
@@ -8800,73 +8799,89 @@ def trova_squadra_in_storico(nome_query, league_id=None):
 
 
 def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasferta):
-    """Grafico con 2 pannelli: distribuzione gol fatti/subiti per fascia di 15 minuti,
-    squadra di casa nelle sue partite in casa, squadra ospite nelle sue partite in trasferta.
+    """Grafico con 2 pannelli, uno per CHI SEGNA, con le due squadre incrociate.
 
-    Ogni barra porta il proprio numero sopra (skip sulle fasce a zero gol, gia' evidenti
-    dall'assenza della barra): senza, il valore andava stimato a occhio dall'altezza, e in
-    due pannelli affiancati con scale diverse la stima non e' affidabile."""
+    Il gol della casa in una fascia dipende da due cose: quanto la casa segna in casa e quanto
+    l'ospite subisce in trasferta. Prima stavano in pannelli diversi (uno per squadra, con dentro
+    sia i gol fatti che quelli subiti), quindi le due meta' dello stesso segnale andavano
+    ricomposte a mente. Ora il primo pannello le mette insieme, e il secondo fa lo specchio per il
+    gol dell'ospite.
+
+    Dentro ogni pannello le fasce stanno sull'asse orizzontale e ogni fascia e' una colonna sola:
+    verde che sale per i gol fatti, rosso che scende per quelli subiti, dalla stessa linea dello
+    zero. La scala sopra e sotto e' simmetrica anche quando lascia spazio vuoto da un lato: serve
+    perche' un "2" sotto sia lungo quanto un "2" sopra, altrimenti il confronto fra le due meta'
+    - che e' tutto il punto del grafico - sarebbe falsato.
+
+    Ogni barra porta il proprio numero (niente etichetta sulle fasce a zero gol, gia' evidenti
+    dall'assenza della barra): senza, il valore andava stimato a occhio dall'altezza."""
     fig = None  # chiusa in finally, vedi commento in genera_grafico_barre
     try:
-        fig, axes = plt.subplots(2, 1, figsize=(6.5, 6.5), dpi=150)
+        fig, axes = plt.subplots(2, 1, figsize=(6.5, 7.0), dpi=150)
         fig.patch.set_facecolor('#1e1e1e')
 
         color_fatti = '#22c55e'
         color_subiti = '#ef4444'
         color_text = '#e5e5e5'
         color_muted = '#888888'
-        color_grid = '#333333'
+        color_grid = '#2f2f2f'
+
+        def serie(dati, chiave):
+            return [dati[chiave].get(b, 0) for b in FASCE_MINUTO]
+
+        partite_casa = dati_casa.get("partite", 0)
+        partite_tras = dati_trasferta.get("partite", 0)
 
         pannelli = [
-            (axes[0], f"{nome_casa} (in casa)", dati_casa),
-            (axes[1], f"{nome_trasferta} (in trasferta)", dati_trasferta),
+            (axes[0], f"Gol della CASA - {nome_casa}",
+             f"{nome_casa} segna in casa ({partite_casa} partite)", serie(dati_casa, "fatti"),
+             f"{nome_trasferta} subisce in trasferta ({partite_tras} partite)",
+             serie(dati_trasferta, "subiti")),
+            (axes[1], f"Gol dell'OSPITE - {nome_trasferta}",
+             f"{nome_trasferta} segna in trasferta ({partite_tras} partite)",
+             serie(dati_trasferta, "fatti"),
+             f"{nome_casa} subisce in casa ({partite_casa} partite)", serie(dati_casa, "subiti")),
         ]
 
         x = np.arange(len(FASCE_MINUTO))
-        larghezza = 0.35
+        larghezza = 0.52
 
-        for ax, titolo, dati in pannelli:
+        for ax, titolo, etichetta_su, valori_su, etichetta_giu, valori_giu in pannelli:
             ax.set_facecolor('#1e1e1e')
-            fatti = [dati["fatti"].get(b, 0) for b in FASCE_MINUTO]
-            subiti = [dati["subiti"].get(b, 0) for b in FASCE_MINUTO]
+            ax.bar(x, valori_su, larghezza, color=color_fatti, edgecolor='#1e1e1e',
+                   linewidth=1.5, zorder=3, label=etichetta_su)
+            ax.bar(x, [-v for v in valori_giu], larghezza, color=color_subiti,
+                   edgecolor='#1e1e1e', linewidth=1.5, zorder=3, label=etichetta_giu)
 
-            barre_fatti = ax.bar(x - larghezza / 2, fatti, larghezza, color=color_fatti,
-                                  label="Gol fatti", edgecolor='#1e1e1e', linewidth=1)
-            barre_subiti = ax.bar(x + larghezza / 2, subiti, larghezza, color=color_subiti,
-                                   label="Gol subiti", edgecolor='#1e1e1e', linewidth=1)
+            for xi, v in zip(x, valori_su):
+                if v > 0:
+                    ax.text(xi, v + 0.13, str(v), ha='center', va='bottom', fontsize=10.5,
+                            color=color_text, fontweight='bold')
+            for xi, v in zip(x, valori_giu):
+                if v > 0:
+                    ax.text(xi, -v - 0.13, str(v), ha='center', va='top', fontsize=10.5,
+                            color=color_text, fontweight='bold')
 
-            for barre, valori in ((barre_fatti, fatti), (barre_subiti, subiti)):
-                for barra, v in zip(barre, valori):
-                    if v > 0:
-                        ax.text(barra.get_x() + barra.get_width() / 2, barra.get_height() + 0.08,
-                                str(v), ha='center', va='bottom', fontsize=9.5, color=color_text,
-                                fontweight='bold')
-
+            limite = max(valori_su + valori_giu + [0]) + 1.1
+            ax.axhline(0, color=color_muted, linewidth=1, zorder=4)
+            ax.set_ylim(-limite, limite)
+            ax.set_xlim(-0.7, len(FASCE_MINUTO) - 0.3)
             ax.set_xticks(x)
-            ax.set_xticklabels([f"{b}'" for b in FASCE_MINUTO], fontsize=8, color=color_text)
-            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-            ax.tick_params(axis='y', colors=color_muted, labelsize=8)
-            # Margine sopra la barra piu' alta: senza, l'etichetta numerica rischia di uscire
-            # dai limiti dell'asse e sparire (autoscale di matplotlib copre le barre, non i
-            # ax.text() aggiunti dopo).
-            ax.set_ylim(0, max(fatti + subiti + [0]) + 1)
-            ax.grid(axis='y', color=color_grid, linewidth=0.8, zorder=0)
+            ax.set_xticklabels([f"{b}'" for b in FASCE_MINUTO], fontsize=8.5, color=color_text)
+            ax.tick_params(axis='x', length=0, pad=6)
+            ax.set_yticks([])
+            ax.grid(axis='y', color=color_grid, linewidth=0.7, zorder=0)
             ax.set_axisbelow(True)
-            partite = dati.get("partite", 0)
-            ax.set_title(f"{titolo} - {partite} partite", fontsize=10, color=color_text, loc='left')
+            ax.set_title(titolo, fontsize=10.5, color=color_text, loc='left', pad=30)
             for spine in ax.spines.values():
                 spine.set_visible(False)
+            # Legenda per pannello, sopra le barre e fuori dall'area di disegno: le due voci
+            # cambiano da un pannello all'altro (sono squadre diverse), quindi non si puo'
+            # accorpare in una sola di figura.
+            ax.legend(fontsize=7.5, labelcolor=color_text, frameon=False, loc='upper left',
+                      bbox_to_anchor=(0, 1.15), ncol=2, handlelength=1.1, columnspacing=1.4)
 
-        # Legenda fuori dai pannelli, in alto, una sola per figura invece di una identica per
-        # pannello. Dentro il pannello stava in 'upper right', cioe' esattamente dove arrivano le
-        # barre piu' alte quando la fascia di punta e' una delle ultime: con lo storico di fine
-        # stagione (numeri a due cifre sul 76-90', la fascia in cui si segna di piu') le etichette
-        # finivano sotto il riquadro della legenda e non si leggevano.
-        handles, etichette = axes[0].get_legend_handles_labels()
-        fig.legend(handles, etichette, fontsize=8, labelcolor=color_text, frameon=False,
-                   loc='upper right', ncol=2, bbox_to_anchor=(1.0, 1.0))
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.tight_layout()
         foto_path = os.path.join(os.path.dirname(__file__), f'minutaggi_{int(time.time())}.png')
         plt.savefig(foto_path, format='png', bbox_inches='tight', facecolor='#1e1e1e', edgecolor='none', pad_inches=0.15)
         return foto_path
@@ -8916,7 +8931,8 @@ def cmd_analisi(chat_id, testo_richiesta):
     messaggio = (
         f"{squadra_casa['nome']} vs {squadra_trasferta['nome']}\n"
         f"Distribuzione storica gol per fascia di minuto (stagione corrente)\n"
-        f"Verde = gol fatti, Rosso = gol subiti"
+        f"Ogni pannello e' una squadra che segna, con l'avversario che subisce sotto: "
+        f"piu' sono grosse entrambe le meta', piu' quella fascia e' da gol."
     )
 
     try:
