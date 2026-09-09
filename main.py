@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import os
 import threading
@@ -8800,7 +8801,11 @@ def trova_squadra_in_storico(nome_query, league_id=None):
 
 def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasferta):
     """Grafico con 2 pannelli: distribuzione gol fatti/subiti per fascia di 15 minuti,
-    squadra di casa nelle sue partite in casa, squadra ospite nelle sue partite in trasferta."""
+    squadra di casa nelle sue partite in casa, squadra ospite nelle sue partite in trasferta.
+
+    Ogni barra porta il proprio numero sopra (skip sulle fasce a zero gol, gia' evidenti
+    dall'assenza della barra): senza, il valore andava stimato a occhio dall'altezza, e in
+    due pannelli affiancati con scale diverse la stima non e' affidabile."""
     fig = None  # chiusa in finally, vedi commento in genera_grafico_barre
     try:
         fig, axes = plt.subplots(2, 1, figsize=(6.5, 6.5), dpi=150)
@@ -8810,6 +8815,7 @@ def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasfert
         color_subiti = '#ef4444'
         color_text = '#e5e5e5'
         color_muted = '#888888'
+        color_grid = '#333333'
 
         pannelli = [
             (axes[0], f"{nome_casa} (in casa)", dati_casa),
@@ -8824,12 +8830,28 @@ def genera_grafico_minutaggi(nome_casa, dati_casa, nome_trasferta, dati_trasfert
             fatti = [dati["fatti"].get(b, 0) for b in FASCE_MINUTO]
             subiti = [dati["subiti"].get(b, 0) for b in FASCE_MINUTO]
 
-            ax.bar(x - larghezza / 2, fatti, larghezza, color=color_fatti, label="Gol fatti")
-            ax.bar(x + larghezza / 2, subiti, larghezza, color=color_subiti, label="Gol subiti")
+            barre_fatti = ax.bar(x - larghezza / 2, fatti, larghezza, color=color_fatti,
+                                  label="Gol fatti", edgecolor='#1e1e1e', linewidth=1)
+            barre_subiti = ax.bar(x + larghezza / 2, subiti, larghezza, color=color_subiti,
+                                   label="Gol subiti", edgecolor='#1e1e1e', linewidth=1)
+
+            for barre, valori in ((barre_fatti, fatti), (barre_subiti, subiti)):
+                for barra, v in zip(barre, valori):
+                    if v > 0:
+                        ax.text(barra.get_x() + barra.get_width() / 2, barra.get_height() + 0.08,
+                                str(v), ha='center', va='bottom', fontsize=9.5, color=color_text,
+                                fontweight='bold')
 
             ax.set_xticks(x)
             ax.set_xticklabels([f"{b}'" for b in FASCE_MINUTO], fontsize=8, color=color_text)
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax.tick_params(axis='y', colors=color_muted, labelsize=8)
+            # Margine sopra la barra piu' alta: senza, l'etichetta numerica rischia di uscire
+            # dai limiti dell'asse e sparire (autoscale di matplotlib copre le barre, non i
+            # ax.text() aggiunti dopo).
+            ax.set_ylim(0, max(fatti + subiti + [0]) + 1)
+            ax.grid(axis='y', color=color_grid, linewidth=0.8, zorder=0)
+            ax.set_axisbelow(True)
             partite = dati.get("partite", 0)
             ax.set_title(f"{titolo} - {partite} partite", fontsize=10, color=color_text, loc='left')
             for spine in ax.spines.values():
