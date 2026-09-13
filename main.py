@@ -750,9 +750,40 @@ ANOMALIE_DIAGNOSTICA_NOTIFICATE = carica_anomalie_diagnostica_notificate()
 # ogni riavvio del bot altrimenti riproverebbe il backfill su tutte, consumando in fretta la quota
 # giornaliera di API-Football. Va acceso esplicitamente in config.json quando si è pronti, oppure
 # si usa /aggiornastorico a mano quando si decide di spendere quota.
-INTERVALLO_AGGIORNAMENTO_STORICO = 604800  # 7 giorni
+# Quando il backfill parte da solo: due volte a settimana, a ore in cui non si gioca quasi mai.
+# (giorno della settimana con lunedi'=0, ora, minuto), sempre in ora italiana come il piano
+# giornata. Prima era un intervallo di 7 giorni per lega, che faceva partire l'aggiornamento a
+# ore qualsiasi - anche in mezzo a un sabato pomeriggio, cioe' esattamente quando la quota API
+# serve tutta alle partite in corso.
+ORARI_AGGIORNAMENTO_STORICO = ((0, 23, 15), (4, 1, 0))  # lunedi' 23:15, venerdi' 01:00
+
+# Quanto si accetta di recuperare uno slot mancato: se il bot era spento o in deploy alle 23:15,
+# alle 23:40 lo esegue lo stesso. Oltre questa finestra si lascia perdere e si aspetta il
+# prossimo: un backfill che parte a mezzogiorno di martedi' non e' quello che si era chiesto.
+RECUPERO_MASSIMO_STORICO_ORE = 6
+
 STORICO_MAX_FIXTURES_PER_RUN = 30
 STORICO_AGGIORNAMENTO_AUTOMATICO = False
+
+# Quante chiamate API al massimo puo' spendere UNA esecuzione di /aggiornastorico.
+#
+# Prima il limite era di 30 partite PER LEGA e la funzione faceva una passata sola: con 111 leghe
+# risolte, una esecuzione processava circa 1100 partite e si fermava li', qualunque fosse
+# l'arretrato. Nei log del 10/09 l'arretrato era 5140 partite, di cui 4099 ancora da fare DOPO
+# quella esecuzione: per finire servivano una quindicina di lanci a mano, e ogni lancio
+# ripagava 111 chiamate di sola lista partite. E' il motivo per cui a meta' settembre c'erano
+# squadre con due sole partite in archivio alla quarta giornata.
+#
+# Ora il tetto e' sulle CHIAMATE, non sulle partite per lega, e dentro una esecuzione si fanno
+# piu' giri finche' il budget regge: la lista delle partite terminate si paga una volta sola per
+# lega, invece che una volta per giro.
+BUDGET_CHIAMATE_STORICO = 1200
+
+# Sotto questa quota residua il backfill si ferma e rimanda il resto: lo storico e' comodo, la
+# raccolta live e' il mestiere del bot. La quota si e' gia' esaurita davvero due sabati di fila
+# (vedi RISERVA_QUOTA_GIORNALIERA), e uno storico ricostruito a scapito delle partite in corso
+# sarebbe un pessimo affare.
+QUOTA_MINIMA_STORICO = 2000
 FASCE_MINUTO = ["0-15", "16-30", "31-45", "46-60", "61-75", "76-90"]
 
 # Piano giornata: una volta al giorno (ora locale Italia) si scarica con UNA chiamata /fixtures?date=
@@ -1049,7 +1080,6 @@ try:
     INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
     DIAGNOSTICA_AUTOMATICA_ATTIVA = config.get("diagnostica_automatica_attiva", DIAGNOSTICA_AUTOMATICA_ATTIVA)
     INTERVALLO_DIAGNOSTICA_AUTOMATICA = config.get("intervallo_diagnostica_automatica", INTERVALLO_DIAGNOSTICA_AUTOMATICA)
-    INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
     STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
     STORICO_AGGIORNAMENTO_AUTOMATICO = config.get("storico_aggiornamento_automatico", STORICO_AGGIORNAMENTO_AUTOMATICO)
     ORA_GENERAZIONE_PIANO_GIORNATA = config.get("ora_generazione_piano_giornata", ORA_GENERAZIONE_PIANO_GIORNATA)
@@ -2338,6 +2368,28 @@ def ripulisci_storico_minutaggi(storico):
     return femminili, giovanili, leghe_svuotate
 
 
+STATO_STORICO_AUTOMATICO_FILE = data_path("stato_storico_automatico.json")
+
+
+def carica_stato_storico_automatico():
+    if os.path.exists(STATO_STORICO_AUTOMATICO_FILE):
+        try:
+            with open(STATO_STORICO_AUTOMATICO_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Errore lettura {STATO_STORICO_AUTOMATICO_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_stato_storico_automatico(dati):
+    salva_json_atomico(STATO_STORICO_AUTOMATICO_FILE, dati)
+
+
+# Quale slot settimanale e' gia' stato eseguito. Sta su disco perche' il bot si riavvia (deploy,
+# crash, sospensione): senza, ogni riavvio nella finestra di recupero rilancerebbe lo stesso
+# backfill da capo.
+STATO_STORICO_AUTOMATICO = carica_stato_storico_automatico()
+
 STORICO_MINUTAGGI = carica_storico_minutaggi()
 # La PULIZIA vera e propria (ripulisci_storico_minutaggi) NON gira qui: chiama squadra_femminile()
 # e squadra_giovanile(), che dipendono entrambe da _senza_accenti(), definita solo piu' avanti nel
@@ -2892,7 +2944,12 @@ def poll_callbacks():
                         esegui_comando_sicuro(chat_id, cmd_analisi, " ".join(args))
 
                     elif cmd == "/aggiornastorico":
-                        esegui_comando_sicuro(chat_id, cmd_aggiornastorico)
+                        # Argomento facoltativo: quante chiamate API concedere a questa
+                        # esecuzione. Serve per le notti in cui si vuole chiudere l'arretrato in
+                        # un colpo solo invece di rilanciare quattro volte; senza argomento resta
+                        # il budget prudente di default.
+                        esegui_comando_sicuro(chat_id, cmd_aggiornastorico,
+                                              " ".join(args) if args else None)
 
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
@@ -4997,7 +5054,9 @@ def cmd_help(chat_id):
         "/momentum <squadra> - Grafico dell'andamento pressione durante la partita (solo partite monitorate)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
-        "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
+        "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi "
+        "(si aggiorna da solo il lunedì alle 23:15 e il venerdì all'1:00; opzionale: "
+        "/aggiornastorico <chiamate> per concederne di più in una volta)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -8903,7 +8962,7 @@ def get_fixtures_terminati(league_id, season):
     return data.get("response", [])
 
 
-def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
+def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None, fixtures=None):
     """Scarica i gol delle partite terminate di una lega/stagione non ancora processate e
     aggiorna lo storico locale (gol fatti/subiti per fascia di minuto, separati casa/trasferta,
     per squadra). Elabora al massimo `max_fixtures` nuove partite per chiamata per non consumare
@@ -8925,7 +8984,12 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
                 f"{len(lega_dati.get('fixture_ids_processati', []))} partite da riscaricare")
         lega_dati = {"stagione": season, "fixture_ids_processati": [], "squadre": {}, "ultimo_aggiornamento": 0}
 
-    fixtures = get_fixtures_terminati(league_id, season)
+    # fixtures gia' pronte: le partite TERMINATE di una stagione non cambiano piu', quindi chi
+    # fa piu' giri sulla stessa lega dentro la stessa esecuzione (il backfill) puo' scaricare
+    # l'elenco una volta e ripassarlo, invece di ricomprarlo ad ogni giro. Chiamata da sola, la
+    # funzione si comporta esattamente come prima.
+    if fixtures is None:
+        fixtures = get_fixtures_terminati(league_id, season)
     if not fixtures:
         lega_dati["ultimo_aggiornamento"] = time.time()
         STORICO_MINUTAGGI[league_key] = lega_dati
@@ -9017,54 +9081,173 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
     return len(da_processare)
 
 
-def aggiorna_storico_minutaggi_tutte_leghe():
-    """Forza l'aggiornamento di tutte le leghe whitelist adesso (usato da /aggiornastorico)."""
+def partite_arretrate_lega(league_id, fixtures):
+    """Quante partite di questa lega non sono ancora nello storico."""
+    processati = set(STORICO_MINUTAGGI.get(str(league_id), {}).get("fixture_ids_processati", []))
+    return len([f for f in fixtures if f["fixture"]["id"] not in processati])
+
+
+def aggiorna_storico_minutaggi_tutte_leghe(budget=None, quota_minima=None):
+    """Ricostruisce lo storico minutaggi finche' la coda si svuota o finisce il budget.
+
+    Prima faceva UNA passata da 30 partite per lega e si fermava: con l'arretrato di settembre
+    (4099 partite dopo l'esecuzione del 10/09) servivano quindici lanci a mano, e ogni lancio
+    ripagava la lista partite di tutte e 111 le leghe. Da qui viene il problema concreto: squadre
+    con due sole partite in archivio alla quarta giornata, e /analisi che disegna un grafico su
+    quasi niente.
+
+    Ora: la lista partite si paga una volta per lega, poi si fanno piu' giri finche' il budget di
+    chiamate regge. Le leghe si servono partendo da quelle con MENO arretrato - a parita' di
+    quota si portano a posto piu' campionati interi, che e' esattamente cio' che serve quando il
+    problema e' "questa squadra ha due partite in archivio".
+
+    Ritorna un riepilogo invece di un totale secco: quante processate, quante ne restano e
+    PERCHE' si e' fermata, perche' "1041 partite processate" non diceva se il lavoro era finito."""
+    budget = BUDGET_CHIAMATE_STORICO if budget is None else budget
+    quota_minima = QUOTA_MINIMA_STORICO if quota_minima is None else quota_minima
+    esito = {"processate": 0, "residuo": 0, "leghe": 0, "leghe_complete": 0,
+             "chiamate": 0, "motivo": "coda vuota"}
+
     mappa = risolvi_leghe_whitelist()
     if not mappa:
         log("Storico minutaggi: nessuna lega whitelist risolta, skip aggiornamento")
-        return 0
-    totale = 0
+        esito["motivo"] = "nessuna lega"
+        return esito
+
+    residua = quota_residua_attendibile()
+    if residua is not None and residua < quota_minima:
+        log(f"Storico minutaggi: quota residua {residua} sotto la soglia {quota_minima}, "
+            f"backfill rimandato")
+        esito["motivo"] = "quota"
+        return esito
+
+    # Fase 1: l'elenco delle partite terminate, una chiamata per lega. E' il costo fisso di ogni
+    # esecuzione, e si paga una volta sola anche se poi si fanno dieci giri.
+    elenchi = {}
     for league_id, (nome, paese, season) in mappa.items():
         if not season:
             continue
-        totale += aggiorna_storico_minutaggi_lega(league_id, season)
-        time.sleep(1)
-    log(f"Storico minutaggi: aggiornamento completato, {totale} nuove partite processate in totale")
-    return totale
+        fixtures = get_fixtures_terminati(league_id, season)
+        esito["chiamate"] += 1
+        if fixtures:
+            elenchi[league_id] = (season, fixtures)
+    esito["leghe"] = len(elenchi)
+
+    # Fase 2: i giri veri. Prima le leghe con meno arretrato, cosi' il budget porta a termine
+    # piu' campionati invece di scavare in fondo al piu' arretrato.
+    ordine = sorted(elenchi, key=lambda lid: partite_arretrate_lega(lid, elenchi[lid][1]))
+    arretrato_iniziale = sum(partite_arretrate_lega(lid, f) for lid, (_, f) in elenchi.items())
+    log(f"Storico minutaggi: {arretrato_iniziale} partite arretrate su {len(elenchi)} leghe, "
+        f"budget {budget} chiamate")
+
+    while esito["motivo"] == "coda vuota":
+        arretrato_a_inizio_giro = sum(partite_arretrate_lega(lid, f)
+                                      for lid, (_, f) in elenchi.items())
+        for league_id in ordine:
+            season, fixtures = elenchi[league_id]
+            if not partite_arretrate_lega(league_id, fixtures):
+                continue
+            if esito["chiamate"] >= budget:
+                esito["motivo"] = "budget"
+                break
+            residua = quota_residua_attendibile()
+            if residua is not None and residua < quota_minima:
+                log(f"Storico minutaggi: quota residua {residua} sotto la soglia {quota_minima}, "
+                    f"mi fermo qui")
+                esito["motivo"] = "quota"
+                break
+            quante = min(STORICO_MAX_FIXTURES_PER_RUN, budget - esito["chiamate"])
+            fatte = aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=quante,
+                                                    fixtures=fixtures)
+            esito["processate"] += fatte
+            # Ogni partita tentata costa una chiamata eventi, anche quando la risposta non arriva.
+            # Le femminili scartate prima della chiamata sono contate qui per eccesso: meglio
+            # fermarsi un po' prima del budget che scoprire di averlo sforato.
+            esito["chiamate"] += fatte
+            time.sleep(1)
+        arretrato_a_fine_giro = sum(partite_arretrate_lega(lid, f)
+                                    for lid, (_, f) in elenchi.items())
+        if arretrato_a_fine_giro >= arretrato_a_inizio_giro:
+            # Nessun progresso in un giro intero: o la coda e' vuota, o le partite che restano non
+            # si riescono a processare (eventi non recuperati, rate-limit). Nel secondo caso un
+            # altro giro identico riproverebbe le stesse partite e brucerebbe il budget contro un
+            # muro: meglio fermarsi e dirlo.
+            break
+
+    esito["residuo"] = sum(partite_arretrate_lega(lid, f) for lid, (_, f) in elenchi.items())
+    esito["leghe_complete"] = sum(1 for lid, (_, f) in elenchi.items()
+                                  if not partite_arretrate_lega(lid, f))
+    log(f"Storico minutaggi: aggiornamento completato, {esito['processate']} nuove partite "
+        f"processate, {esito['residuo']} ancora da fare, {esito['leghe_complete']}/"
+        f"{esito['leghe']} leghe complete (stop: {esito['motivo']})")
+    return esito
+
+
+def slot_storico_da_eseguire(adesso=None):
+    """Lo slot settimanale di aggiornamento da eseguire adesso, o None.
+
+    Ritorna una stringa tipo "2026-09-14 23:15": e' la data e ora dello slot, non di adesso, cosi'
+    due esecuzioni nella stessa finestra di recupero riconoscono lo stesso slot e la seconda non
+    riparte. Uno slot passato da piu' di RECUPERO_MASSIMO_STORICO_ORE non si recupera piu'."""
+    adesso = adesso or datetime.datetime.now(ZoneInfo("Europe/Rome"))
+    migliore = None
+    for giorno, ora, minuto in ORARI_AGGIORNAMENTO_STORICO:
+        indietro = (adesso.weekday() - giorno) % 7
+        occorrenza = (adesso - datetime.timedelta(days=indietro)).replace(
+            hour=ora, minute=minuto, second=0, microsecond=0)
+        if occorrenza > adesso:
+            # Oggi e' il giorno giusto ma l'ora non e' ancora arrivata: vale quello della
+            # settimana scorsa, che sara' fuori finestra di recupero e quindi scartato.
+            occorrenza -= datetime.timedelta(days=7)
+        if (adesso - occorrenza).total_seconds() > RECUPERO_MASSIMO_STORICO_ORE * 3600:
+            continue
+        if migliore is None or occorrenza > migliore:
+            migliore = occorrenza
+    return migliore.strftime("%Y-%m-%d %H:%M") if migliore else None
+
+
+# Un backfill alla volta: gira in un thread suo e puo' durare piu' di un ciclo del loop.
+_BACKFILL_STORICO_IN_CORSO = threading.Lock()
+
+
+def _esegui_backfill_automatico(slot):
+    """Il backfill vero, nel suo thread. Avvisa in chat solo se c'e' qualcosa da dire."""
+    try:
+        log(f"Storico minutaggi: aggiornamento automatico dello slot {slot}")
+        esito = aggiorna_storico_minutaggi_tutte_leghe()
+        if esito["processate"] or esito["residuo"]:
+            invia_messaggio_telegram("Aggiornamento automatico dello storico minutaggi.\n\n"
+                                     + testo_esito_aggiornastorico(esito))
+    finally:
+        _BACKFILL_STORICO_IN_CORSO.release()
 
 
 def aggiorna_storico_minutaggi_automatico():
-    """Chiamata ad ogni ciclo del loop principale, ma fa qualcosa solo se
-    STORICO_AGGIORNAMENTO_AUTOMATICO è attivo (spento di default, vedi config.json). Per ogni lega
-    whitelist, se sono passati almeno INTERVALLO_AGGIORNAMENTO_STORICO secondi dall'ultimo
-    aggiornamento (dato letto dallo storico su disco, quindi resta valido anche tra un riavvio e
-    l'altro del bot), scarica le partite nuove. STORICO_MAX_FIXTURES_PER_RUN è qui un limite
-    GLOBALE per l'intera esecuzione (su tutte le leghe insieme, non per singola lega): appena
-    raggiunto si interrompe subito, anche prima di controllare le leghe restanti, per evitare che
-    un riavvio con decine di leghe mai aggiornate consumi la quota API giornaliera in un colpo
-    solo. Le leghe non ancora controllate in questo giro verranno riprese al prossimo ciclo."""
+    """Fa partire il backfill agli orari di ORARI_AGGIORNAMENTO_STORICO, una volta per slot.
+
+    Chiamata ad ogni ciclo del loop principale, ma quasi sempre non fa niente: guarda l'orologio
+    e riparte solo quando si entra in uno slot mai eseguito.
+
+    Due scelte che contano:
+
+    - gira in un THREAD a parte. Il backfill puo' durare un'ora; eseguirlo qui bloccherebbe la
+      raccolta live per tutto quel tempo. Prima non era un problema perche' ogni esecuzione era
+      tetto a 30 partite, adesso lo sarebbe.
+    - lo slot viene segnato come fatto PRIMA di cominciare. Se il backfill si interrompe (quota
+      finita, errore), il ciclo successivo non lo rilancia da capo: quello che resta lo prende il
+      prossimo slot, oppure /aggiornastorico a mano. Rilanciare in loop un lavoro da mille
+      chiamate al primo intoppo sarebbe il modo piu' rapido di bruciare la quota di una giornata."""
     if not STORICO_AGGIORNAMENTO_AUTOMATICO:
         return
-    mappa = risolvi_leghe_whitelist()
-    if not mappa:
+    slot = slot_storico_da_eseguire()
+    if not slot or STATO_STORICO_AUTOMATICO.get("ultimo_slot") == slot:
         return
-    now = time.time()
-    processate_in_questo_giro = 0
-    for league_id, (nome, paese, season) in mappa.items():
-        if processate_in_questo_giro >= STORICO_MAX_FIXTURES_PER_RUN:
-            log(f"Storico minutaggi: raggiunto il limite di {STORICO_MAX_FIXTURES_PER_RUN} partite per questo ciclo, riprendo al prossimo")
-            break
-        if not season:
-            continue
-        lega_dati = STORICO_MINUTAGGI.get(str(league_id), {})
-        ultimo = lega_dati.get("ultimo_aggiornamento", 0)
-        if now - ultimo < INTERVALLO_AGGIORNAMENTO_STORICO:
-            continue
-        log(f"Storico minutaggi: aggiornamento automatico lega {nome} - {paese} ({league_id})")
-        processate_in_questo_giro += aggiorna_storico_minutaggi_lega(
-            league_id, season, max_fixtures=STORICO_MAX_FIXTURES_PER_RUN - processate_in_questo_giro
-        )
-        time.sleep(1)
+    if not _BACKFILL_STORICO_IN_CORSO.acquire(blocking=False):
+        log("Storico minutaggi: aggiornamento automatico gia' in corso, salto questo ciclo")
+        return
+    STATO_STORICO_AUTOMATICO["ultimo_slot"] = slot
+    salva_stato_storico_automatico(STATO_STORICO_AUTOMATICO)
+    threading.Thread(target=_esegui_backfill_automatico, args=(slot,), daemon=True).start()
 
 
 def squadra_in_storico_per_id(league_id, team_id):
@@ -9287,14 +9470,69 @@ def cmd_analisi(chat_id, testo_richiesta):
         log(f"Errore invio /analisi: {e}")
 
 
-def cmd_aggiornastorico(chat_id):
+def testo_esito_aggiornastorico(esito):
+    """Il riepilogo di fine backfill: quanto e' stato fatto, quanto manca e cosa fare adesso.
+
+    Il messaggio di prima diceva solo "N nuove partite processate", e non distingueva il caso
+    "finito" da "mi sono fermato a meta'": con l'arretrato di settembre era sempre il secondo, e
+    non si capiva che bisognava rilanciare."""
+    if esito["motivo"] == "nessuna lega":
+        return ("Nessun campionato risolto: senza l'elenco leghe non so quali partite scaricare. "
+                "Riprova fra qualche minuto.")
+    if esito["motivo"] == "quota" and not esito["processate"]:
+        return (f"Non ho aggiornato niente: la quota API rimasta oggi e' sotto la riserva di "
+                f"{QUOTA_MINIMA_STORICO} richieste che tengo per le partite live. "
+                f"Riprova domani, o di notte quando non si gioca.")
+
+    righe = [f"Storico minutaggi: {esito['processate']} nuove partite scaricate.",
+             f"Campionati completi: {esito['leghe_complete']} su {esito['leghe']}."]
+    if esito["residuo"]:
+        lanci = -(-esito["residuo"] // max(1, BUDGET_CHIAMATE_STORICO - esito["leghe"]))
+        perche = {"budget": "ho speso il budget di chiamate di questa esecuzione",
+                  "quota": "la quota API rimasta oggi si stava avvicinando alla riserva",
+                  "coda vuota": "alcune partite non hanno restituito gli eventi"}
+        righe.append("")
+        righe.append(f"Restano {esito['residuo']} partite da scaricare: "
+                     f"{perche.get(esito['motivo'], esito['motivo'])}.")
+        righe.append(f"Rilancia /aggiornastorico per continuare "
+                     f"({lanci} {'volta' if lanci == 1 else 'volte'} circa, meglio quando non "
+                     f"si gioca).")
+    else:
+        righe.append("")
+        righe.append("Non resta niente da scaricare: l'archivio e' completo.")
+    return "\n".join(righe)
+
+
+def budget_richiesto(argomento):
+    """Il budget chiesto a mano, se e' un numero sensato. None per il default.
+
+    Arriva da un messaggio Telegram: "/aggiornastorico tutto" o "/aggiornastorico -5" non devono
+    diventare un budget assurdo, diventano il default."""
+    if not argomento:
+        return None
+    try:
+        valore = int(str(argomento).strip())
+    except (TypeError, ValueError):
+        return None
+    if valore <= 0:
+        return None
+    # Un tetto comunque: sopra le 6000 chiamate si mangerebbe la giornata intera anche avendo
+    # quota. La riserva QUOTA_MINIMA_STORICO resta comunque il freno vero.
+    return min(valore, 6000)
+
+
+def cmd_aggiornastorico(chat_id, argomento=None):
+    budget = budget_richiesto(argomento)
+    avviso = "Aggiornamento storico minutaggi in corso, può richiedere qualche minuto..."
+    if budget:
+        avviso += f"\nBudget di questa esecuzione: {budget} chiamate API."
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "Aggiornamento storico minutaggi in corso, può richiedere qualche minuto..."}, timeout=5)
-    totale = aggiorna_storico_minutaggi_tutte_leghe()
+        json={"chat_id": chat_id, "text": avviso}, timeout=5)
+    esito = aggiorna_storico_minutaggi_tutte_leghe(budget=budget)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Aggiornamento completato: {totale} nuove partite processate. Se erano tante, alcune potrebbero essere rimandate al prossimo aggiornamento per non sforare i limiti API."}, timeout=5)
+        json={"chat_id": chat_id, "text": testo_esito_aggiornastorico(esito)}, timeout=5)
 
 
 # =============================================================================
