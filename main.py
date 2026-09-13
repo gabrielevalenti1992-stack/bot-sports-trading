@@ -5749,9 +5749,13 @@ def cmd_dominio(chat_id):
     coda = coda_senza_dominio(senza_dominio)
     if coda:
         testo += ["", coda]
+    # Nessun parse_mode, come ogni altro invio del bot: il Markdown di Telegram si rompe sui nomi
+    # di squadra con "_" o "*" e fa fallire il messaggio con un 400 (vedi invia_messaggio_telegram
+    # e test_telegram_markdown_rotto.py). Gli asterischi restano nel testo come li vede l'utente,
+    # esattamente come nel cruscotto completo.
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "\n".join(testo), "parse_mode": "Markdown",
+        json={"chat_id": chat_id, "text": "\n".join(testo),
               "reply_markup": json.dumps(tastiera)}, timeout=5)
 
 
