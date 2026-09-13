@@ -2120,6 +2120,15 @@ print(f"Clienti registrati: {len(CLIENTI)} | codici d'invito emessi: {len(CODICI
 # Ampliarlo in futuro e' aggiungere una voce qui, non riscrivere il gate.
 COMANDI_CLIENTI = {"/help", "/dominio"}
 
+# Il gemello di COMANDI_CLIENTI per i BOTTONI: i prefissi di callback_data che una chat cliente
+# puo' premere. Serve perche' un comando concesso ai clienti che risponde con un menu diventa
+# inutilizzabile se poi i suoi bottoni vengono rifiutati: il menu arriva, il click non fa niente,
+# e da fuori sembra il bot rotto. E' successo davvero con /dominio, che risponde a bottoni dal
+# commit del menu mentre la guardia sui callback restava owner-only.
+# Il criterio per stare qui e' lo stesso di COMANDI_CLIENTI: sola lettura, zero chiamate API,
+# nessuna modifica di stato. "dom:" legge stato_partite gia' in memoria e non tocca nulla.
+CALLBACK_CLIENTI = ("dom:",)
+
 
 def ruolo_chat(chat_id):
     """Il ruolo di questa chat: "owner", "cliente" o None se sconosciuta - per decidere quali
@@ -2618,13 +2627,18 @@ def poll_callbacks():
                     chat_id = cq["message"]["chat"]["id"]
                     msg_id = cq["message"]["message_id"]
 
-                    # Nessuno dei bottoni sotto e' oggi raggiungibile da una chat non-owner: sono
-                    # tutti attaccati a messaggi che il ciclo automatico manda solo a
-                    # TELEGRAM_CHAT_ID/TELEGRAM_CHAT_ID_PREFERITI, oppure al menu di /setup, che
-                    # un cliente non puo' aprire (non e' in COMANDI_CLIENTI). Il controllo qui non
-                    # cambia niente OGGI: e' una rete per il giorno in cui COMANDI_CLIENTI si
-                    # allarghera' e qualcuno costruira' un bottone senza ripensare a questo file.
-                    if ruolo_chat(chat_id) != "owner":
+                    # I bottoni sono owner-only per default, con l'eccezione esplicita di
+                    # CALLBACK_CLIENTI. Il default fail-closed vale ancora: un bottone nuovo
+                    # aggiunto domani e' riservato all'owner finche' qualcuno non decide il
+                    # contrario, non per dimenticanza.
+                    #
+                    # L'eccezione esiste perche' il caso previsto qui si e' avverato: /dominio e'
+                    # in COMANDI_CLIENTI e ora risponde con un menu a bottoni, quindi un cliente
+                    # riceveva il menu e poi si vedeva rifiutare ogni click - il comando gli
+                    # arrivava ma non funzionava. Un bottone attaccato a un comando concesso ai
+                    # clienti deve essere premibile da loro, altrimenti il comando e' concesso
+                    # solo a meta'.
+                    if ruolo_chat(chat_id) != "owner" and not data.startswith(CALLBACK_CLIENTI):
                         log(f"Callback '{data}' ignorato da chat non autorizzata {chat_id}")
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
