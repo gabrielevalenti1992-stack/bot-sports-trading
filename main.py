@@ -2731,6 +2731,13 @@ def poll_callbacks():
                         esegui_comando_sicuro(chat_id, cmd_status_da_bottone,
                                               int(data.split(":", 1)[1]))
 
+                    elif data.startswith("dom:"):
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"]}, timeout=5)
+                        esegui_comando_sicuro(chat_id, cmd_dominio_categoria,
+                                              data.split(":", 1)[1])
+
                     elif data.startswith("cmd:"):
                         azione = data.split(":", 1)[1]
                         requests.post(
@@ -4951,8 +4958,8 @@ def cmd_help(chat_id):
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": chat_id,
                   "text": "Comandi disponibili:\n"
-                          "/dominio - Le partite live ordinate per quanto il risultato tradisce "
-                          "il campo (chi sta dominando e non lo vede ancora nel punteggio)\n"
+                          "/dominio - Menu delle tre situazioni di dominio: chi domina e perde, chi domina "
+                          "e non segna, chi domina ed è avanti\n"
                           "/help - Mostra questo messaggio"},
             timeout=5)
         return
@@ -4984,8 +4991,8 @@ def cmd_help(chat_id):
         "eventuali anomalie\n"
         "/legenda - Cosa vogliono dire le voci della diagnostica (non è più in coda ad ogni "
         "messaggio)\n"
-        "/dominio - Cruscotto immediato: chi sta facendo la partita e dove il risultato non lo "
-        "rispecchia ancora (in cima le partite che dominano e perdono). Nessuna chiamata API\n"
+        "/dominio - Menu delle tre situazioni di dominio, da scegliere con un bottone: domina "
+        "e perde, domina e non segna, domina ed è avanti (o tutte insieme). Nessuna chiamata API\n"
         "/classificadominanza - Classifica di sempre: le squadre che segnano più spesso subito "
         "dopo aver dominato tiri totali, corner e tiri in area tutti e tre insieme\n"
         "/coperturaleghe - Quali campionati pubblicano statistiche reali e quante giornate senza "
@@ -5651,13 +5658,15 @@ def cmd_classificadominanza(chat_id):
     invia_messaggio_telegram(testo_classifica_dominanza(), chat_id=chat_id)
 
 
-def cmd_dominio(chat_id):
-    """Cruscotto: tutte le partite seguite, ordinate per quanto il risultato tradisce il campo.
+def gruppi_dominio():
+    """Le partite seguite divise nelle tre situazioni di dominio, già formattate e ordinate per
+    quota decrescente, più il conteggio di quelle senza un dominio netto.
 
     Zero chiamate API - legge solo stato_partite, già aggiornato dal ciclo principale (a differenza
-    di /intensita, che ne fa una per partita e va aspettata). Serve a rispondere in un colpo
-    d'occhio a "dove sta succedendo qualcosa che il punteggio non dice ancora"."""
-    righe_sotto, righe_bloccate, righe_avanti, senza_dominio = [], [], [], 0
+    di /intensita, che ne fa una per partita e va aspettata). Costruire il menu costa quindi quanto
+    costava il cruscotto intero: si può ricalcolare ad ogni click senza pensarci."""
+    gruppi = {chiave: [] for chiave in ORDINE_DOMINIO}
+    senza_dominio = 0
     for fid, stato in list(stato_partite.items()):
         history = stato.get("history", [])
         if not history:
@@ -5684,32 +5693,110 @@ def cmd_dominio(chat_id):
             f"{barra_dominio(dominio['quota'])} {dominio['quota']}% {chi} · "
             f"{tiri[0]}-{tiri[1]} tiri, {porta[0]}-{porta[1]} in porta"
         )
-        destinazione = {0: righe_sotto, 1: righe_bloccate, 2: righe_avanti}[dominio["priorita"]]
-        destinazione.append((dominio["quota"], blocco))
+        gruppi[CHIAVE_DOMINIO_PER_PRIORITA[dominio["priorita"]]].append((dominio["quota"], blocco))
 
-    if not (righe_sotto or righe_bloccate or righe_avanti):
-        invia_messaggio_telegram(
-            "Nessuna partita con un dominio netto in questo momento.\n\n"
+    for chiave, voci in gruppi.items():
+        gruppi[chiave] = [blocco for _, blocco in sorted(voci, key=lambda v: -v[0])]
+    return gruppi, senza_dominio
+
+
+def coda_senza_dominio(senza_dominio):
+    if not senza_dominio:
+        return None
+    if senza_dominio > 1:
+        return f"_Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco._"
+    return "_Un'altra partita seguita: equilibrata o con troppo poco gioco._"
+
+
+def messaggio_nessun_dominio(senza_dominio):
+    return ("Nessuna partita con un dominio netto in questo momento.\n\n"
             f"{senza_dominio} partite seguite sono equilibrate, o non hanno ancora abbastanza "
-            "gioco per dare un verdetto.", chat_id=chat_id)
+            "gioco per dare un verdetto.")
+
+
+def cmd_dominio(chat_id):
+    """Menu delle tre situazioni di dominio, da cui scegliere quale guardare.
+
+    Prima /dominio rispondeva con tutti e tre i gruppi in un messaggio solo. Con molte partite
+    live quel messaggio diventa lungo e la situazione che interessa va cercata a occhio dentro il
+    resto: le tre situazioni rispondono a domande diverse ("chi sta buttando via la partita",
+    "chi la sta per sbloccare", "dove il risultato e' gia' giusto") e raramente servono insieme.
+
+    Il conteggio sta gia' sul bottone, cosi' il menu da solo dice quante partite ci sono in ogni
+    situazione senza doverci entrare. I gruppi vuoti non diventano bottoni: non c'e' motivo di
+    poter aprire una lista vuota. La vista completa di prima resta, sotto "Tutte insieme".
+
+    Il ricalcolo ad ogni click e' voluto: fra la costruzione del menu e il click passano secondi o
+    minuti, e i cicli intanto aggiornano stato_partite - meglio numeri freschi che quelli
+    congelati nel momento in cui il menu e' stato costruito. Non costa chiamate API."""
+    gruppi, senza_dominio = gruppi_dominio()
+    if not any(gruppi.values()):
+        invia_messaggio_telegram(messaggio_nessun_dominio(senza_dominio), chat_id=chat_id)
         return
 
-    def ordina(voci):
-        return [b for _, b in sorted(voci, key=lambda v: -v[0])]
+    tastiera = {"inline_keyboard": []}
+    for chiave in ORDINE_DOMINIO:
+        quante = len(gruppi[chiave])
+        if not quante:
+            continue
+        tastiera["inline_keyboard"].append([{
+            "text": f"{SIMBOLI_DOMINIO[chiave]} {TITOLI_DOMINIO[chiave].capitalize()} ({quante})",
+            "callback_data": f"dom:{chiave}",
+        }])
+    tastiera["inline_keyboard"].append([{"text": "📋 Tutte insieme", "callback_data": "dom:tutte"}])
 
-    parti = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato"]
-    if righe_sotto:
-        parti.append(f"{SIMBOLI_DOMINIO['sotto']} *DOMINA E PERDE*\n" + "\n\n".join(ordina(righe_sotto)))
-    if righe_bloccate:
-        parti.append(f"{SIMBOLI_DOMINIO['bloccata']} *DOMINA E NON SEGNA*\n" + "\n\n".join(ordina(righe_bloccate)))
-    if righe_avanti:
-        parti.append(f"{SIMBOLI_DOMINIO['avanti']} *DOMINA ED È AVANTI* (il risultato rispecchia)\n"
-                     + "\n\n".join(ordina(righe_avanti)))
-    if senza_dominio:
-        parti.append(f"_Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco._"
-                     if senza_dominio > 1 else
-                     "_Un'altra partita seguita: equilibrata o con troppo poco gioco._")
+    testo = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato", "", "Scegli cosa guardare:"]
+    coda = coda_senza_dominio(senza_dominio)
+    if coda:
+        testo += ["", coda]
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "\n".join(testo), "parse_mode": "Markdown",
+              "reply_markup": json.dumps(tastiera)}, timeout=5)
 
+
+def cmd_dominio_categoria(chat_id, chiave):
+    """Una sola situazione di dominio, scelta dal menu. "tutte" resta il cruscotto completo."""
+    gruppi, senza_dominio = gruppi_dominio()
+
+    if chiave == "tutte":
+        if not any(gruppi.values()):
+            invia_messaggio_telegram(messaggio_nessun_dominio(senza_dominio), chat_id=chat_id)
+            return
+        parti = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato"]
+        for k in ORDINE_DOMINIO:
+            if gruppi[k]:
+                parti.append(f"{SIMBOLI_DOMINIO[k]} *{TITOLI_DOMINIO[k]}*{NOTE_DOMINIO.get(k, '')}\n"
+                             + "\n\n".join(gruppi[k]))
+        coda = coda_senza_dominio(senza_dominio)
+        if coda:
+            parti.append(coda)
+        invia_messaggio_telegram("\n\n".join(parti), chat_id=chat_id)
+        return
+
+    # Un callback_data arriva da fuori: se non e' una delle tre chiavi note non si indicizza
+    # niente alla cieca, si torna al menu.
+    if chiave not in TITOLI_DOMINIO:
+        cmd_dominio(chat_id)
+        return
+
+    righe = gruppi[chiave]
+    if not righe:
+        # Il menu mostrava il bottone perche' al momento della costruzione il gruppo non era
+        # vuoto: nel frattempo le partite sono uscite dalla situazione, o sono finite.
+        invia_messaggio_telegram(
+            f"{SIMBOLI_DOMINIO[chiave]} *{TITOLI_DOMINIO[chiave]}*\n\n"
+            "Nessuna partita in questa situazione adesso: era cosi' quando è comparso il menu, "
+            "ma nel frattempo è cambiato. Rilancia /dominio per l'elenco aggiornato.",
+            chat_id=chat_id)
+        return
+
+    parti = [f"{SIMBOLI_DOMINIO[chiave]} *{TITOLI_DOMINIO[chiave]}*{NOTE_DOMINIO.get(chiave, '')}",
+             "\n\n".join(righe)]
+    altre = [f"{SIMBOLI_DOMINIO[k]} {TITOLI_DOMINIO[k].capitalize()} ({len(gruppi[k])})"
+             for k in ORDINE_DOMINIO if k != chiave and gruppi[k]]
+    if altre:
+        parti.append("_Anche: " + " · ".join(altre) + " — /dominio per il menu._")
     invia_messaggio_telegram("\n\n".join(parti), chat_id=chat_id)
 
 
@@ -7082,6 +7169,18 @@ def barra_dominio(quota):
 # fosse gia' in uso altrove nel file, che era esattamente il difetto della fiamma. 🎯 per esempio
 # sarebbe stato un doppione dell'emoji della strategia "Concretezza".
 SIMBOLI_DOMINIO = {"sotto": "🥊", "bloccata": "⚡", "avanti": "▪️"}
+# Le stesse tre situazioni con il loro titolo, in un posto solo: /dominio le usa sia per le
+# intestazioni dei gruppi sia per le etichette dei bottoni del menu, e prima erano scritte a mano
+# nei due punti - due copie che potevano divergere senza che nessuno se ne accorgesse.
+ORDINE_DOMINIO = ["sotto", "bloccata", "avanti"]
+TITOLI_DOMINIO = {
+    "sotto": "DOMINA E PERDE",
+    "bloccata": "DOMINA E NON SEGNA",
+    "avanti": "DOMINA ED È AVANTI",
+}
+# Coda esplicativa che vale solo per il gruppo dove il risultato NON tradisce il campo.
+NOTE_DOMINIO = {"avanti": " (il risultato rispecchia)"}
+CHIAVE_DOMINIO_PER_PRIORITA = {0: "sotto", 1: "bloccata", 2: "avanti"}
 
 
 def riga_dominio(dominio, home, away, current_stats):
