@@ -3050,9 +3050,6 @@ def poll_callbacks():
             log(f"Errore poll callback: {e}\n{traceback.format_exc()}")
         time.sleep(5)
 
-callback_thread = threading.Thread(target=poll_callbacks, daemon=True)
-callback_thread.start()
-
 # =============================================================================
 # FUNZIONI UTILITY
 # =============================================================================
@@ -11715,6 +11712,12 @@ def imposta_comandi_telegram():
 
 if __name__ == "__main__":
     log("=== Bot avviato ===")
+    # I comandi che poll_callbacks chiama sono definiti piu' sotto nel modulo: avviare il thread
+    # accanto alla sua funzione lo faceva partire a import ancora in corso, e ogni tocco arrivato
+    # in quella finestra moriva con un NameError. Dopo un redeploy la coda di Telegram e' piena,
+    # quindi la finestra veniva centrata davvero. Va avviato qui, a modulo completo.
+    callback_thread = threading.Thread(target=poll_callbacks, daemon=True)
+    callback_thread.start()
     imposta_comandi_telegram()
     # La modalità essenziale sopravvive ai riavvii (è su disco): senza ricordarla qui, un deploy
     # ripartiva annunciando "monitoraggio in corso" mentre quasi tutte le notifiche erano spente.
