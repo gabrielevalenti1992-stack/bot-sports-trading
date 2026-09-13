@@ -753,6 +753,26 @@ ANOMALIE_DIAGNOSTICA_NOTIFICATE = carica_anomalie_diagnostica_notificate()
 INTERVALLO_AGGIORNAMENTO_STORICO = 604800  # 7 giorni
 STORICO_MAX_FIXTURES_PER_RUN = 30
 STORICO_AGGIORNAMENTO_AUTOMATICO = False
+
+# Quante chiamate API al massimo puo' spendere UNA esecuzione di /aggiornastorico.
+#
+# Prima il limite era di 30 partite PER LEGA e la funzione faceva una passata sola: con 111 leghe
+# risolte, una esecuzione processava circa 1100 partite e si fermava li', qualunque fosse
+# l'arretrato. Nei log del 10/09 l'arretrato era 5140 partite, di cui 4099 ancora da fare DOPO
+# quella esecuzione: per finire servivano una quindicina di lanci a mano, e ogni lancio
+# ripagava 111 chiamate di sola lista partite. E' il motivo per cui a meta' settembre c'erano
+# squadre con due sole partite in archivio alla quarta giornata.
+#
+# Ora il tetto e' sulle CHIAMATE, non sulle partite per lega, e dentro una esecuzione si fanno
+# piu' giri finche' il budget regge: la lista delle partite terminate si paga una volta sola per
+# lega, invece che una volta per giro.
+BUDGET_CHIAMATE_STORICO = 1200
+
+# Sotto questa quota residua il backfill si ferma e rimanda il resto: lo storico e' comodo, la
+# raccolta live e' il mestiere del bot. La quota si e' gia' esaurita davvero due sabati di fila
+# (vedi RISERVA_QUOTA_GIORNALIERA), e uno storico ricostruito a scapito delle partite in corso
+# sarebbe un pessimo affare.
+QUOTA_MINIMA_STORICO = 2000
 FASCE_MINUTO = ["0-15", "16-30", "31-45", "46-60", "61-75", "76-90"]
 
 # Piano giornata: una volta al giorno (ora locale Italia) si scarica con UNA chiamata /fixtures?date=
@@ -2892,7 +2912,12 @@ def poll_callbacks():
                         esegui_comando_sicuro(chat_id, cmd_analisi, " ".join(args))
 
                     elif cmd == "/aggiornastorico":
-                        esegui_comando_sicuro(chat_id, cmd_aggiornastorico)
+                        # Argomento facoltativo: quante chiamate API concedere a questa
+                        # esecuzione. Serve per le notti in cui si vuole chiudere l'arretrato in
+                        # un colpo solo invece di rilanciare quattro volte; senza argomento resta
+                        # il budget prudente di default.
+                        esegui_comando_sicuro(chat_id, cmd_aggiornastorico,
+                                              " ".join(args) if args else None)
 
                     elif cmd == "/favorites":
                         esegui_comando_sicuro(chat_id, cmd_favorites)
@@ -4997,7 +5022,8 @@ def cmd_help(chat_id):
         "/momentum <squadra> - Grafico dell'andamento pressione durante la partita (solo partite monitorate)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
-        "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi\n"
+        "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi "
+        "(opzionale: /aggiornastorico <chiamate> per concederne di più in una volta)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -8903,7 +8929,7 @@ def get_fixtures_terminati(league_id, season):
     return data.get("response", [])
 
 
-def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
+def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None, fixtures=None):
     """Scarica i gol delle partite terminate di una lega/stagione non ancora processate e
     aggiorna lo storico locale (gol fatti/subiti per fascia di minuto, separati casa/trasferta,
     per squadra). Elabora al massimo `max_fixtures` nuove partite per chiamata per non consumare
@@ -8925,7 +8951,12 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
                 f"{len(lega_dati.get('fixture_ids_processati', []))} partite da riscaricare")
         lega_dati = {"stagione": season, "fixture_ids_processati": [], "squadre": {}, "ultimo_aggiornamento": 0}
 
-    fixtures = get_fixtures_terminati(league_id, season)
+    # fixtures gia' pronte: le partite TERMINATE di una stagione non cambiano piu', quindi chi
+    # fa piu' giri sulla stessa lega dentro la stessa esecuzione (il backfill) puo' scaricare
+    # l'elenco una volta e ripassarlo, invece di ricomprarlo ad ogni giro. Chiamata da sola, la
+    # funzione si comporta esattamente come prima.
+    if fixtures is None:
+        fixtures = get_fixtures_terminati(league_id, season)
     if not fixtures:
         lega_dati["ultimo_aggiornamento"] = time.time()
         STORICO_MINUTAGGI[league_key] = lega_dati
@@ -9017,20 +9048,106 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None):
     return len(da_processare)
 
 
-def aggiorna_storico_minutaggi_tutte_leghe():
-    """Forza l'aggiornamento di tutte le leghe whitelist adesso (usato da /aggiornastorico)."""
+def partite_arretrate_lega(league_id, fixtures):
+    """Quante partite di questa lega non sono ancora nello storico."""
+    processati = set(STORICO_MINUTAGGI.get(str(league_id), {}).get("fixture_ids_processati", []))
+    return len([f for f in fixtures if f["fixture"]["id"] not in processati])
+
+
+def aggiorna_storico_minutaggi_tutte_leghe(budget=None, quota_minima=None):
+    """Ricostruisce lo storico minutaggi finche' la coda si svuota o finisce il budget.
+
+    Prima faceva UNA passata da 30 partite per lega e si fermava: con l'arretrato di settembre
+    (4099 partite dopo l'esecuzione del 10/09) servivano quindici lanci a mano, e ogni lancio
+    ripagava la lista partite di tutte e 111 le leghe. Da qui viene il problema concreto: squadre
+    con due sole partite in archivio alla quarta giornata, e /analisi che disegna un grafico su
+    quasi niente.
+
+    Ora: la lista partite si paga una volta per lega, poi si fanno piu' giri finche' il budget di
+    chiamate regge. Le leghe si servono partendo da quelle con MENO arretrato - a parita' di
+    quota si portano a posto piu' campionati interi, che e' esattamente cio' che serve quando il
+    problema e' "questa squadra ha due partite in archivio".
+
+    Ritorna un riepilogo invece di un totale secco: quante processate, quante ne restano e
+    PERCHE' si e' fermata, perche' "1041 partite processate" non diceva se il lavoro era finito."""
+    budget = BUDGET_CHIAMATE_STORICO if budget is None else budget
+    quota_minima = QUOTA_MINIMA_STORICO if quota_minima is None else quota_minima
+    esito = {"processate": 0, "residuo": 0, "leghe": 0, "leghe_complete": 0,
+             "chiamate": 0, "motivo": "coda vuota"}
+
     mappa = risolvi_leghe_whitelist()
     if not mappa:
         log("Storico minutaggi: nessuna lega whitelist risolta, skip aggiornamento")
-        return 0
-    totale = 0
+        esito["motivo"] = "nessuna lega"
+        return esito
+
+    residua = quota_residua_attendibile()
+    if residua is not None and residua < quota_minima:
+        log(f"Storico minutaggi: quota residua {residua} sotto la soglia {quota_minima}, "
+            f"backfill rimandato")
+        esito["motivo"] = "quota"
+        return esito
+
+    # Fase 1: l'elenco delle partite terminate, una chiamata per lega. E' il costo fisso di ogni
+    # esecuzione, e si paga una volta sola anche se poi si fanno dieci giri.
+    elenchi = {}
     for league_id, (nome, paese, season) in mappa.items():
         if not season:
             continue
-        totale += aggiorna_storico_minutaggi_lega(league_id, season)
-        time.sleep(1)
-    log(f"Storico minutaggi: aggiornamento completato, {totale} nuove partite processate in totale")
-    return totale
+        fixtures = get_fixtures_terminati(league_id, season)
+        esito["chiamate"] += 1
+        if fixtures:
+            elenchi[league_id] = (season, fixtures)
+    esito["leghe"] = len(elenchi)
+
+    # Fase 2: i giri veri. Prima le leghe con meno arretrato, cosi' il budget porta a termine
+    # piu' campionati invece di scavare in fondo al piu' arretrato.
+    ordine = sorted(elenchi, key=lambda lid: partite_arretrate_lega(lid, elenchi[lid][1]))
+    arretrato_iniziale = sum(partite_arretrate_lega(lid, f) for lid, (_, f) in elenchi.items())
+    log(f"Storico minutaggi: {arretrato_iniziale} partite arretrate su {len(elenchi)} leghe, "
+        f"budget {budget} chiamate")
+
+    while esito["motivo"] == "coda vuota":
+        arretrato_a_inizio_giro = sum(partite_arretrate_lega(lid, f)
+                                      for lid, (_, f) in elenchi.items())
+        for league_id in ordine:
+            season, fixtures = elenchi[league_id]
+            if not partite_arretrate_lega(league_id, fixtures):
+                continue
+            if esito["chiamate"] >= budget:
+                esito["motivo"] = "budget"
+                break
+            residua = quota_residua_attendibile()
+            if residua is not None and residua < quota_minima:
+                log(f"Storico minutaggi: quota residua {residua} sotto la soglia {quota_minima}, "
+                    f"mi fermo qui")
+                esito["motivo"] = "quota"
+                break
+            quante = min(STORICO_MAX_FIXTURES_PER_RUN, budget - esito["chiamate"])
+            fatte = aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=quante,
+                                                    fixtures=fixtures)
+            esito["processate"] += fatte
+            # Ogni partita tentata costa una chiamata eventi, anche quando la risposta non arriva.
+            # Le femminili scartate prima della chiamata sono contate qui per eccesso: meglio
+            # fermarsi un po' prima del budget che scoprire di averlo sforato.
+            esito["chiamate"] += fatte
+            time.sleep(1)
+        arretrato_a_fine_giro = sum(partite_arretrate_lega(lid, f)
+                                    for lid, (_, f) in elenchi.items())
+        if arretrato_a_fine_giro >= arretrato_a_inizio_giro:
+            # Nessun progresso in un giro intero: o la coda e' vuota, o le partite che restano non
+            # si riescono a processare (eventi non recuperati, rate-limit). Nel secondo caso un
+            # altro giro identico riproverebbe le stesse partite e brucerebbe il budget contro un
+            # muro: meglio fermarsi e dirlo.
+            break
+
+    esito["residuo"] = sum(partite_arretrate_lega(lid, f) for lid, (_, f) in elenchi.items())
+    esito["leghe_complete"] = sum(1 for lid, (_, f) in elenchi.items()
+                                  if not partite_arretrate_lega(lid, f))
+    log(f"Storico minutaggi: aggiornamento completato, {esito['processate']} nuove partite "
+        f"processate, {esito['residuo']} ancora da fare, {esito['leghe_complete']}/"
+        f"{esito['leghe']} leghe complete (stop: {esito['motivo']})")
+    return esito
 
 
 def aggiorna_storico_minutaggi_automatico():
@@ -9287,14 +9404,69 @@ def cmd_analisi(chat_id, testo_richiesta):
         log(f"Errore invio /analisi: {e}")
 
 
-def cmd_aggiornastorico(chat_id):
+def testo_esito_aggiornastorico(esito):
+    """Il riepilogo di fine backfill: quanto e' stato fatto, quanto manca e cosa fare adesso.
+
+    Il messaggio di prima diceva solo "N nuove partite processate", e non distingueva il caso
+    "finito" da "mi sono fermato a meta'": con l'arretrato di settembre era sempre il secondo, e
+    non si capiva che bisognava rilanciare."""
+    if esito["motivo"] == "nessuna lega":
+        return ("Nessun campionato risolto: senza l'elenco leghe non so quali partite scaricare. "
+                "Riprova fra qualche minuto.")
+    if esito["motivo"] == "quota" and not esito["processate"]:
+        return (f"Non ho aggiornato niente: la quota API rimasta oggi e' sotto la riserva di "
+                f"{QUOTA_MINIMA_STORICO} richieste che tengo per le partite live. "
+                f"Riprova domani, o di notte quando non si gioca.")
+
+    righe = [f"Storico minutaggi: {esito['processate']} nuove partite scaricate.",
+             f"Campionati completi: {esito['leghe_complete']} su {esito['leghe']}."]
+    if esito["residuo"]:
+        lanci = -(-esito["residuo"] // max(1, BUDGET_CHIAMATE_STORICO - esito["leghe"]))
+        perche = {"budget": "ho speso il budget di chiamate di questa esecuzione",
+                  "quota": "la quota API rimasta oggi si stava avvicinando alla riserva",
+                  "coda vuota": "alcune partite non hanno restituito gli eventi"}
+        righe.append("")
+        righe.append(f"Restano {esito['residuo']} partite da scaricare: "
+                     f"{perche.get(esito['motivo'], esito['motivo'])}.")
+        righe.append(f"Rilancia /aggiornastorico per continuare "
+                     f"({lanci} {'volta' if lanci == 1 else 'volte'} circa, meglio quando non "
+                     f"si gioca).")
+    else:
+        righe.append("")
+        righe.append("Non resta niente da scaricare: l'archivio e' completo.")
+    return "\n".join(righe)
+
+
+def budget_richiesto(argomento):
+    """Il budget chiesto a mano, se e' un numero sensato. None per il default.
+
+    Arriva da un messaggio Telegram: "/aggiornastorico tutto" o "/aggiornastorico -5" non devono
+    diventare un budget assurdo, diventano il default."""
+    if not argomento:
+        return None
+    try:
+        valore = int(str(argomento).strip())
+    except (TypeError, ValueError):
+        return None
+    if valore <= 0:
+        return None
+    # Un tetto comunque: sopra le 6000 chiamate si mangerebbe la giornata intera anche avendo
+    # quota. La riserva QUOTA_MINIMA_STORICO resta comunque il freno vero.
+    return min(valore, 6000)
+
+
+def cmd_aggiornastorico(chat_id, argomento=None):
+    budget = budget_richiesto(argomento)
+    avviso = "Aggiornamento storico minutaggi in corso, può richiedere qualche minuto..."
+    if budget:
+        avviso += f"\nBudget di questa esecuzione: {budget} chiamate API."
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": "Aggiornamento storico minutaggi in corso, può richiedere qualche minuto..."}, timeout=5)
-    totale = aggiorna_storico_minutaggi_tutte_leghe()
+        json={"chat_id": chat_id, "text": avviso}, timeout=5)
+    esito = aggiorna_storico_minutaggi_tutte_leghe(budget=budget)
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": f"Aggiornamento completato: {totale} nuove partite processate. Se erano tante, alcune potrebbero essere rimandate al prossimo aggiornamento per non sforare i limiti API."}, timeout=5)
+        json={"chat_id": chat_id, "text": testo_esito_aggiornastorico(esito)}, timeout=5)
 
 
 # =============================================================================
