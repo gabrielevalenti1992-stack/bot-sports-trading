@@ -1169,7 +1169,13 @@ PAROLE_ESCLUSE = [
     # dato, ma consumano il limite per-minuto: quella sera Dinamo Zagreb-Viking e Fenerbahce-Lyon,
     # Champions League, restavano a "Statistiche: N/D" con nei log "Rate-limit ancora in
     # raffreddamento, chiamata saltata". Le partite vere perdevano la corsa contro le U21.
-    "national league cup"
+    "national league cup",
+    # Le divisioni spagnole minori. "Segunda Division RFEF" e' la QUARTA serie e passava dal match
+    # a confine di parola su "Segunda Division" (la seconda, quella vera, che sta in whitelist):
+    # il 12/09 erano live Eibar II-Gimnastica Torrelavega (Group 1) e Estepona-Linares (Group 4).
+    # "rfef" e' il marcatore che le distingue tutte - Primera, Segunda e Tercera Division RFEF -
+    # e non compare in nessun campionato che si voglia seguire.
+    "rfef"
     # TEST TEMPORANEO: "friendlies", "amichevoli", "friendly" rimossi per verificare grafici/notifiche
     # Ripristinare dopo il test!
 ]
@@ -1193,6 +1199,15 @@ PAROLE_ESCLUSE_SQUADRE = [
     "under-23", "under-21", "under-20", "under-19", "under-18", "under-17",
     "under 23", "under 21", "under 20", "under 19", "under 18", "under 17",
     "youth", "reserves", "riserve",
+    # Le squadre B che NON si chiamano "U21". Il filtro prendeva solo i nomi con l'eta' dentro, e
+    # cosi' le seconde squadre dei club entravano dalla porta principale: il 12/09 erano live
+    # Eibar II, KRC Genk II, RSC Anderlecht II, tutte verificate come "non giovanili".
+    # Giocano nelle seconde divisioni di Spagna, Belgio e Olanda, quindi restano dentro anche
+    # tenendo quei campionati - e sono partite senza pubblico, senza quote decenti e spesso senza
+    # statistiche.
+    # I suffissi in CODA ("Eibar II", "Barcelona B") li riconosce squadra_seconda() qui sotto,
+    # che esisteva gia' per un altro scopo. Qui stanno i nomi che non seguono quello schema.
+    "iii", "jong", "castilla", "next gen", "nxt",
 ]
 
 
@@ -1202,7 +1217,11 @@ def squadra_giovanile(nome_squadra):
     Confine di parola, non sottostringa: "u20" non deve intercettare un club che ha quelle tre
     lettere dentro un nome piu' lungo."""
     nome = _senza_accenti(nome_squadra or "")
-    return any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE)
+    if any(re.search(rf"\b{re.escape(parola)}\b", nome) for parola in PAROLE_ESCLUSE_SQUADRE):
+        return True
+    # Le seconde squadre (II, B, 2 in coda) valgono come riserve anche per il TRACCIAMENTO, non
+    # solo per il confronto dei nomi nello storico: vedi il commento sopra squadra_seconda().
+    return squadra_seconda(nome)
 
 
 # Squadre femminili riconosciute dal NOME, non dalla lega. Stessa ragione per cui esiste il
@@ -1259,8 +1278,15 @@ def squadra_femminile(nome_squadra):
 # Squadre "seconde": la formazione B/riserve di un club, che nei campionati minori gioca sotto un
 # nome che e' quello della prima squadra piu' un suffisso. Non basta squadra_giovanile() qui
 # sopra: quello cerca u21/u23/youth/reserves, mentre "Freiburg II", "Real Sociedad II" e
-# "Barcelona B" non contengono nessuna di quelle parole - e sono squadre vere, tracciate davvero
-# (Real Sociedad II gioca in Segunda Division, che e' in whitelist).
+# "Barcelona B" non contengono nessuna di quelle parole.
+#
+# Fino al 13/09 questa funzione serviva SOLO a non confondere i nomi nello storico, e le seconde
+# squadre restavano tracciate: la nota qui diceva che erano "squadre vere" perche' giocano in
+# campionati in whitelist. La decisione e' cambiata, ed e' arrivata guardando una partita vera:
+# "Eibar II vs Gimnastica Torrelavega", quarta serie spagnola, il 12/09 alle 14:36. Le seconde
+# squadre giocano senza pubblico, con formazioni che cambiano ogni settimana e statistiche spesso
+# assenti - e pesano sulla stessa quota API delle partite vere. Ora squadra_giovanile() le usa per
+# escluderle dal tracciamento.
 def squadra_seconda(nome_squadra):
     """True se il nome e' quello di una seconda squadra (II, B, 2) di un club.
 
