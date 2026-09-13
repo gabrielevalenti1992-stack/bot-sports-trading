@@ -5718,8 +5718,8 @@ def coda_senza_dominio(senza_dominio):
     if not senza_dominio:
         return None
     if senza_dominio > 1:
-        return f"_Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco._"
-    return "_Un'altra partita seguita: equilibrata o con troppo poco gioco._"
+        return f"Altre {senza_dominio} partite seguite: equilibrate o con troppo poco gioco."
+    return "Un'altra partita seguita: equilibrata o con troppo poco gioco."
 
 
 def messaggio_nessun_dominio(senza_dominio):
@@ -5759,14 +5759,15 @@ def cmd_dominio(chat_id):
         }])
     tastiera["inline_keyboard"].append([{"text": "📋 Tutte insieme", "callback_data": "dom:tutte"}])
 
-    testo = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato", "", "Scegli cosa guardare:"]
+    testo = ["⚡ DOMINIO — chi fa la partita, e cosa dice il risultato", "",
+             "Scegli cosa guardare:"]
     coda = coda_senza_dominio(senza_dominio)
     if coda:
         testo += ["", coda]
     # Nessun parse_mode, come ogni altro invio del bot: il Markdown di Telegram si rompe sui nomi
     # di squadra con "_" o "*" e fa fallire il messaggio con un 400 (vedi invia_messaggio_telegram
-    # e test_telegram_markdown_rotto.py). Gli asterischi restano nel testo come li vede l'utente,
-    # esattamente come nel cruscotto completo.
+    # e test_telegram_markdown_rotto.py). Per la stessa ragione nei testi qui sopra non c'e'
+    # nessun asterisco: senza parse_mode non sarebbe grassetto, sarebbe un asterisco da leggere.
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id, "text": "\n".join(testo),
@@ -5781,10 +5782,10 @@ def cmd_dominio_categoria(chat_id, chiave):
         if not any(gruppi.values()):
             invia_messaggio_telegram(messaggio_nessun_dominio(senza_dominio), chat_id=chat_id)
             return
-        parti = ["⚡ *DOMINIO* — chi fa la partita, e cosa dice il risultato"]
+        parti = ["⚡ DOMINIO — chi fa la partita, e cosa dice il risultato"]
         for k in ORDINE_DOMINIO:
             if gruppi[k]:
-                parti.append(f"{SIMBOLI_DOMINIO[k]} *{TITOLI_DOMINIO[k]}*{NOTE_DOMINIO.get(k, '')}\n"
+                parti.append(f"{SIMBOLI_DOMINIO[k]} {TITOLI_DOMINIO[k]}{NOTE_DOMINIO.get(k, '')}\n"
                              + "\n\n".join(gruppi[k]))
         coda = coda_senza_dominio(senza_dominio)
         if coda:
@@ -5803,18 +5804,18 @@ def cmd_dominio_categoria(chat_id, chiave):
         # Il menu mostrava il bottone perche' al momento della costruzione il gruppo non era
         # vuoto: nel frattempo le partite sono uscite dalla situazione, o sono finite.
         invia_messaggio_telegram(
-            f"{SIMBOLI_DOMINIO[chiave]} *{TITOLI_DOMINIO[chiave]}*\n\n"
+            f"{SIMBOLI_DOMINIO[chiave]} {TITOLI_DOMINIO[chiave]}\n\n"
             "Nessuna partita in questa situazione adesso: era cosi' quando è comparso il menu, "
             "ma nel frattempo è cambiato. Rilancia /dominio per l'elenco aggiornato.",
             chat_id=chat_id)
         return
 
-    parti = [f"{SIMBOLI_DOMINIO[chiave]} *{TITOLI_DOMINIO[chiave]}*{NOTE_DOMINIO.get(chiave, '')}",
+    parti = [f"{SIMBOLI_DOMINIO[chiave]} {TITOLI_DOMINIO[chiave]}{NOTE_DOMINIO.get(chiave, '')}",
              "\n\n".join(righe)]
     altre = [f"{SIMBOLI_DOMINIO[k]} {TITOLI_DOMINIO[k].capitalize()} ({len(gruppi[k])})"
              for k in ORDINE_DOMINIO if k != chiave and gruppi[k]]
     if altre:
-        parti.append("_Anche: " + " · ".join(altre) + " — /dominio per il menu._")
+        parti.append("Anche: " + " · ".join(altre) + " — /dominio per il menu.")
     invia_messaggio_telegram("\n\n".join(parti), chat_id=chat_id)
 
 
