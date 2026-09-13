@@ -3969,6 +3969,33 @@ def notifica_errore_api_throttled(tipo, dettaglio, contesto):
 
 ULTIMO_ERRORE_GET_PARTITE_LIVE = 0
 
+# Per quanti secondi dopo un errore si considera "appena fallita" la lettura delle partite live.
+# E' la stessa finestra che usava il ciclo principale scritta a mano in due punti: adesso sta qui,
+# perche' la usano anche i comandi.
+SECONDI_LETTURA_LIVE_FALLITA = 20
+
+
+def lettura_live_fallita():
+    """True se l'ultima chiamata alle partite live e' fallita da poco (rate-limit, timeout, rete).
+
+    Serve a distinguere due cose che get_partite_live() restituisce uguali - una lista vuota:
+    "non c'e' nessuna partita in corso" e "non sono riuscito a chiedere". Ai comandi la differenza
+    interessa eccome: il 13/09 alle 19:18 un tocco sul menu /status ha risposto "quella partita
+    non e' piu' fra le live", mentre nei log alla stessa ora c'era
+    "[get_partite_live] Errore applicativo API: rateLimit ... Raffreddamento attivato per 10s".
+    La partita c'era: un minuto dopo /status Galatasaray l'ha mostrata. A mentire era il
+    messaggio."""
+    return (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < SECONDI_LETTURA_LIVE_FALLITA
+
+
+# Il testo unico per quel caso: lo usano il menu, i bottoni e la ricerca per nome, cosi' non
+# possono divergere.
+TESTO_LETTURA_LIVE_FALLITA = (
+    "Non sono riuscito a leggere le partite live in questo momento: l'API ha rifiutato la "
+    "richiesta (di solito e' il limite al minuto, e si sblocca da solo in pochi secondi).\n"
+    "Riprova fra una decina di secondi - le partite in corso ci sono ancora."
+)
+
 
 def get_partite_live():
     global ULTIMO_ERRORE_GET_PARTITE_LIVE
@@ -6791,12 +6818,12 @@ def cmd_status_menu(chat_id, intro=None):
     spendono solo sulla partita che viene effettivamente scelta."""
     partite = partite_menu_status(fresche=True)
     if not partite:
+        testo = (TESTO_LETTURA_LIVE_FALLITA if lettura_live_fallita() else
+                 "Nessuna partita live seguita in questo momento.\n"
+                 "Puoi comunque cercarne una fuori whitelist con /status <nome squadra>.")
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": chat_id,
-                  "text": "Nessuna partita live seguita in questo momento.\n"
-                          "Puoi comunque cercarne una fuori whitelist con /status <nome squadra>."},
-            timeout=5)
+            json={"chat_id": chat_id, "text": testo}, timeout=5)
         return
     invia_o_aggiorna_menu_status(chat_id, costruisci_menu_status(partite, intro=intro))
 
@@ -6817,7 +6844,8 @@ def cmd_status_navigazione(chat_id, dato, msg_id=None):
     partite = partite_menu_status()
     if not partite:
         invia_o_aggiorna_menu_status(chat_id, {
-            "text": "Nessuna partita live seguita in questo momento.",
+            "text": (TESTO_LETTURA_LIVE_FALLITA if lettura_live_fallita()
+                     else "Nessuna partita live seguita in questo momento."),
             "reply_markup": {"inline_keyboard": []}}, msg_id)
         return
     invia_o_aggiorna_menu_status(
@@ -6826,12 +6854,23 @@ def cmd_status_navigazione(chat_id, dato, msg_id=None):
 
 def cmd_status_da_bottone(chat_id, fixture_id):
     """/status di una partita scelta dal menu, per fixture_id invece che per nome."""
-    for f in get_partite_live():
+    partite = get_partite_live()
+    for f in partite:
         if ((f.get("fixture") or {}).get("id")) == fixture_id:
             invia_scheda_status(chat_id, f)
             return
-    # Fra la costruzione del menu e il click puo' passare tempo, e una partita che finisce
-    # sparisce dal feed live: meglio dirlo che rispondere con una scheda vuota.
+
+    # Lista vuota per un errore, non perche' la partita sia finita: la prima volta che e'
+    # successo, il 13/09 alle 19:18, il bot ha risposto "non e' piu' fra le live" su una partita
+    # che era in campo - e un minuto dopo la stessa partita, cercata per nome, e' arrivata.
+    if not partite and lettura_live_fallita():
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": TESTO_LETTURA_LIVE_FALLITA}, timeout=5)
+        return
+
+    # Qui invece la lettura e' riuscita e la partita non c'e': fra la costruzione del menu e il
+    # click puo' passare tempo, e una partita che finisce sparisce dal feed live.
     requests.post(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json={"chat_id": chat_id,
@@ -7088,6 +7127,13 @@ def cmd_status(chat_id, query):
         if _nomi_squadra_matchano(query, home) or _nomi_squadra_matchano(query, away):
             trovate.append(f)
     if not trovate:
+        # Lettura fallita: dirlo, invece di far credere che quella squadra non stia giocando.
+        # Rilanciare il menu qui spenderebbe una seconda chiamata contro lo stesso rate-limit.
+        if not partite_cmd and lettura_live_fallita():
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": TESTO_LETTURA_LIVE_FALLITA}, timeout=5)
+            return
         # Il nome sbagliato e' il caso in cui l'aiuto serve di piu': invece di un vicolo
         # cieco ("Nessuna partita live trovata") si offre l'elenco di quelle in corso, da cui
         # scegliere col bottone. Costa una seconda chiamata live, ma solo quando la ricerca
@@ -11764,7 +11810,7 @@ if __name__ == "__main__":
             log(f"\n=== Ciclo #{ciclo_numero} - {time.strftime('%H:%M:%S')} ===")
 
             partite = get_partite_live()
-            chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
+            chiamata_partite_live_fallita = lettura_live_fallita()
             # Se la chiamata live fallisce non c'e' niente da fare in tutto il giro: nessuna
             # partita da processare, nessuna statistica, nessun gol rilevato - e poi comunque 180s
             # di attesa. Un secondo tentativo costa una richiesta e recupera l'intero ciclo.
@@ -11777,7 +11823,7 @@ if __name__ == "__main__":
             if chiamata_partite_live_fallita and attendi_fine_raffreddamento_api("get_partite_live"):
                 log("Secondo tentativo sulla chiamata partite live prima di rinunciare al giro")
                 partite = get_partite_live()
-                chiamata_partite_live_fallita = (time.time() - ULTIMO_ERRORE_GET_PARTITE_LIVE) < 20
+                chiamata_partite_live_fallita = lettura_live_fallita()
             # Deduplicazione per fixture_id: l'API a volte restituisce la stessa partita due volte
             # nello stesso payload live (osservato 3 volte in 48h di log produzione), e senza questa
             # guardia processa_partita() gira due volte a ~2s di distanza sullo stesso fixture. Il
