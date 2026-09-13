@@ -9107,6 +9107,25 @@ def aggiorna_storico_minutaggi_lega(league_id, season, max_fixtures=None, fixtur
     return len(da_processare)
 
 
+def fixture_minimo(f):
+    """Solo i cinque campi che il backfill usa davvero: id della partita, id e nome delle squadre.
+
+    La risposta di /fixtures porta anche arbitro, stadio, loghi, punteggi parziali e bandiere:
+    circa 6 KB di oggetti Python per partita. Il backfill tiene in memoria l'elenco di TUTTE le
+    leghe per l'intera esecuzione (serve a non ricomprare la lista ad ogni giro), e con 111 leghe
+    da qualche centinaio di partite quella comodita' diventerebbe piu' di cento megabyte su un
+    processo che gira accanto a matplotlib. Qui si tiene il minimo e si butta il resto appena
+    arrivato."""
+    squadre = f.get("teams") or {}
+    casa = squadre.get("home") or {}
+    ospite = squadre.get("away") or {}
+    return {
+        "fixture": {"id": (f.get("fixture") or {}).get("id")},
+        "teams": {"home": {"id": casa.get("id"), "name": casa.get("name")},
+                  "away": {"id": ospite.get("id"), "name": ospite.get("name")}},
+    }
+
+
 def partite_arretrate_lega(league_id, fixtures):
     """Quante partite di questa lega non sono ancora nello storico."""
     processati = set(STORICO_MINUTAGGI.get(str(league_id), {}).get("fixture_ids_processati", []))
@@ -9156,7 +9175,9 @@ def aggiorna_storico_minutaggi_tutte_leghe(budget=None, quota_minima=None):
         fixtures = get_fixtures_terminati(league_id, season)
         esito["chiamate"] += 1
         if fixtures:
-            elenchi[league_id] = (season, fixtures)
+            # Ridotte all'osso PRIMA di metterle da parte: restano in memoria per tutta
+            # l'esecuzione, e la risposta intera dell'API pesa una decina di volte tanto.
+            elenchi[league_id] = (season, [fixture_minimo(f) for f in fixtures])
     esito["leghe"] = len(elenchi)
 
     # Fase 2: i giri veri. Prima le leghe con meno arretrato, cosi' il budget porta a termine
