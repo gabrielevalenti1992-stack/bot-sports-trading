@@ -750,7 +750,18 @@ ANOMALIE_DIAGNOSTICA_NOTIFICATE = carica_anomalie_diagnostica_notificate()
 # ogni riavvio del bot altrimenti riproverebbe il backfill su tutte, consumando in fretta la quota
 # giornaliera di API-Football. Va acceso esplicitamente in config.json quando si è pronti, oppure
 # si usa /aggiornastorico a mano quando si decide di spendere quota.
-INTERVALLO_AGGIORNAMENTO_STORICO = 604800  # 7 giorni
+# Quando il backfill parte da solo: due volte a settimana, a ore in cui non si gioca quasi mai.
+# (giorno della settimana con lunedi'=0, ora, minuto), sempre in ora italiana come il piano
+# giornata. Prima era un intervallo di 7 giorni per lega, che faceva partire l'aggiornamento a
+# ore qualsiasi - anche in mezzo a un sabato pomeriggio, cioe' esattamente quando la quota API
+# serve tutta alle partite in corso.
+ORARI_AGGIORNAMENTO_STORICO = ((0, 23, 15), (4, 1, 0))  # lunedi' 23:15, venerdi' 01:00
+
+# Quanto si accetta di recuperare uno slot mancato: se il bot era spento o in deploy alle 23:15,
+# alle 23:40 lo esegue lo stesso. Oltre questa finestra si lascia perdere e si aspetta il
+# prossimo: un backfill che parte a mezzogiorno di martedi' non e' quello che si era chiesto.
+RECUPERO_MASSIMO_STORICO_ORE = 6
+
 STORICO_MAX_FIXTURES_PER_RUN = 30
 STORICO_AGGIORNAMENTO_AUTOMATICO = False
 
@@ -1069,7 +1080,6 @@ try:
     INTERVALLO_REPORT_INTENSITA = config.get("intervallo_report_intensita", INTERVALLO_REPORT_INTENSITA)
     DIAGNOSTICA_AUTOMATICA_ATTIVA = config.get("diagnostica_automatica_attiva", DIAGNOSTICA_AUTOMATICA_ATTIVA)
     INTERVALLO_DIAGNOSTICA_AUTOMATICA = config.get("intervallo_diagnostica_automatica", INTERVALLO_DIAGNOSTICA_AUTOMATICA)
-    INTERVALLO_AGGIORNAMENTO_STORICO = config.get("intervallo_aggiornamento_storico", INTERVALLO_AGGIORNAMENTO_STORICO)
     STORICO_MAX_FIXTURES_PER_RUN = config.get("storico_max_fixtures_per_run", STORICO_MAX_FIXTURES_PER_RUN)
     STORICO_AGGIORNAMENTO_AUTOMATICO = config.get("storico_aggiornamento_automatico", STORICO_AGGIORNAMENTO_AUTOMATICO)
     ORA_GENERAZIONE_PIANO_GIORNATA = config.get("ora_generazione_piano_giornata", ORA_GENERAZIONE_PIANO_GIORNATA)
@@ -2357,6 +2367,28 @@ def ripulisci_storico_minutaggi(storico):
             leghe_svuotate.append(league_key)
     return femminili, giovanili, leghe_svuotate
 
+
+STATO_STORICO_AUTOMATICO_FILE = data_path("stato_storico_automatico.json")
+
+
+def carica_stato_storico_automatico():
+    if os.path.exists(STATO_STORICO_AUTOMATICO_FILE):
+        try:
+            with open(STATO_STORICO_AUTOMATICO_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Errore lettura {STATO_STORICO_AUTOMATICO_FILE}: {e}", flush=True)
+    return {}
+
+
+def salva_stato_storico_automatico(dati):
+    salva_json_atomico(STATO_STORICO_AUTOMATICO_FILE, dati)
+
+
+# Quale slot settimanale e' gia' stato eseguito. Sta su disco perche' il bot si riavvia (deploy,
+# crash, sospensione): senza, ogni riavvio nella finestra di recupero rilancerebbe lo stesso
+# backfill da capo.
+STATO_STORICO_AUTOMATICO = carica_stato_storico_automatico()
 
 STORICO_MINUTAGGI = carica_storico_minutaggi()
 # La PULIZIA vera e propria (ripulisci_storico_minutaggi) NON gira qui: chiama squadra_femminile()
@@ -5023,7 +5055,8 @@ def cmd_help(chat_id):
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
         "/analisi <squadra casa> - <squadra trasferta> - Distribuzione storica gol per fascia di minuto (es: /analisi Milan - Juventus)\n"
         "/aggiornastorico - Forza l'aggiornamento dello storico minutaggi usato da /analisi "
-        "(opzionale: /aggiornastorico <chiamate> per concederne di più in una volta)\n"
+        "(si aggiorna da solo il lunedì alle 23:15 e il venerdì all'1:00; opzionale: "
+        "/aggiornastorico <chiamate> per concederne di più in una volta)\n"
         "/favorites - Lista partite preferite\n"
         "/clearfavorites - Svuota lista preferiti\n"
         "/silenced - Lista partite silenziate\n"
@@ -9150,38 +9183,71 @@ def aggiorna_storico_minutaggi_tutte_leghe(budget=None, quota_minima=None):
     return esito
 
 
+def slot_storico_da_eseguire(adesso=None):
+    """Lo slot settimanale di aggiornamento da eseguire adesso, o None.
+
+    Ritorna una stringa tipo "2026-09-14 23:15": e' la data e ora dello slot, non di adesso, cosi'
+    due esecuzioni nella stessa finestra di recupero riconoscono lo stesso slot e la seconda non
+    riparte. Uno slot passato da piu' di RECUPERO_MASSIMO_STORICO_ORE non si recupera piu'."""
+    adesso = adesso or datetime.datetime.now(ZoneInfo("Europe/Rome"))
+    migliore = None
+    for giorno, ora, minuto in ORARI_AGGIORNAMENTO_STORICO:
+        indietro = (adesso.weekday() - giorno) % 7
+        occorrenza = (adesso - datetime.timedelta(days=indietro)).replace(
+            hour=ora, minute=minuto, second=0, microsecond=0)
+        if occorrenza > adesso:
+            # Oggi e' il giorno giusto ma l'ora non e' ancora arrivata: vale quello della
+            # settimana scorsa, che sara' fuori finestra di recupero e quindi scartato.
+            occorrenza -= datetime.timedelta(days=7)
+        if (adesso - occorrenza).total_seconds() > RECUPERO_MASSIMO_STORICO_ORE * 3600:
+            continue
+        if migliore is None or occorrenza > migliore:
+            migliore = occorrenza
+    return migliore.strftime("%Y-%m-%d %H:%M") if migliore else None
+
+
+# Un backfill alla volta: gira in un thread suo e puo' durare piu' di un ciclo del loop.
+_BACKFILL_STORICO_IN_CORSO = threading.Lock()
+
+
+def _esegui_backfill_automatico(slot):
+    """Il backfill vero, nel suo thread. Avvisa in chat solo se c'e' qualcosa da dire."""
+    try:
+        log(f"Storico minutaggi: aggiornamento automatico dello slot {slot}")
+        esito = aggiorna_storico_minutaggi_tutte_leghe()
+        if esito["processate"] or esito["residuo"]:
+            invia_messaggio_telegram("Aggiornamento automatico dello storico minutaggi.\n\n"
+                                     + testo_esito_aggiornastorico(esito))
+    finally:
+        _BACKFILL_STORICO_IN_CORSO.release()
+
+
 def aggiorna_storico_minutaggi_automatico():
-    """Chiamata ad ogni ciclo del loop principale, ma fa qualcosa solo se
-    STORICO_AGGIORNAMENTO_AUTOMATICO è attivo (spento di default, vedi config.json). Per ogni lega
-    whitelist, se sono passati almeno INTERVALLO_AGGIORNAMENTO_STORICO secondi dall'ultimo
-    aggiornamento (dato letto dallo storico su disco, quindi resta valido anche tra un riavvio e
-    l'altro del bot), scarica le partite nuove. STORICO_MAX_FIXTURES_PER_RUN è qui un limite
-    GLOBALE per l'intera esecuzione (su tutte le leghe insieme, non per singola lega): appena
-    raggiunto si interrompe subito, anche prima di controllare le leghe restanti, per evitare che
-    un riavvio con decine di leghe mai aggiornate consumi la quota API giornaliera in un colpo
-    solo. Le leghe non ancora controllate in questo giro verranno riprese al prossimo ciclo."""
+    """Fa partire il backfill agli orari di ORARI_AGGIORNAMENTO_STORICO, una volta per slot.
+
+    Chiamata ad ogni ciclo del loop principale, ma quasi sempre non fa niente: guarda l'orologio
+    e riparte solo quando si entra in uno slot mai eseguito.
+
+    Due scelte che contano:
+
+    - gira in un THREAD a parte. Il backfill puo' durare un'ora; eseguirlo qui bloccherebbe la
+      raccolta live per tutto quel tempo. Prima non era un problema perche' ogni esecuzione era
+      tetto a 30 partite, adesso lo sarebbe.
+    - lo slot viene segnato come fatto PRIMA di cominciare. Se il backfill si interrompe (quota
+      finita, errore), il ciclo successivo non lo rilancia da capo: quello che resta lo prende il
+      prossimo slot, oppure /aggiornastorico a mano. Rilanciare in loop un lavoro da mille
+      chiamate al primo intoppo sarebbe il modo piu' rapido di bruciare la quota di una giornata."""
     if not STORICO_AGGIORNAMENTO_AUTOMATICO:
         return
-    mappa = risolvi_leghe_whitelist()
-    if not mappa:
+    slot = slot_storico_da_eseguire()
+    if not slot or STATO_STORICO_AUTOMATICO.get("ultimo_slot") == slot:
         return
-    now = time.time()
-    processate_in_questo_giro = 0
-    for league_id, (nome, paese, season) in mappa.items():
-        if processate_in_questo_giro >= STORICO_MAX_FIXTURES_PER_RUN:
-            log(f"Storico minutaggi: raggiunto il limite di {STORICO_MAX_FIXTURES_PER_RUN} partite per questo ciclo, riprendo al prossimo")
-            break
-        if not season:
-            continue
-        lega_dati = STORICO_MINUTAGGI.get(str(league_id), {})
-        ultimo = lega_dati.get("ultimo_aggiornamento", 0)
-        if now - ultimo < INTERVALLO_AGGIORNAMENTO_STORICO:
-            continue
-        log(f"Storico minutaggi: aggiornamento automatico lega {nome} - {paese} ({league_id})")
-        processate_in_questo_giro += aggiorna_storico_minutaggi_lega(
-            league_id, season, max_fixtures=STORICO_MAX_FIXTURES_PER_RUN - processate_in_questo_giro
-        )
-        time.sleep(1)
+    if not _BACKFILL_STORICO_IN_CORSO.acquire(blocking=False):
+        log("Storico minutaggi: aggiornamento automatico gia' in corso, salto questo ciclo")
+        return
+    STATO_STORICO_AUTOMATICO["ultimo_slot"] = slot
+    salva_stato_storico_automatico(STATO_STORICO_AUTOMATICO)
+    threading.Thread(target=_esegui_backfill_automatico, args=(slot,), daemon=True).start()
 
 
 def squadra_in_storico_per_id(league_id, team_id):
