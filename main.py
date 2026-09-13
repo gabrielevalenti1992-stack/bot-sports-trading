@@ -2745,6 +2745,17 @@ def poll_callbacks():
                         esegui_comando_sicuro(chat_id, cmd_status_da_bottone,
                                               int(data.split(":", 1)[1]))
 
+                    # "stm:" = navigazione DENTRO il menu di /status (filtri e pagine), distinto
+                    # da "status:", che invece apre la scheda di una partita. Nessun testo nel
+                    # answerCallbackQuery: il menu si riscrive sul posto e la risposta si vede da
+                    # sola, un avviso in piu' sarebbe rumore a ogni tocco.
+                    elif data.startswith("stm:"):
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                            json={"callback_query_id": cq["id"]}, timeout=5)
+                        # msg_id: e' il messaggio su cui si e' cliccato, quello che va riscritto.
+                        esegui_comando_sicuro(chat_id, cmd_status_navigazione, data, msg_id)
+
                     elif data.startswith("dom:"):
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
@@ -4980,7 +4991,8 @@ def cmd_help(chat_id):
     help_text = (
         "Comandi disponibili:\n"
         "/help - Mostra questo messaggio\n"
-        "/status - Menu delle partite live: si sceglie col bottone, senza scrivere il nome\n"
+        "/status - Menu delle partite live: si sceglie col bottone, senza scrivere il nome "
+        "(oltre le 20 partite il menu si filtra per primo tempo / ripresa / finale)\n"
         "/status <squadra> - Info live su una partita, cercata per nome\n"
         "/momentum <squadra> - Grafico dell'andamento pressione durante la partita (solo partite monitorate)\n"
         "/intensita - Classifica le partite live per probabilità di essere \"calde\" ora\n"
@@ -6435,12 +6447,89 @@ def spiega_grafico_minutaggi_assente(league_id, home, squadra_casa, away, squadr
     return "Nessun grafico storico per questa partita."
 
 
-# Quante partite al massimo entrano nel menu a bottoni di /status. Non e' un limite di
-# Telegram (i bottoni si possono impilare a lungo) ma di leggibilita': con 20 righe il menu si
-# scorre gia' come un elenco, e sopra diventa peggio che scrivere il nome. Nei log del 06/09 le
-# partite seguite in contemporanea non hanno mai superato le 23, e nel pomeriggio del 04/09 sono
-# arrivate a 29: quando si sfora, il messaggio lo dice e si puo' sempre scrivere /status <nome>.
+# Quante partite entrano in UNA schermata del menu /status. Non e' un limite di Telegram (i
+# bottoni si possono impilare a lungo) ma di leggibilita': con 24 righe il menu si scorre gia'
+# come un elenco, e sopra diventa peggio che scrivere il nome.
+#
+# Fino a ieri era un TETTO: le partite oltre la ventiquattresima non erano nel menu e basta, e
+# per vederle bisognava indovinare il nome da scrivere - cioe' proprio la cosa che il menu
+# esiste per evitare. Nei log di sabato 12/09 (100 cicli consecutivi fra le 13:00 e le 16:29
+# UTC) le partite seguite erano in media 35,8 con un picco di 57: per il 61% del tempo il menu
+# ne nascondeva almeno una, e al picco ne nascondeva 33. Delle 8 partite oltre il 76' delle
+# 14:36 - quelle che servono di piu' - dal menu se ne potevano aprire solo 3.
+# Ora e' la dimensione di una PAGINA: nessuna partita resta fuori.
 MAX_BOTTONI_STATUS = 24
+
+# Sopra questo numero di partite il menu smette di essere un elenco piatto e aggiunge i filtri
+# per fascia. Sotto, non cambia niente rispetto a prima: un elenco solo, un tocco solo.
+SOGLIA_FASCE_STATUS = 20
+
+# Le tre fasce: in che momento della partita si vuole guardare. Rispondono a domande diverse
+# ("cosa e' appena cominciato", "cosa e' in mezzo", "cosa sta per finire") e la terza e' quella
+# che serve piu' spesso, perche' il 76-90' e' la fascia in cui si segna di piu'.
+FASCE_STATUS = ("primo", "ripresa", "finale")
+CONFINI_FASCIA_STATUS = {"primo": (0, 45), "ripresa": (46, 75), "finale": (76, 200)}
+TITOLI_FASCIA_STATUS = {"primo": "Primo tempo", "ripresa": "Ripresa", "finale": "Finale"}
+SIMBOLI_FASCIA_STATUS = {"primo": "🟢", "ripresa": "🟡", "finale": "🔴"}
+VISTE_STATUS = ("tutte",) + FASCE_STATUS
+
+# Navigare fra filtri e pagine rifa' il menu, e rifarlo significa sapere quali partite sono live:
+# senza questa finestra ogni tocco costerebbe una chiamata API, e sfogliare tre pagine ne
+# costerebbe tre. Venti secondi coprono una raffica di tocchi ma non un menu riaperto piu' tardi,
+# che deve essere fresco - il ciclo principale intanto gira ogni paio di minuti.
+FINESTRA_CACHE_MENU_STATUS = 20
+_CACHE_MENU_STATUS = {"quando": 0.0, "partite": []}
+
+
+def minuto_fixture(f):
+    """Il minuto di gioco, 0 quando l'API non lo pubblica (appena cominciata, o feed muto)."""
+    return ((f.get("fixture") or {}).get("status") or {}).get("elapsed") or 0
+
+
+def fascia_status(f):
+    """In quale delle tre fasce cade questa partita."""
+    minuto = minuto_fixture(f)
+    for nome in FASCE_STATUS:
+        basso, alto = CONFINI_FASCIA_STATUS[nome]
+        if basso <= minuto <= alto:
+            return nome
+    # Oltre il 120' (supplementari lunghi, o un minuto sballato del feed): resta "finale", che e'
+    # dove uno la cerca. Non si perde mai una partita per colpa di un minuto strano.
+    return "finale"
+
+
+def partite_per_fascia(partite):
+    gruppi = {nome: [] for nome in FASCE_STATUS}
+    for f in partite:
+        gruppi[fascia_status(f)].append(f)
+    return gruppi
+
+
+def ordina_partite_per_minuto(partite):
+    """Dalla piu' avanti alla piu' indietro, a parita' di minuto per campionato e nome.
+
+    E' l'ordine giusto quando le partite sono tante: chi sta per finire viene prima, ed e' anche
+    l'ordine che tiene ferme le pagine mentre le partite avanzano. Il secondo criterio non e' un
+    dettaglio: senza, due partite allo stesso minuto potrebbero scambiarsi di posto fra un tocco
+    e l'altro e far cambiare pagina a una partita mentre la si sta guardando."""
+    def chiave(f):
+        lega = f.get("league") or {}
+        squadre = f.get("teams") or {}
+        return (-minuto_fixture(f), (lega.get("country") or "").lower(),
+                (lega.get("name") or "").lower(),
+                ((squadre.get("home") or {}).get("name") or "").lower())
+    return sorted(partite, key=chiave)
+
+
+def pagina_di_partite(elenco, pagina):
+    """La fetta di elenco da mostrare, riportando dentro i limiti una pagina fuori scala.
+
+    Il numero di pagina arriva da un callback_data, cioe' da fuori: "pagina 999" o "pagina -3"
+    non devono far saltare niente, si torna semplicemente alla prima o all'ultima."""
+    totale_pagine = max(1, -(-len(elenco) // MAX_BOTTONI_STATUS))
+    pagina = max(0, min(pagina, totale_pagine - 1))
+    inizio = pagina * MAX_BOTTONI_STATUS
+    return elenco[inizio:inizio + MAX_BOTTONI_STATUS], totale_pagine, pagina
 
 
 def etichetta_partita_bottone(f):
@@ -6490,6 +6579,116 @@ def ordina_partite_per_menu(partite):
     return sorted(partite, key=chiave)
 
 
+def partite_menu_status(fresche=False):
+    """Le partite live seguite, con una finestra di riuso per la navigazione del menu.
+
+    Aprire /status costa una chiamata live. Senza riuso la costerebbe anche ogni tocco sui
+    filtri e sulle pagine, e sfogliare il menu diventerebbe il comando piu' caro del bot; con
+    la finestra, una raffica di tocchi ne costa una sola. Il comando /status vero chiede sempre
+    dati freschi (fresche=True): la finestra serve a chi sta gia' guardando lo stesso menu."""
+    adesso = time.time()
+    if (not fresche and _CACHE_MENU_STATUS["partite"]
+            and adesso - _CACHE_MENU_STATUS["quando"] < FINESTRA_CACHE_MENU_STATUS):
+        return _CACHE_MENU_STATUS["partite"]
+    partite = [f for f in get_partite_live() if partita_seguita(f)]
+    # Una chiamata fallita torna lista vuota: non si sovrascrive la finestra con il vuoto,
+    # altrimenti un tocco durante un errore di rete cancellerebbe il menu che si sta guardando.
+    if partite:
+        _CACHE_MENU_STATUS["partite"] = partite
+        _CACHE_MENU_STATUS["quando"] = adesso
+    return partite
+
+
+def righe_filtri_status(gruppi, vista):
+    """La riga dei filtri: Tutte piu' le fasce che hanno almeno una partita.
+
+    Sta SEMPRE in cima, anche quando un filtro e' gia' scelto: "ok, e adesso quelle che stanno
+    per finire" e' la seconda cosa che si chiede, e non deve costare un passaggio indietro. Le
+    fasce vuote non diventano bottoni: un filtro che porta a una lista vuota e' solo un inganno."""
+    def etichetta(testo, selezionato):
+        return ("\u2022 " + testo) if selezionato else testo
+
+    riga = [{"text": etichetta("Tutte", vista == "tutte"), "callback_data": "stm:tutte:0"}]
+    for nome in FASCE_STATUS:
+        if not gruppi[nome]:
+            continue
+        riga.append({
+            "text": etichetta(f"{SIMBOLI_FASCIA_STATUS[nome]} {len(gruppi[nome])}", vista == nome),
+            "callback_data": f"stm:{nome}:0",
+        })
+    return [riga] if len(riga) > 1 else []
+
+
+def costruisci_menu_status(partite, vista="tutte", pagina=0, intro=None):
+    """Il menu /status completo: testo e tastiera, senza mandare niente.
+
+    Separato dall'invio perche' lo stesso menu va sia mandato (comando /status) sia riscritto
+    sul posto (tocco su un filtro o su una pagina): costruirlo in due punti diversi vorrebbe
+    dire vederlo divergere alla prima modifica."""
+    if len(partite) <= SOGLIA_FASCE_STATUS:
+        # Poche partite: esattamente il menu di prima, senza filtri ne' pagine da imparare.
+        ordinate = ordina_partite_per_menu(partite)
+        testo = (intro + "\n\n") if intro else ""
+        testo += f"Scegli la partita ({len(ordinate)} live)"
+        return {"text": testo, "reply_markup": tastiera_partite_status(ordinate)}
+
+    if vista not in VISTE_STATUS:
+        # Arriva da un callback_data, cioe' da fuori: una vista che non esiste non e' un errore
+        # da propagare, si torna all'elenco intero.
+        vista = "tutte"
+    gruppi = partite_per_fascia(partite)
+    elenco = ordina_partite_per_minuto(partite if vista == "tutte" else gruppi[vista])
+    if not elenco:
+        # La fascia si e' svuotata fra la costruzione del menu e il tocco (le partite finiscono).
+        vista, elenco = "tutte", ordina_partite_per_minuto(partite)
+    fetta, totale_pagine, pagina = pagina_di_partite(elenco, pagina)
+
+    titolo = ("Tutte le partite live" if vista == "tutte"
+              else f"{SIMBOLI_FASCIA_STATUS[vista]} {TITOLI_FASCIA_STATUS[vista]}")
+    testo = (intro + "\n\n") if intro else ""
+    testo += f"{titolo} - {len(elenco)} di {len(partite)} live"
+    if totale_pagine > 1:
+        testo += f", pagina {pagina + 1} di {totale_pagine}"
+
+    righe = righe_filtri_status(gruppi, vista)
+    righe += [[{"text": etichetta_partita_bottone(f),
+                "callback_data": f"status:{(f.get('fixture') or {}).get('id')}"}] for f in fetta]
+    if totale_pagine > 1:
+        riga = []
+        if pagina > 0:
+            riga.append({"text": "\u25c0\ufe0f", "callback_data": f"stm:{vista}:{pagina - 1}"})
+        riga.append({"text": f"pagina {pagina + 1}/{totale_pagine}",
+                     "callback_data": f"stm:{vista}:{pagina}"})
+        if pagina < totale_pagine - 1:
+            riga.append({"text": "\u25b6\ufe0f", "callback_data": f"stm:{vista}:{pagina + 1}"})
+        righe.append(riga)
+    return {"text": testo, "reply_markup": {"inline_keyboard": righe}}
+
+
+def invia_o_aggiorna_menu_status(chat_id, payload, msg_id=None):
+    """Il menu resta UN messaggio solo: navigare fra filtri e pagine lo riscrive sul posto.
+
+    Mandarne uno nuovo a ogni tocco riempirebbe la chat di menu morti, e con i filtri i tocchi
+    diventano parecchi. Se l'edit fallisce (messaggio troppo vecchio, cancellato a mano) si
+    ripiega su un messaggio nuovo, che e' sempre meglio di un bottone che non fa niente.
+    "message is not modified" non e' un fallimento: vuol dire che a schermo c'e' gia' quello che
+    si voleva mostrare - e' il caso del bottone "pagina 2/3", che sta li' per dire dove si e'."""
+    corpo = {"chat_id": chat_id, "text": payload["text"],
+             "reply_markup": json.dumps(payload["reply_markup"])}
+    if msg_id is not None:
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText",
+                json=dict(corpo, message_id=msg_id), timeout=5)
+            if r.ok or "message is not modified" in (r.text or ""):
+                return
+            log(f"Menu /status: editMessageText fallito ({r.status_code}), mando un messaggio nuovo")
+        except requests.exceptions.RequestException as e:
+            log(f"Menu /status: editMessageText fallito ({e}), mando un messaggio nuovo")
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                  json=corpo, timeout=5)
+
+
 def cmd_status_menu(chat_id, intro=None):
     """Il menu delle partite live da cui scegliere quella da guardare con /status.
 
@@ -6499,9 +6698,13 @@ def cmd_status_menu(chat_id, intro=None):
     Il menu toglie il problema alla radice - si sceglie invece di scrivere - e resta comunque
     possibile scrivere /status <nome> per chi ha gia' in mente la partita.
 
+    Sopra le SOGLIA_FASCE_STATUS partite il menu porta in cima i filtri per fascia e si impagina,
+    perche' un elenco di 57 righe non e' un menu: prima le partite oltre la ventiquattresima non
+    c'erano proprio.
+
     Costa una sola chiamata live, la stessa di /live, e nessuna chiamata statistiche: quelle si
     spendono solo sulla partita che viene effettivamente scelta."""
-    partite = [f for f in get_partite_live() if partita_seguita(f)]
+    partite = partite_menu_status(fresche=True)
     if not partite:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -6510,15 +6713,30 @@ def cmd_status_menu(chat_id, intro=None):
                           "Puoi comunque cercarne una fuori whitelist con /status <nome squadra>."},
             timeout=5)
         return
-    ordinate = ordina_partite_per_menu(partite)
-    mostrate = ordinate[:MAX_BOTTONI_STATUS]
-    testo = intro + "\n\n" if intro else ""
-    testo += f"Scegli la partita ({len(mostrate)} live"
-    testo += f" su {len(ordinate)}, le altre con /status <nome>)" if len(ordinate) > len(mostrate) else ")"
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        json={"chat_id": chat_id, "text": testo,
-              "reply_markup": json.dumps(tastiera_partite_status(mostrate))}, timeout=5)
+    invia_o_aggiorna_menu_status(chat_id, costruisci_menu_status(partite, intro=intro))
+
+
+def cmd_status_navigazione(chat_id, dato, msg_id=None):
+    """Un tocco su un filtro o su una pagina: stesso menu, riscritto sul posto.
+
+    Il menu si RICALCOLA, non si ripesca da dove era: fra l'apertura e il tocco passano secondi
+    o minuti, e nel frattempo una partita puo' essere finita o entrata nella fascia successiva.
+    Meglio numeri freschi di una fotografia vecchia con dentro bottoni che non aprono piu'
+    niente."""
+    pezzi = dato.split(":")
+    vista = pezzi[1] if len(pezzi) > 1 else "tutte"
+    try:
+        pagina = int(pezzi[2]) if len(pezzi) > 2 else 0
+    except ValueError:
+        pagina = 0
+    partite = partite_menu_status()
+    if not partite:
+        invia_o_aggiorna_menu_status(chat_id, {
+            "text": "Nessuna partita live seguita in questo momento.",
+            "reply_markup": {"inline_keyboard": []}}, msg_id)
+        return
+    invia_o_aggiorna_menu_status(
+        chat_id, costruisci_menu_status(partite, vista=vista, pagina=pagina), msg_id)
 
 
 def cmd_status_da_bottone(chat_id, fixture_id):
