@@ -746,10 +746,12 @@ ANOMALIE_DIAGNOSTICA_NOTIFICATE = carica_anomalie_diagnostica_notificate()
 # Storico minutaggi (analisi pre-partita /analisi): ogni quanto (secondi) ricontrollare le leghe
 # whitelist per nuove partite terminate da processare, e quante partite nuove processare al
 # massimo (in totale, su tutte le leghe insieme) ad ogni esecuzione, per non sforare le quote API
-# in un colpo solo. L'aggiornamento automatico è spento di default: con ~40 leghe in whitelist,
-# ogni riavvio del bot altrimenti riproverebbe il backfill su tutte, consumando in fretta la quota
-# giornaliera di API-Football. Va acceso esplicitamente in config.json quando si è pronti, oppure
-# si usa /aggiornastorico a mano quando si decide di spendere quota.
+# in un colpo solo. L'aggiornamento automatico è acceso: era spento finché partiva a intervalli,
+# perché ogni riavvio del bot rilanciava il backfill su tutte le leghe e bruciava la quota
+# giornaliera di API-Football. Con gli slot fissi qui sotto non succede più: lo slot viene segnato
+# come fatto su disco prima di cominciare, quindi un riavvio nella stessa finestra non lo ripete.
+# Si può spegnere da config.json (storico_aggiornamento_automatico), e /aggiornastorico resta per
+# forzarlo a mano.
 # Quando il backfill parte da solo: due volte a settimana, a ore in cui non si gioca quasi mai.
 # (giorno della settimana con lunedi'=0, ora, minuto), sempre in ora italiana come il piano
 # giornata. Prima era un intervallo di 7 giorni per lega, che faceva partire l'aggiornamento a
@@ -763,7 +765,7 @@ ORARI_AGGIORNAMENTO_STORICO = ((0, 23, 15), (4, 1, 0))  # lunedi' 23:15, venerdi
 RECUPERO_MASSIMO_STORICO_ORE = 6
 
 STORICO_MAX_FIXTURES_PER_RUN = 30
-STORICO_AGGIORNAMENTO_AUTOMATICO = False
+STORICO_AGGIORNAMENTO_AUTOMATICO = True
 
 # Quante chiamate API al massimo puo' spendere UNA esecuzione di /aggiornastorico.
 #
